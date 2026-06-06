@@ -259,7 +259,7 @@ sections landed first — the rest below is unchecked.)
 - [ ] **Collapsible Properties sections** — Transform / Effects / Spatial / Masks / Matte / Text / Shape each its own `CollapsingHeader` so users hide what they don't need. *(done — open by default, per-layer state)*
 - [ ] **Dockable panels** — drag panels to re-dock / float / resize (egui `Tile`/`dock` or `egui_dock`); replace the hard-coded `SidePanel`/`TopBottomPanel` layout.
 - [ ] **Saveable workspaces** — named layouts (Animation / Effects / Paint-style) persisted to prefs; quick-switch; reset-to-default.
-- [ ] **Panel show/hide via a Window menu** — toggle each panel's visibility; remember per-workspace.
+- [x] **Panel show/hide via a Window menu** — **done**: a **Window** menu toggles each dockable panel's visibility (Layers / Properties / Timeline; the central Preview is always present), with *Show all* / *Hide all* shortcuts, backed by a pure unit-tested `PanelVisibility` (`app/workspace.rs`). Per-workspace persistence lands with saveable workspaces.
 - [ ] **Tabbed panel groups** — stack panels as tabs in one dock slot (Affinity "Studio" / AE panel groups); drag a tab out to float.
 - [ ] **Contextual options strip** — an Affinity-style toolbar row whose controls change with the active tool / selected layer kind.
 - [ ] **Timeline panel ergonomics pass** — resizable label/lane columns, horizontal time zoom + scroll, sticky ruler/header, collapse-to-mini, layer search/filter (overlaps Phase-8 Timeline UX but is a focused shell job).

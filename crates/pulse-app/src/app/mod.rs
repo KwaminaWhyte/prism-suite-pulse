@@ -10,6 +10,9 @@ mod layers;
 mod menu;
 mod panels;
 mod properties;
+mod workspace;
+
+pub(crate) use workspace::{Panel, PanelVisibility};
 
 /// Which editor occupies the bottom panel: the lane timeline or the value-curve
 /// graph editor (After Effects' two timeline modes).
@@ -34,6 +37,9 @@ pub struct PulseApp {
     graph: GraphState,
     /// Active on-canvas transform-gizmo drag (preview), if any.
     gizmo_drag: Option<GizmoDrag>,
+    /// Which dockable panels (Layers / Properties / Timeline) are shown — driven
+    /// by the **Window** menu. The central Preview viewport is always present.
+    panels: PanelVisibility,
     /// Last save/export status, surfaced briefly in the menu bar.
     status: Option<String>,
 }
@@ -69,6 +75,7 @@ impl PulseApp {
             mode: EditorMode::default(),
             graph: GraphState::default(),
             gizmo_drag: None,
+            panels: PanelVisibility::default(),
             status: None,
         }
     }
@@ -273,9 +280,18 @@ impl eframe::App for PulseApp {
         }
 
         self.menu_bar(root);
-        self.layers_panel(root);
-        self.properties_panel(root);
-        self.timeline_panel(root);
+        // Dockable panels are shown only when their Window-menu toggle is on; the
+        // central Preview viewport is always present (it fills whatever space the
+        // side/bottom panels leave).
+        if self.panels.is_shown(Panel::Layers) {
+            self.layers_panel(root);
+        }
+        if self.panels.is_shown(Panel::Properties) {
+            self.properties_panel(root);
+        }
+        if self.panels.is_shown(Panel::Timeline) {
+            self.timeline_panel(root);
+        }
         self.preview_panel(root);
     }
 }

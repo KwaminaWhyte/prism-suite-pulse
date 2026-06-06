@@ -1,7 +1,7 @@
 //! The top menu bar (file/layer/playback commands + status) and the comp's
 //! motion-blur settings popup.
 
-use super::PulseApp;
+use super::{Panel, PulseApp};
 use crate::comp::LayerKind;
 use crate::icons;
 
@@ -52,6 +52,9 @@ impl PulseApp {
                 ui.menu_button("Comp", |ui| {
                     self.motion_blur_menu(ui);
                 });
+                ui.menu_button("Window", |ui| {
+                    self.window_menu(ui);
+                });
                 ui.separator();
                 ui.label(egui::RichText::new("Pulse").strong());
                 ui.weak("motion · Prism");
@@ -95,5 +98,46 @@ impl PulseApp {
             ui.add(egui::Slider::new(&mut mb.samples, 1..=64).text("Samples"))
                 .on_hover_text("Sub-frame snapshots integrated across the shutter");
         });
+    }
+
+    /// The **Window** menu: a checkbox per dockable panel (Layers / Properties /
+    /// Timeline) to show or hide it, plus *Show all panels* (reset) and *Hide all
+    /// panels* (maximize the canvas). The central Preview viewport is always
+    /// present and so has no toggle. Mirrors After Effects' *Window* menu and
+    /// Affinity's *View ▸ Studio* show/hide.
+    fn window_menu(&mut self, ui: &mut egui::Ui) {
+        for panel in Panel::ALL {
+            let mut shown = self.panels.is_shown(panel);
+            if ui
+                .checkbox(&mut shown, panel.label())
+                .on_hover_text("Show or hide this panel")
+                .clicked()
+            {
+                self.panels.toggle(panel);
+            }
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                self.panels.shown_count() < Panel::ALL.len(),
+                egui::Button::new(format!("{}  Show all panels", icons::PANEL)),
+            )
+            .on_hover_text("Restore the default four-panel workspace")
+            .clicked()
+        {
+            self.panels.show_all();
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(
+                !self.panels.all_hidden(),
+                egui::Button::new(format!("{}  Hide all panels", icons::PANEL)),
+            )
+            .on_hover_text("Leave only the preview viewport")
+            .clicked()
+        {
+            self.panels.hide_all();
+            ui.close_menu();
+        }
     }
 }

@@ -70,6 +70,8 @@ pub const EXPORT: &str = ph::EXPORT;
 pub const MATTE: &str = ph::MASK_HAPPY;
 /// A layer with a non-Normal blend mode (two overlapping shapes).
 pub const BLEND: &str = ph::INTERSECT;
+/// A dockable panel / window (Window-menu toggles).
+pub const PANEL: &str = ph::SIDEBAR;
 
 // --- Keyframe interpolation -------------------------------------------------
 

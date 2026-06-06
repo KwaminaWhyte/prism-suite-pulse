@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Window-menu panel show/hide** (After-Effects *Window* / Affinity *View ▸
+  Studio* parity) — the shell's dockable panels can now be **hidden and shown**
+  from a new **Window** menu, so the user can reclaim screen for the panels they
+  need instead of living with the fixed four-panel layout.
+  - **`PanelVisibility`** (`app/workspace.rs`) — the pure state behind the menu:
+    which of the three dockable panels (**Layers** / **Properties** /
+    **Timeline**) are shown. The central **Preview** viewport is deliberately
+    *not* toggleable — it is the comp canvas and always fills whatever space the
+    side/bottom panels leave, so hiding it would be meaningless. Defaults to all
+    panels shown (the classic workspace), and the app gates each panel's render
+    on its flag this frame.
+  - **Window menu** — a checkbox per dockable panel (live with its current
+    state), plus **Show all panels** (restore the default workspace, disabled
+    when nothing is hidden) and **Hide all panels** (leave only the preview
+    viewport — a quick "maximize the canvas", disabled when already preview-only).
+  - **Pure logic** — `is_shown` / `set` / `toggle` / `shown_count` / `all_hidden`
+    / `show_all` / `hide_all`, plus a `Panel` enum (`ALL` in menu order, with
+    distinct labels) — all unit-tested: the all-shown default, single-panel
+    toggle isolation + round-trip, idempotent `set`, `hide_all` ⇒ `all_hidden`,
+    `show_all` restoring the default, and the `ALL`-list/label invariants.
+
 - **On-canvas transform gizmo** (After-Effects / Affinity selection-handle
   parity) — the selected layer can now be **moved, scaled, rotated, and
   re-anchored directly in the preview**, instead of only nudging the Properties
