@@ -2,7 +2,7 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{Comp, Prop, PulseLayer};
+use crate::comp::{Comp, Ease, Interp, Prop, PulseLayer};
 use crate::{icons, preview, theme, timeline};
 use egui::{Color32, Sense};
 
@@ -365,6 +365,22 @@ impl PulseApp {
                 layer.track_mut(prop).set_key(t, value);
             }
         });
+
+        // Interpolation selector — only meaningful when the playhead sits on a
+        // keyframe of this property. The mode applies to the segment leaving the
+        // key (After Effects' convention).
+        if let Some(current) = layer.track(prop).interp_at(t) {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.weak(current.label());
+                let chosen = interp_picker(ui, current);
+                if let Some(next) = chosen {
+                    if next != current {
+                        layer.track_mut(prop).set_interp(t, next);
+                    }
+                }
+            });
+        }
         ui.add_space(2.0);
     }
 
@@ -436,6 +452,43 @@ impl PulseApp {
             );
         });
     }
+}
+
+/// A compact row of interpolation presets. Highlights the active mode and
+/// returns the chosen [`Interp`] when the user picks one this frame.
+///
+/// `Ease` is treated as a single bucket (any custom handles count as "Ease");
+/// the discrete buttons set the standard AE presets — Easy Ease (F9), Ease In,
+/// Ease Out — without discarding a hand-tuned curve unless a button is clicked.
+fn interp_picker(ui: &mut egui::Ui, current: Interp) -> Option<Interp> {
+    let mut chosen = None;
+    let is = |want: Interp| std::mem::discriminant(&current) == std::mem::discriminant(&want);
+
+    // Linear / Hold are exact-match selections; the three ease presets all map
+    // to the `Ease` discriminant, so we mark the group active and let the value
+    // distinguish which preset is live.
+    let presets: [(&str, &str, Interp); 5] = [
+        (icons::INTERP_LINEAR, "Linear", Interp::Linear),
+        (icons::INTERP_HOLD, "Hold", Interp::Hold),
+        (icons::INTERP_EASE, "Easy Ease", Interp::Ease(Ease::EASY)),
+        ("›", "Ease Out", Interp::Ease(Ease::OUT)),
+        ("‹", "Ease In", Interp::Ease(Ease::IN)),
+    ];
+
+    for (glyph, tip, mode) in presets {
+        let active = match (current, mode) {
+            (Interp::Ease(a), Interp::Ease(b)) => a == b,
+            _ => is(mode),
+        };
+        if ui
+            .selectable_label(active, glyph)
+            .on_hover_text(tip)
+            .clicked()
+        {
+            chosen = Some(mode);
+        }
+    }
+    chosen
 }
 
 /// Convert HSV (h in degrees, s/v in 0..1) to RGB in 0..1.

@@ -2,7 +2,7 @@
 //! draggable playhead. Drawn into the bottom panel through egui's painter, with
 //! click/drag scrubbing on the ruler and the lane area.
 
-use crate::comp::{Comp, Prop};
+use crate::comp::{Comp, Interp, Prop};
 use crate::theme;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -122,12 +122,15 @@ pub fn show(ui: &mut Ui, comp: &Comp, time: f32, selected: Option<usize>) -> Tim
             Stroke::new(1.0, theme::stroke_subtle()),
         );
 
-        // Keyframe diamonds: union of all five tracks' key times.
+        // Keyframe markers: union of all five tracks' key times. The marker
+        // shape encodes the outgoing interpolation so easing reads at a glance —
+        // a square for Hold, a circle for Bézier ease, a diamond for Linear
+        // (matching After Effects' keyframe iconography).
         let cy = lane_top + LANE_H * 0.5;
         for prop in Prop::ALL {
             for k in &layer.track(prop).keys {
                 let x = time_to_x(k.t);
-                diamond(&painter, Pos2::new(x, cy), 4.0, theme::accent());
+                keyframe_marker(&painter, Pos2::new(x, cy), 4.0, theme::accent(), k.interp);
             }
         }
     }
@@ -174,18 +177,37 @@ pub fn show(ui: &mut Ui, comp: &Comp, time: f32, selected: Option<usize>) -> Tim
     out
 }
 
-/// Draw a filled diamond centered at `c` with the given half-size.
-fn diamond(painter: &egui::Painter, c: Pos2, r: f32, color: Color32) {
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            Pos2::new(c.x, c.y - r),
-            Pos2::new(c.x + r, c.y),
-            Pos2::new(c.x, c.y + r),
-            Pos2::new(c.x - r, c.y),
-        ],
-        color,
-        Stroke::new(1.0, Color32::from_rgb(0x10, 0x11, 0x13)),
-    ));
+/// Draw a keyframe marker whose shape reflects its outgoing interpolation:
+/// diamond = linear, square = hold, circle = Bézier ease.
+fn keyframe_marker(painter: &egui::Painter, c: Pos2, r: f32, color: Color32, interp: Interp) {
+    let outline = Stroke::new(1.0, Color32::from_rgb(0x10, 0x11, 0x13));
+    match interp {
+        Interp::Linear => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(c.x, c.y - r),
+                    Pos2::new(c.x + r, c.y),
+                    Pos2::new(c.x, c.y + r),
+                    Pos2::new(c.x - r, c.y),
+                ],
+                color,
+                outline,
+            ));
+        }
+        Interp::Hold => {
+            let h = r * 0.9;
+            painter.rect(
+                Rect::from_center_size(c, Vec2::splat(h * 2.0)),
+                0.0,
+                color,
+                outline,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Interp::Ease(_) => {
+            painter.circle(c, r, color, outline);
+        }
+    }
 }
 
 /// A solid egui color for a layer's swatch dot (alpha ignored).

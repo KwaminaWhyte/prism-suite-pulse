@@ -5,10 +5,12 @@
 //! animatable properties — x, y, scale, rotation, opacity — stored as
 //! [`Track`]s of [`Keyframe`]s.
 //!
-//! Sampling: a track linearly interpolates between bracketing keyframes; before
-//! the first key it holds the first value, after the last it holds the last
-//! value (constant extrapolation). An empty track returns the property's
-//! sensible default.
+//! Sampling: between two bracketing keyframes the value is interpolated
+//! according to the *outgoing* keyframe's [`Interp`] mode — linear, hold
+//! (stepped), or a temporal cubic-Bézier **ease** (After-Effects style, with
+//! editable in/out handles). Before the first key it holds the first value,
+//! after the last it holds the last value (constant extrapolation). An empty
+//! track returns the property's sensible default.
 //!
 //! Layer paint order is bottom-up: index 0 is drawn first (back), the last
 //! index on top. Colors are straight sRGB RGBA in `[f32; 4]` so they round-trip
@@ -16,11 +18,156 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A single animation keyframe: a property `value` at time `t` (seconds).
+/// Temporal interpolation between a keyframe and the next one.
+///
+/// The mode lives on the *outgoing* keyframe (the earlier of a pair), matching
+/// how After Effects attaches a segment's behaviour to the left key. An
+/// [`Interp::Ease`] carries a normalized cubic-Bézier easing curve whose two
+/// control points are `(out_x, out_y)` leaving this key and `(in_x, in_y)`
+/// arriving at the next — exactly the CSS `cubic-bezier(x1,y1,x2,y2)` shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Interp {
+    /// Straight line: constant velocity across the segment.
+    #[default]
+    Linear,
+    /// Stepped: hold the outgoing value until the next key (no interpolation).
+    Hold,
+    /// Cubic-Bézier temporal ease with editable handles.
+    Ease(Ease),
+}
+
+impl Interp {
+    /// Short label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Interp::Linear => "Linear",
+            Interp::Hold => "Hold",
+            Interp::Ease(_) => "Ease",
+        }
+    }
+}
+
+/// A normalized cubic-Bézier easing curve mapping a segment's elapsed-time
+/// fraction `x ∈ [0,1]` to an eased value fraction `y ∈ [0,1]`.
+///
+/// Control points are `P0 = (0,0)`, `P1 = (out_x, out_y)`, `P2 = (in_x, in_y)`,
+/// `P3 = (1,1)`. `out_*` is the handle leaving the earlier key; `in_*` is the
+/// handle arriving at the later key. `out_x` / `in_x` are clamped to `[0,1]`
+/// (CSS rules) so the curve is always a function of `x`; the `y` components may
+/// over/undershoot for anticipation/overshoot, matching AE.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ease {
+    pub out_x: f32,
+    pub out_y: f32,
+    pub in_x: f32,
+    pub in_y: f32,
+}
+
+impl Ease {
+    /// After Effects' "Easy Ease" default (F9): symmetric ease in and out with
+    /// ~33% influence — equivalent to CSS `cubic-bezier(0.33, 0, 0.67, 1)`.
+    pub const EASY: Ease = Ease {
+        out_x: 0.33,
+        out_y: 0.0,
+        in_x: 0.67,
+        in_y: 1.0,
+    };
+
+    /// "Ease Out" only: accelerates away from the key, arrives linearly.
+    pub const OUT: Ease = Ease {
+        out_x: 0.33,
+        out_y: 0.0,
+        in_x: 1.0,
+        in_y: 1.0,
+    };
+
+    /// "Ease In" only: leaves linearly, decelerates into the next key.
+    pub const IN: Ease = Ease {
+        out_x: 0.0,
+        out_y: 0.0,
+        in_x: 0.67,
+        in_y: 1.0,
+    };
+
+    /// Evaluate the eased `y` for an elapsed-time fraction `x ∈ [0,1]`.
+    ///
+    /// Solves `bezier_x(s) = x` for the curve parameter `s` (Newton's method
+    /// with a bisection fallback), then returns `bezier_y(s)`.
+    pub fn eval(self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        // Endpoints are exact; skip the solve.
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
+        let x1 = self.out_x.clamp(0.0, 1.0);
+        let x2 = self.in_x.clamp(0.0, 1.0);
+        let s = solve_bezier_x(x, x1, x2);
+        cubic_bezier(s, self.out_y, self.in_y)
+    }
+}
+
+/// A cubic Bézier with endpoints fixed at 0 and 1 and interior controls
+/// `p1, p2`, evaluated at parameter `s ∈ [0,1]`.
+fn cubic_bezier(s: f32, p1: f32, p2: f32) -> f32 {
+    let mt = 1.0 - s;
+    // 3·(1-s)²·s·p1 + 3·(1-s)·s²·p2 + s³  (the P0=0, P3=1 cubic).
+    3.0 * mt * mt * s * p1 + 3.0 * mt * s * s * p2 + s * s * s
+}
+
+/// Derivative w.r.t. `s` of [`cubic_bezier`].
+fn cubic_bezier_deriv(s: f32, p1: f32, p2: f32) -> f32 {
+    let mt = 1.0 - s;
+    3.0 * mt * mt * p1 + 6.0 * mt * s * (p2 - p1) + 3.0 * s * s * (1.0 - p2)
+}
+
+/// Invert the x-component of a normalized cubic Bézier: find `s` such that
+/// `cubic_bezier(s, x1, x2) == x`. Newton-Raphson seeded at `s = x`, with a
+/// bisection fallback when the derivative is too flat to make progress.
+fn solve_bezier_x(x: f32, x1: f32, x2: f32) -> f32 {
+    let mut s = x;
+    for _ in 0..8 {
+        let err = cubic_bezier(s, x1, x2) - x;
+        if err.abs() < 1e-6 {
+            return s;
+        }
+        let d = cubic_bezier_deriv(s, x1, x2);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        s -= err / d;
+    }
+    // Bisection fallback (guaranteed to converge: x(s) is monotonic in s
+    // because x1,x2 ∈ [0,1]).
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    s = x;
+    for _ in 0..32 {
+        let xs = cubic_bezier(s, x1, x2);
+        if (xs - x).abs() < 1e-6 {
+            break;
+        }
+        if xs < x {
+            lo = s;
+        } else {
+            hi = s;
+        }
+        s = 0.5 * (lo + hi);
+    }
+    s
+}
+
+/// A single animation keyframe: a property `value` at time `t` (seconds), plus
+/// the [`Interp`] mode driving the segment to the *next* keyframe.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Keyframe {
     pub t: f32,
     pub value: f32,
+    /// Interpolation for the segment leaving this key. Defaults to `Linear`
+    /// (and is `serde`-defaulted so pre-easing `.pulse` files still load).
+    #[serde(default)]
+    pub interp: Interp,
 }
 
 /// One animated property: a time-ordered list of keyframes.
@@ -34,8 +181,9 @@ pub struct Track {
 impl Track {
     /// Sample the track at time `t`, falling back to `default` when empty.
     ///
-    /// Linear interpolation between bracketing keys; constant hold outside the
-    /// [first, last] range.
+    /// Between bracketing keys the value follows the *outgoing* key's
+    /// [`Interp`] mode (linear / hold / Bézier ease); outside the
+    /// `[first, last]` range it holds the nearest key (constant extrapolation).
     pub fn sample(&self, t: f32, default: f32) -> f32 {
         match self.keys.as_slice() {
             [] => default,
@@ -57,16 +205,35 @@ impl Track {
                 if span <= f32::EPSILON {
                     return b.value;
                 }
-                let f = (t - a.t) / span;
-                a.value + (b.value - a.value) * f
+                let f = (t - a.t) / span; // elapsed fraction across the segment
+                let eased = match a.interp {
+                    Interp::Hold => return a.value,
+                    Interp::Linear => f,
+                    Interp::Ease(e) => e.eval(f),
+                };
+                a.value + (b.value - a.value) * eased
             }
         }
     }
 
+    /// Borrow the keyframe nearest in time to `t` (within `EPS`), if any.
+    pub fn key_at(&self, t: f32) -> Option<&Keyframe> {
+        const EPS: f32 = 1e-3;
+        self.keys.iter().find(|k| (k.t - t).abs() < EPS)
+    }
+
+    /// The interpolation mode of the key at (or just before) time `t`, used to
+    /// drive the per-keyframe interpolation UI.
+    pub fn interp_at(&self, t: f32) -> Option<Interp> {
+        self.key_at(t).map(|k| k.interp)
+    }
+
     /// Insert (or overwrite) a keyframe at time `t`, keeping `keys` sorted.
     ///
-    /// If an existing key sits within `EPS` of `t`, its value is replaced rather
-    /// than adding a near-duplicate.
+    /// If an existing key sits within `EPS` of `t`, its value is replaced
+    /// (its interpolation mode is preserved); otherwise a new key is added,
+    /// inheriting the interpolation of the key it follows so re-keying inside an
+    /// eased segment doesn't silently snap back to linear.
     pub fn set_key(&mut self, t: f32, value: f32) {
         const EPS: f32 = 1e-3;
         if let Some(k) = self.keys.iter_mut().find(|k| (k.t - t).abs() < EPS) {
@@ -74,7 +241,23 @@ impl Track {
             return;
         }
         let idx = self.keys.partition_point(|k| k.t < t);
-        self.keys.insert(idx, Keyframe { t, value });
+        let interp = idx
+            .checked_sub(1)
+            .map(|prev| self.keys[prev].interp)
+            .unwrap_or_default();
+        self.keys.insert(idx, Keyframe { t, value, interp });
+    }
+
+    /// Set the outgoing interpolation mode for the key nearest `t`, if any.
+    /// Returns `true` when a key was found and updated.
+    pub fn set_interp(&mut self, t: f32, interp: Interp) -> bool {
+        const EPS: f32 = 1e-3;
+        if let Some(k) = self.keys.iter_mut().find(|k| (k.t - t).abs() < EPS) {
+            k.interp = interp;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -221,10 +404,14 @@ impl Comp {
             fps: 30.0,
             layers: Vec::new(),
         };
-        // Seed one animated layer so the preview/timeline aren't empty on launch.
+        // Seed one animated layer so the preview/timeline aren't empty on
+        // launch. The X slide uses Easy Ease so the new interpolation is visible
+        // immediately (it eases in and out of the travel rather than gliding
+        // linearly), while rotation stays linear for contrast.
         let mut demo = PulseLayer::new("Solid 1", [0.27, 0.55, 0.85, 1.0]);
         demo.x.set_key(0.0, -300.0);
         demo.x.set_key(5.0, 300.0);
+        demo.x.set_interp(0.0, Interp::Ease(Ease::EASY));
         demo.rotation.set_key(0.0, 0.0);
         demo.rotation.set_key(5.0, 180.0);
         c.layers.push(demo);
@@ -275,5 +462,132 @@ mod tests {
         assert_eq!(t.keys.len(), 2);
         assert_eq!(t.keys[0].t, 0.0);
         assert_eq!(t.keys[1].value, 5.0);
+    }
+
+    // --- Easing math --------------------------------------------------------
+
+    #[test]
+    fn ease_endpoints_are_exact() {
+        for e in [Ease::EASY, Ease::IN, Ease::OUT] {
+            assert_eq!(e.eval(0.0), 0.0);
+            assert_eq!(e.eval(1.0), 1.0);
+            // Out-of-range x is clamped, not extrapolated.
+            assert_eq!(e.eval(-1.0), 0.0);
+            assert_eq!(e.eval(2.0), 1.0);
+        }
+    }
+
+    #[test]
+    fn linear_ease_is_identity() {
+        // cubic-bezier(1/3, 1/3, 2/3, 2/3) is the straight diagonal: y == x.
+        let lin = Ease {
+            out_x: 1.0 / 3.0,
+            out_y: 1.0 / 3.0,
+            in_x: 2.0 / 3.0,
+            in_y: 2.0 / 3.0,
+        };
+        for i in 0..=10 {
+            let x = i as f32 / 10.0;
+            assert!((lin.eval(x) - x).abs() < 1e-4, "x={x}");
+        }
+    }
+
+    #[test]
+    fn easy_ease_is_symmetric_and_slow_at_ends() {
+        let e = Ease::EASY;
+        // Symmetry about the midpoint: f(x) + f(1-x) == 1.
+        for i in 1..10 {
+            let x = i as f32 / 10.0;
+            assert!((e.eval(x) + e.eval(1.0 - x) - 1.0).abs() < 1e-3, "x={x}");
+        }
+        // Midpoint sits exactly at 0.5 by symmetry.
+        assert!((e.eval(0.5) - 0.5).abs() < 1e-4);
+        // Eased curve lags behind linear early (slow start) ...
+        assert!(e.eval(0.25) < 0.25);
+        // ... and leads it late (fast then slow finish is the mirror).
+        assert!(e.eval(0.75) > 0.75);
+    }
+
+    #[test]
+    fn ease_eval_inverts_x_correctly() {
+        // For any handle config, eval(x) must equal bezier_y(s) where
+        // bezier_x(s) == x. Check the x-solve round-trips.
+        let e = Ease {
+            out_x: 0.8,
+            out_y: 0.1,
+            in_x: 0.2,
+            in_y: 0.9,
+        };
+        for i in 0..=20 {
+            let x = i as f32 / 20.0;
+            let s = solve_bezier_x(x, e.out_x.clamp(0.0, 1.0), e.in_x.clamp(0.0, 1.0));
+            let reconstructed_x = cubic_bezier(s, e.out_x, e.in_x);
+            assert!((reconstructed_x - x).abs() < 1e-3, "x={x}");
+        }
+    }
+
+    #[test]
+    fn ease_is_monotonic_in_x_for_standard_handles() {
+        // With monotonic y-handles the eased value never decreases as x grows.
+        let e = Ease::EASY;
+        let mut prev = -1.0;
+        for i in 0..=50 {
+            let y = e.eval(i as f32 / 50.0);
+            assert!(y >= prev - 1e-4, "non-monotonic at i={i}");
+            prev = y;
+        }
+    }
+
+    #[test]
+    fn hold_interp_steps() {
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0);
+        t.set_key(2.0, 10.0);
+        t.set_interp(0.0, Interp::Hold);
+        assert_eq!(t.sample(0.0, 0.0), 0.0);
+        assert_eq!(t.sample(1.0, 0.0), 0.0); // holds outgoing value across segment
+        assert_eq!(t.sample(1.999, 0.0), 0.0);
+        assert_eq!(t.sample(2.0, 0.0), 10.0); // snaps at the next key
+    }
+
+    #[test]
+    fn eased_segment_matches_ease_curve() {
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0);
+        t.set_key(2.0, 100.0);
+        t.set_interp(0.0, Interp::Ease(Ease::EASY));
+        // At the temporal midpoint the eased value lands at the curve midpoint.
+        assert!((t.sample(1.0, 0.0) - 50.0).abs() < 0.5);
+        // Quarter point lags linear (which would give 25).
+        assert!(t.sample(0.5, 0.0) < 25.0);
+        // Endpoints unchanged.
+        assert_eq!(t.sample(0.0, 0.0), 0.0);
+        assert_eq!(t.sample(2.0, 0.0), 100.0);
+    }
+
+    #[test]
+    fn set_key_inherits_neighbour_interp() {
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0);
+        t.set_key(4.0, 100.0);
+        t.set_interp(0.0, Interp::Hold);
+        // Re-keying inside the held segment inherits Hold, not Linear.
+        t.set_key(2.0, 50.0);
+        assert_eq!(t.interp_at(2.0), Some(Interp::Hold));
+        // Overwriting an existing key keeps its own mode.
+        t.set_interp(2.0, Interp::Ease(Ease::EASY));
+        t.set_key(2.0, 60.0);
+        assert_eq!(t.interp_at(2.0), Some(Interp::Ease(Ease::EASY)));
+    }
+
+    #[test]
+    fn interp_serde_defaults_to_linear() {
+        // Pre-easing keyframes (no `interp` field) must deserialize as Linear.
+        let json = r#"{"keys":[{"t":0.0,"value":1.0},{"t":1.0,"value":2.0}]}"#;
+        let track: Track = serde_json::from_str(json).unwrap();
+        assert_eq!(track.keys.len(), 2);
+        assert_eq!(track.keys[0].interp, Interp::Linear);
+        // And it samples linearly.
+        assert!((track.sample(0.5, 0.0) - 1.5).abs() < 1e-5);
     }
 }

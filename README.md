@@ -20,8 +20,11 @@ update live.
   stack of `PulseLayer`s. Each layer is a solid color plus five animatable
   properties (`x`, `y`, `scale`, `rotation`, `opacity`), each stored as a
   `Track` of `Keyframe`s.
-  - Sampling: linear interpolation between bracketing keys; constant hold before
-    the first / after the last key; empty track → the property default
+  - Sampling: per-keyframe interpolation — **linear**, **hold** (stepped), or a
+    temporal cubic-**Bézier ease** (After-Effects style: Easy Ease / Ease In /
+    Ease Out, with a Newton-solved CSS-`cubic-bezier` curve) — applied to the
+    segment leaving each key; constant hold before the first / after the last
+    key; empty track → the property default
     (`x=0, y=0, scale=1, rotation=0, opacity=1`). Covered by unit tests.
 - **Preview** (central panel): the comp as a centered, aspect-fit frame; every
   visible layer drawn as a rotated/scaled solid quad at its interpolated `(x, y)`,
@@ -34,15 +37,19 @@ update live.
 - **Properties** (right panel): the selected layer's name + color, then each of
   the five properties with a value slider (edits re-key the value at the
   playhead) and an "add keyframe @ playhead" button, plus a per-property keyframe
-  count.
+  count. When the playhead sits on a keyframe, an **interpolation picker**
+  (Linear / Hold / Easy Ease / Ease In / Ease Out) sets that key's outgoing
+  easing. Timeline markers reflect the mode (diamond = linear, square = hold,
+  circle = ease).
 - **Layers** (left panel): add (random vivid color), select, delete, reorder
   (up/down), and per-layer visibility toggle.
 - **Menus**: File (New, Save `.pulse` → JSON via `serde` + `rfd` save dialog,
   Export stub), Layer (add / delete).
 
-**Out of scope for v0** (noted): undo/redo, easing/bezier keyframe handles
-(interpolation is linear), per-layer source media (layers are solids), masks,
-effects, real frame rendering/export, and multi-select.
+**Out of scope for v0** (noted): undo/redo, a full graph editor with draggable
+per-key Bézier handles (easing is preset-driven for now), per-layer source media
+(layers are solids), masks, effects, real frame rendering/export, and
+multi-select.
 
 ## Shared foundation
 

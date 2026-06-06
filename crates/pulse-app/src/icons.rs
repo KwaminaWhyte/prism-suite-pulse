@@ -64,3 +64,12 @@ pub const ADD_KEY: &str = ph::PLUS;
 /// Composition / film badge in the title.
 #[allow(dead_code)]
 pub const COMP: &str = ph::FILM_STRIP;
+
+// --- Keyframe interpolation -------------------------------------------------
+
+/// Linear interpolation (straight ramp).
+pub const INTERP_LINEAR: &str = ph::LINE_SEGMENT;
+/// Hold / stepped interpolation.
+pub const INTERP_HOLD: &str = ph::STAIRS;
+/// Bézier ease (smooth in/out).
+pub const INTERP_EASE: &str = ph::CHART_LINE;
