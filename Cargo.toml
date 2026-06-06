@@ -6,7 +6,7 @@ members = ["crates/pulse-app"]
 version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/prism-suite/pulse"
+repository = "https://github.com/KwaminaWhyte/prism-suite-pulse"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
