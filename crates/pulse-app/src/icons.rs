@@ -68,6 +68,8 @@ pub const COMP: &str = ph::FILM_STRIP;
 pub const EXPORT: &str = ph::EXPORT;
 /// A layer consumed as a track-matte source (used to define another's alpha).
 pub const MATTE: &str = ph::MASK_HAPPY;
+/// A layer with a non-Normal blend mode (two overlapping shapes).
+pub const BLEND: &str = ph::INTERSECT;
 
 // --- Keyframe interpolation -------------------------------------------------
 

@@ -4,8 +4,8 @@
 
 use super::PulseApp;
 use crate::comp::{
-    Ease, Effect, Fill, Interp, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
-    ShapePrimitive, SpatialEffect, Stroke, TextAlign,
+    blend_label, BlendMode, Ease, Effect, Fill, Interp, LayerBlend, LayerKind, Mask, MaskMode,
+    MatteMode, Prop, ShapeItem, ShapePrimitive, SpatialEffect, Stroke, TextAlign,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -73,6 +73,14 @@ impl PulseApp {
                                     c[3] = col.a() as f32 / 255.0;
                                 }
                             });
+                        }
+
+                        // Per-layer blend mode: how this layer composites over the
+                        // layers beneath it. Only meaningful for layers that draw
+                        // their own pixels (a null draws nothing; an adjustment
+                        // grades in place rather than compositing).
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            self.blend_row(ui, idx);
                         }
 
                         // Shape content (rect / ellipse / polygon / star + fill/stroke),
@@ -576,6 +584,37 @@ impl PulseApp {
                 Some(_) => current,
                 None => None,
             };
+        }
+    }
+
+    /// The **blend-mode** selector for layer `idx`: a combo of the suite's 18
+    /// shared blend modes (Normal … Luminosity), grouped separable then HSL.
+    /// Choosing a mode changes how the layer composites over everything beneath
+    /// it in the renderer (Normal is plain source-over).
+    fn blend_row(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let current = self.comp.layers[idx].blend_mode();
+        let mut chosen: Option<BlendMode> = None;
+        ui.horizontal(|ui| {
+            ui.label("Blend");
+            egui::ComboBox::from_id_salt(("blend", idx))
+                .selected_text(blend_label(current))
+                .show_ui(ui, |ui| {
+                    for (i, &mode) in BlendMode::ALL.iter().enumerate() {
+                        // A faint divider before the HSL group (the last 4 modes).
+                        if i == BlendMode::ALL.len() - 4 {
+                            ui.separator();
+                        }
+                        if ui
+                            .selectable_label(current == mode, blend_label(mode))
+                            .clicked()
+                        {
+                            chosen = Some(mode);
+                        }
+                    }
+                });
+        });
+        if let Some(mode) = chosen {
+            self.comp.layers[idx].blend = LayerBlend(mode);
         }
     }
 

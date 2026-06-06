@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-layer blend modes** (After-Effects blending-mode parity) — every layer
+  now carries a **blend mode** that decides how its pixels combine with the
+  composite beneath it, the same 18-mode set the suite already shares.
+  - **Shared mode set** — reuses `prism-core`'s [`BlendMode`] (Normal, Multiply,
+    Screen, Overlay, Darken, Lighten, Color Dodge, Color Burn, Hard Light, Soft
+    Light, Difference, Exclusion, Linear Dodge (Add), Linear Burn, and the four
+    non-separable HSL modes Hue / Saturation / Color / Luminosity), so a Pulse
+    layer's blend mode round-trips by the same stable numeric id Pigment writes.
+    A new [`LayerBlend`] wrapper field on every layer is `serde`-defaulted to
+    **Normal**, so pre-blend-mode `.pulse` files still load and render
+    byte-identically.
+  - **CPU blend math** (`comp/blend.rs`) — a self-contained, pure-Rust
+    `blend_over(mode, src, dst)` implementing the W3C blend+composite model on
+    the compositor's **straight, linear-light** RGBA: the separable per-channel
+    formulas plus `set_lum` / `set_sat` / `clip_color` for the HSL modes mirror
+    Pigment's `composite.wgsl` `blend_fn` (same cases, same `lum` weights) so the
+    suite shares one definition of each mode. Blending happens in **linear light**
+    (AE's linearized/32-bpc model) and is weighted by the backdrop's alpha, so it
+    only takes hold where there is something beneath; Normal reduces exactly to
+    source-over.
+  - **Compositor wiring** — the software renderer composites each finished layer
+    buffer onto the accumulator through the layer's blend mode; a solid with a
+    non-Normal mode now routes through the isolated-buffer path (alongside
+    masks / track mattes / spatial effects) so the blend is applied buffer-to-
+    backdrop. Blend modes compose with masks, mattes, spatial effects, and motion
+    blur, and apply to solid / shape / text layers (a null draws nothing; an
+    adjustment grades in place).
+  - **UI** — a **Blend** dropdown in the Properties panel (separable group, then
+    a divider, then the HSL group) for any layer that draws its own pixels, plus
+    a compact blend badge in the **Layers panel** that appears on any layer with
+    a non-Normal mode (hover shows the mode name). The launch demo's star uses
+    **Screen** so the feature reads out of the box.
+  - **Tests** — the blend math is unit-tested (Normal == source-over, Multiply
+    darkens, Screen lightens, Add clamps, Difference, the HSL hue/luma
+    constructions, and the "no backdrop / transparent source" identities); the
+    renderer's blend path is integration-tested (Normal byte-identical to the
+    default, Multiply/Screen shift the overlap, blend is a no-op over an empty
+    backdrop, and old projects load as Normal).
 - **Text layers** (After-Effects text-layer parity) — a new layer kind that
   draws a **string** with a self-contained, dependency-free **stroke vector
   font**, the second layer type whose pixels come from authored geometry rather

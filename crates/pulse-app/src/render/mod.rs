@@ -19,7 +19,7 @@
 //! The rasterizer is deliberately pure (no egui, no IO) so the transform and
 //! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
-use crate::comp::{Affine2, Comp, LayerKind};
+use crate::comp::{blend_over, Affine2, BlendMode, BlendRgba, Comp, LayerKind};
 use prism_core::color::linear_to_srgb;
 
 mod export;
@@ -88,6 +88,35 @@ fn over(src: Lin, dst: Lin) -> Lin {
         g: src.g * src.a + dst.g * ia,
         b: src.b * src.a + dst.b * ia,
         a: src.a + dst.a * ia,
+    }
+}
+
+/// Composite straight linear-light `src` onto straight `dst` using `mode`'s
+/// **blend mode**. A thin bridge over [`blend_over`] that maps the renderer's
+/// [`Lin`] accumulator pixel to the blend math's [`BlendRgba`] and back.
+/// [`BlendMode::Normal`] reduces exactly to [`over`], so an un-blended layer is
+/// bit-identical to the prior behavior.
+fn blend_lin(mode: BlendMode, src: Lin, dst: Lin) -> Lin {
+    let out = blend_over(
+        mode,
+        BlendRgba {
+            r: src.r,
+            g: src.g,
+            b: src.b,
+            a: src.a,
+        },
+        BlendRgba {
+            r: dst.r,
+            g: dst.g,
+            b: dst.b,
+            a: dst.a,
+        },
+    );
+    Lin {
+        r: out.r,
+        g: out.g,
+        b: out.b,
+        a: out.a,
     }
 }
 
@@ -201,11 +230,13 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
             }
             // A crisp solid draws its own colored quad (processed by its effect
             // stack) directly into the accumulator — or, when it has masks, a
-            // track matte, or spatial effects, into an isolated buffer whose alpha
-            // the masks/matte modulate and whose whole buffer the spatial passes
-            // filter before it is composited.
+            // track matte, spatial effects, or a non-Normal blend mode, into an
+            // isolated buffer whose alpha the masks/matte modulate and whose whole
+            // buffer the spatial passes filter before it is composited with the
+            // layer's blend mode.
             LayerKind::Solid => {
-                if masked || spatial || matte_src.is_some() {
+                let blended = layer.blend_mode() != BlendMode::Normal;
+                if masked || spatial || matte_src.is_some() || blended {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, t);
                     finish_layer(
@@ -276,8 +307,11 @@ fn finish_layer(
     if spatial {
         apply_spatial(layer_buf, geom, layer);
     }
+    // Composite the finished isolated buffer onto the accumulator using the
+    // layer's blend mode (Normal reduces exactly to source-over).
+    let mode = layer.blend_mode();
     for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
-        *dst = over(*src, *dst);
+        *dst = blend_lin(mode, *src, *dst);
     }
 }
 

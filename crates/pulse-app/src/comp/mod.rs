@@ -21,6 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
+mod blend;
 mod effect;
 mod keyframe;
 mod mask;
@@ -31,6 +32,7 @@ mod spatial;
 mod text;
 mod transform;
 
+pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
 pub use effect::{apply_effects, Effect, LayerKind};
 pub use keyframe::{Ease, Handle, Interp, Track};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
@@ -50,6 +52,14 @@ pub struct PulseLayer {
     /// `Solid` so pre-layer-kind `.pulse` files still load as solids.
     #[serde(default)]
     pub kind: LayerKind,
+    /// **Per-layer blend mode** (After Effects' layer blending-mode dropdown):
+    /// how this layer's pixels combine with the composite beneath it. Reuses the
+    /// suite's shared 18-mode [`BlendMode`] set (`prism-core`), evaluated by the
+    /// CPU compositor's [`blend_over`]. Wrapped in [`LayerBlend`] so a missing
+    /// field `serde`-defaults to [`BlendMode::Normal`] — pre-blend-mode `.pulse`
+    /// files still load and render byte-identically (Normal == source-over).
+    #[serde(default)]
+    pub blend: LayerBlend,
     /// **Per-layer motion-blur** switch (After Effects' layer MB toggle). A
     /// layer is motion-blurred only when both this and the comp's
     /// [`MotionBlur::enabled`] master switch are on. `serde`-defaulted to `false`
@@ -121,6 +131,7 @@ impl PulseLayer {
         Self {
             name: name.into(),
             kind: LayerKind::Solid,
+            blend: LayerBlend::default(),
             motion_blur: false,
             color,
             visible: true,
@@ -191,6 +202,12 @@ impl PulseLayer {
             rotation_deg: self.value(Prop::Rotation, t),
             opacity: self.value(Prop::Opacity, t).clamp(0.0, 1.0),
         }
+    }
+
+    /// This layer's resolved [`BlendMode`] (how it composites over the layers
+    /// beneath it). [`BlendMode::Normal`] means plain source-over.
+    pub fn blend_mode(&self) -> BlendMode {
+        self.blend.0
     }
 
     /// Whether this layer has at least one **active** mask (so the renderer must
@@ -311,6 +328,9 @@ impl Comp {
             opacity: 1.0,
         });
         star.shape.items.push(star_item);
+        // Screen blend so the star brightens (rather than covers) wherever it
+        // crosses the layers beneath it — the per-layer blend mode reads on launch.
+        star.blend = LayerBlend(BlendMode::Screen);
         star.x.set_key(0.0, -260.0);
         star.x.set_key(5.0, 260.0);
         star.x.set_interp(0.0, Interp::Ease(Ease::EASY));

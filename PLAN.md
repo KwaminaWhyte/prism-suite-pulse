@@ -224,7 +224,7 @@ authored once and stacks non-destructively per layer.
 | Comp / timeline / transport | comps, timeline, play/scrub | **Done** basic; precomp/markers/work-area **Planned** | 0,2,4 |
 | Properties / transform | anchor + 2D/3D position/scale/rot/opacity | **Partial** (5 linear tracks) → typed `Property<T>` **Planned** | 1 |
 | Keyframe interpolation / graph editor | linear/hold/Bézier/auto, graph editor | **Partial** (linear/hold/Bézier ease + value-curve graph editor w/ draggable keys & handles; auto-Bézier/speed-graph/roving **Planned**) | 1 |
-| Compositor / blend modes | GPU, 18+ modes, 32-bpc, linear | **Planned** (reuse `prism-core`) | 1 |
+| Compositor / blend modes | GPU, 18+ modes, 32-bpc, linear | **Partial** (CPU software compositor; **per-layer blend modes** — all 18, reusing `prism-core` — done; GPU/32-bpc **Planned**) | 1 |
 | Layer types | solid/text/shape/footage/adj/null/cam/light/precomp | **Partial** (solid, null, adjustment, **shape** [rect/ellipse/polygon/star + fill/stroke], **text** [built-in stroke font + fill/stroke/align/tracking/leading]) → footage/precomp/cam/light **Planned**; text shaping/animators **Planned** | 1,2,5 |
 | Masks / roto | Bézier masks, modes, feather, roto brush | **Partial** (Bézier masks: add/subtract/intersect/difference, feather, expansion, opacity, invert — done; animated shapes / on-canvas editing / roto brush **Planned**) | 2,7 |
 | Track mattes | alpha/luma | **Planned** | 2 |
@@ -271,7 +271,7 @@ sections landed first — the rest below is unchecked.)
 Important features still missing after skimming the plan against After Effects and Affinity
 (Photo/Designer). One-line note each; not implemented this turn.
 
-- [ ] **Per-layer blend mode picker** — the compositor has 18 blend modes (`prism-core`) but layers expose no blend-mode dropdown; add one in Properties + a Layers-panel column.
+- [x] **Per-layer blend mode picker** — **done**: every layer carries a `serde`-defaulted [`BlendMode`] (reusing `prism-core`'s shared 18-mode set); the CPU compositor blends each layer onto the accumulator via a pure-Rust `blend_over` (W3C blend+composite in linear light, mirroring Pigment's `composite.wgsl`). A **Blend** dropdown in Properties (separable + HSL groups) and a non-Normal blend badge in the Layers panel; unit- + integration-tested. *(Preview still approximates as flat source-over; on-canvas blend preview lands with the GPU compositor.)*
 - [ ] **Effect search / browser** — a searchable Effects & Presets panel (type to filter, categorized tree, drag-onto-layer) instead of today's flat "Add" menu.
 - [ ] **Onion-skinning** — ghost neighboring frames behind the playhead (frames before/after, count + opacity falloff) for hand-keyed timing — standard in motion tooling, absent from the plan.
 - [ ] **On-canvas transform gizmo** — drag/scale/rotate the selected layer directly in the preview (anchor handle, bounding box), not just via Properties sliders.

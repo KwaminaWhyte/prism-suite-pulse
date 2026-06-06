@@ -1,6 +1,7 @@
 //! The layer-stack panel: the add/select/reorder/delete layer list.
 
 use super::PulseApp;
+use crate::comp::{blend_label, BlendMode};
 use crate::icons;
 
 impl PulseApp {
@@ -50,6 +51,14 @@ impl PulseApp {
                                 if self.comp.is_matte_source(idx) {
                                     ui.weak(icons::MATTE)
                                         .on_hover_text("Used as a track matte for the layer below");
+                                }
+                                // A compact badge for any layer with a non-Normal
+                                // blend mode (the Layers-panel blend column), so the
+                                // stack's compositing reads at a glance.
+                                let mode = self.comp.layers[idx].blend_mode();
+                                if mode != BlendMode::Normal {
+                                    ui.weak(egui::RichText::new(icons::BLEND).small())
+                                        .on_hover_text(format!("Blend: {}", blend_label(mode)));
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
