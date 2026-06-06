@@ -18,7 +18,7 @@ linear-light premultiplied math, and float (Rgba16Float) working buffers transfe
 adjustment shaders (`prism-core::adjust`: levels/curves/hue-sat/exposure…) become color-correction
 *effects*. **Reuse, don't reimplement** — keep these crates time-agnostic; time is Pulse's layer on top.
 
-Sources: ../pigment/RESEARCH.md §2 (tile compositing, blend math, render graph) · w3.org/TR/compositing-1
+Sources: [Pigment RESEARCH.md §2](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md) (tile compositing, blend math, render graph) · w3.org/TR/compositing-1
 
 ## 2. Keyframes, interpolation, easing, graph editor
 
@@ -60,7 +60,7 @@ Sources: rhai.rs · github.com/rune-rs/rune · github.com/boa-dev/boa · helpx.a
   **Corner Pin / Displacement / Warp**, and a **particle** simulation. Keyers and depth/alpha-aware blurs
   are the quality-sensitive ones; noise/particles need seeded determinism for cache correctness.
 
-Sources: openfx.readthedocs.io · helpx.adobe.com/after-effects/using/effect-list.html · ../pigment/RESEARCH.md §8 (prism-fx, GPU filter passes)
+Sources: openfx.readthedocs.io · helpx.adobe.com/after-effects/using/effect-list.html · [Pigment RESEARCH.md §8](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md) (prism-fx, GPU filter passes)
 
 ## 5. Color management & HDR (OCIO / OpenEXR)
 
@@ -71,7 +71,7 @@ Sources: openfx.readthedocs.io · helpx.adobe.com/after-effects/using/effect-lis
   mature, the pure-Rust **`exr`** crate covers EXR f16/f32 sequences (multi-layer/deep), and a minimal OCIO
   config interpreter can drive the transforms. Work in 32-bpc where it matters; manage display vs render.
 
-Sources: aswf.io (Rust Working Group, OpenEXR Rust binding) · github.com/johannesvollmer/exrs · opencolorio.org · ../pigment/RESEARCH.md §3 (exr, color)
+Sources: aswf.io (Rust Working Group, OpenEXR Rust binding) · github.com/johannesvollmer/exrs · opencolorio.org · [Pigment RESEARCH.md §3](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md) (exr, color)
 
 ## 6. Media — FFmpeg engine, shared with Reel
 
@@ -100,7 +100,7 @@ Sources: crates.io/crates/ffmpeg-next · github.com/larksuite/rsmpeg · crates.i
 - **Text animators** = per-character layout (from `cosmic-text`) driven by **range selectors** (a window
   over characters) feeding transform/opacity/color offsets — animatable like any `Property`.
 
-Sources: ../contour/RESEARCH.md §1 (kurbo/lyon/i_overlay) · github.com/pykeio/ort · github.com/ZhengPeng7/BiRefNet · github.com/pop-os/cosmic-text · helpx.adobe.com (masks, shape layers, text animators)
+Sources: [Contour RESEARCH.md §1](https://github.com/KwaminaWhyte/prism-suite-contour/blob/main/RESEARCH.md) (kurbo/lyon/i_overlay) · github.com/pykeio/ort · github.com/ZhengPeng7/BiRefNet · github.com/pop-os/cosmic-text · helpx.adobe.com (masks, shape layers, text animators)
 
 ## 8. Motion blur, time, 3D
 
@@ -128,7 +128,7 @@ Sources: helpx.adobe.com/after-effects (motion blur, time remapping, 3D, what's-
   **relink-missing-footage**, and a background **render queue** with output modules. These are what make a
   compositor trustworthy, not any single effect.
 
-Sources: github.com/rayon-rs/rayon · helpx.adobe.com/after-effects (multi-frame rendering, RAM preview, render queue) · ../pigment/RESEARCH.md §2 (tile cache LRU / streaming)
+Sources: github.com/rayon-rs/rayon · helpx.adobe.com/after-effects (multi-frame rendering, RAM preview, render queue) · [Pigment RESEARCH.md §2](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md) (tile cache LRU / streaming)
 
 ## 10. Interop — Pulse is the Dynamic-Link producer
 
@@ -139,4 +139,4 @@ A precomp, a placed `.contour`, and a placed `.pigment` are the *same* mechanism
 evaluates a linked document at the requested time/resolution and caches its tiles. Build the node model
 suite-aware from the start; define the container with the suite, not unilaterally.
 
-Sources: ../SUITE.md (Dynamic Link, smart objects, prism-doc, shared color/assets)
+Sources: [SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (Dynamic Link, smart objects, prism-doc, shared color/assets)
