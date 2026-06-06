@@ -343,6 +343,7 @@ fn apply_drag(
 }
 
 /// Draw a property's value curve by densely sampling the track.
+#[allow(clippy::too_many_arguments)]
 fn draw_curve(
     painter: &egui::Painter,
     comp: &Comp,
