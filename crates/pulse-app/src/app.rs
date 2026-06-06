@@ -273,6 +273,9 @@ impl PulseApp {
                         }
                     });
                 });
+                ui.menu_button("Comp", |ui| {
+                    self.motion_blur_menu(ui);
+                });
                 ui.separator();
                 ui.label(egui::RichText::new("Pulse").strong());
                 ui.weak("motion · Prism");
@@ -288,6 +291,33 @@ impl PulseApp {
                     }
                 });
             });
+        });
+    }
+
+    /// The comp **Motion Blur** controls: a master enable, plus the shutter
+    /// angle / phase and sample count (After Effects' Advanced composition
+    /// settings). The shutter sliders are disabled while motion blur is off.
+    fn motion_blur_menu(&mut self, ui: &mut egui::Ui) {
+        let mb = &mut self.comp.motion_blur;
+        ui.checkbox(&mut mb.enabled, "Enable motion blur")
+            .on_hover_text("Master switch — layers also need their own motion-blur flag");
+        ui.add_enabled_ui(mb.enabled, |ui| {
+            ui.add(
+                egui::Slider::new(&mut mb.angle, 1.0..=720.0)
+                    .text("Shutter angle")
+                    .suffix("°"),
+            )
+            .on_hover_text("Fraction of a frame the shutter is open (180° = half)");
+            ui.add(
+                egui::Slider::new(&mut mb.phase, -360.0..=360.0)
+                    .text("Shutter phase")
+                    .suffix("°"),
+            )
+            .on_hover_text(
+                "Where the open window sits relative to the frame (−angle/2 centers it)",
+            );
+            ui.add(egui::Slider::new(&mut mb.samples, 1..=64).text("Samples"))
+                .on_hover_text("Sub-frame snapshots integrated across the shutter");
         });
     }
 
@@ -438,6 +468,19 @@ impl PulseApp {
 
                 // Track matte: borrow the layer above as this layer's alpha/luma.
                 self.matte_row(ui, idx);
+
+                // Per-layer motion-blur switch (only meaningful for layers that
+                // draw their own pixels — a null/adjustment has nothing to blur).
+                if self.comp.layers[idx].kind.draws_own_pixels() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.comp.layers[idx].motion_blur, "Motion blur")
+                            .on_hover_text("Blur this layer's motion across the comp shutter");
+                        if self.comp.layers[idx].motion_blur && !self.comp.motion_blur.enabled {
+                            ui.weak("(comp switch off)")
+                                .on_hover_text("Enable Comp ▸ Motion blur to see it");
+                        }
+                    });
+                }
 
                 ui.separator();
 

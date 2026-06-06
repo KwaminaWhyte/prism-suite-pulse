@@ -124,19 +124,29 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
         if comp.is_matte_source(i) {
             continue;
         }
-        // World matrix composes this layer under its parent chain; it maps
-        // layer-local points (origin at the layer's geometric center) into comp
-        // space (origin at the comp center, +y down).
-        let world = comp.world_matrix(i, t);
+        let blurred = comp.layer_motion_blurred(i);
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
-            // A solid draws its own colored quad, processed by its effect stack.
-            LayerKind::Solid => {
+            // A motion-blurred solid (any kind drawing pixels) is rendered into an
+            // isolated buffer as the average of sub-frame snapshots, then matte-
+            // clipped and composited over the accumulator.
+            LayerKind::Solid if blurred => {
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
                 if let Some(src_idx) = comp.matte_source(i) {
-                    // Track matte: render this layer into an isolated buffer,
-                    // modulate its alpha by the matte source, then composite the
-                    // matted result over the running accumulator.
+                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                }
+                for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
+                    *dst = over(*src, *dst);
+                }
+            }
+            // A crisp solid draws its own colored quad (processed by its effect
+            // stack) directly into the accumulator — or, with a track matte, into
+            // an isolated buffer whose alpha the matte source modulates first.
+            LayerKind::Solid => {
+                let world = comp.world_matrix(i, t);
+                if let Some(src_idx) = comp.matte_source(i) {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, t);
                     apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
@@ -150,6 +160,7 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
             // An adjustment re-processes the composite beneath it, within its
             // own transformed quad bounds.
             LayerKind::Adjustment => {
+                let world = comp.world_matrix(i, t);
                 apply_adjustment(&mut acc, &geom, world, layer, t);
             }
         }
@@ -210,6 +221,48 @@ impl Geom {
         let y0 = ((self.cy + min_y).floor() as i32).max(0);
         let y1 = ((self.cy + max_y).ceil() as i32).min(self.h as i32 - 1);
         (x0 <= x1 && y0 <= y1).then_some((x0, x1, y0, y1))
+    }
+}
+
+/// Render motion-blurred solid layer `idx` into an isolated `out` buffer
+/// (assumed clear) as the average of sub-frame snapshots across the shutter.
+///
+/// Each of the comp's [`MotionBlur::sample_times`] is rasterized into a scratch
+/// buffer via [`composite_layer`] (which yields the buffer's standard
+/// *premultiplied* color + coverage-alpha form), and the snapshots are averaged
+/// component-wise — the float-compositor motion-blur recipe. Averaging in
+/// premultiplied space is what keeps partly-covered edges from bleeding the quad
+/// color into the transparent samples. The result is left in the same
+/// premultiplied representation `composite_layer` produces, so the caller
+/// composites it over the accumulator identically to a crisp matte buffer.
+fn composite_motion_blur(out: &mut [Lin], geom: &Geom, comp: &Comp, idx: usize, t: f32) {
+    let Some(layer) = comp.layers.get(idx) else {
+        return;
+    };
+    let times = comp.motion_blur.sample_times(t, comp.fps);
+    let n = times.len().max(1);
+    let mut scratch = vec![Lin::CLEAR; out.len()];
+    for &st in &times {
+        for px in scratch.iter_mut() {
+            *px = Lin::CLEAR;
+        }
+        let world = comp.world_matrix(idx, st);
+        // `scratch` is cleared each sample, so each pixel is `composite_layer`'s
+        // premultiplied (color·coverage, coverage) output; accumulate it directly.
+        composite_layer(&mut scratch, geom, world, layer, st);
+        for (dst, src) in out.iter_mut().zip(scratch.iter()) {
+            dst.r += src.r;
+            dst.g += src.g;
+            dst.b += src.b;
+            dst.a += src.a;
+        }
+    }
+    let inv = 1.0 / n as f32;
+    for px in out.iter_mut() {
+        px.r *= inv;
+        px.g *= inv;
+        px.b *= inv;
+        px.a *= inv;
     }
 }
 
@@ -441,7 +494,7 @@ fn write_png(path: &Path, frame: &Frame) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::comp::{Interp, Prop};
+    use crate::comp::{Interp, MotionBlur, Prop};
 
     fn solid(color: [f32; 4]) -> Comp {
         let mut c = Comp {
@@ -449,6 +502,7 @@ mod tests {
             height: 64,
             duration: 1.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
         c.layers.push(PulseLayer::new("L", color));
@@ -471,6 +525,7 @@ mod tests {
             height: 8,
             duration: 1.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
         let f = render_frame(&c, 0.0);
@@ -683,6 +738,7 @@ mod tests {
             height: 64,
             duration: 1.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
         c.layers
@@ -760,6 +816,7 @@ mod tests {
             height: 16,
             duration: 1.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
         let mut adj = PulseLayer::of_kind(crate::comp::LayerKind::Adjustment, "adj", [1.0; 4]);
@@ -806,6 +863,7 @@ mod tests {
             height: 64,
             duration: 1.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
         let mut b = PulseLayer::new("base", base);
@@ -911,5 +969,101 @@ mod tests {
             assert!(p.exists(), "missing frame {}", p.display());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Motion blur --------------------------------------------------------
+
+    /// A 64x64 comp whose single solid slides fast left→right across the frame,
+    /// with comp motion blur on and the layer opted in (toggled by `layer_mb`).
+    fn moving_solid(layer_mb: bool) -> Comp {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].motion_blur = layer_mb;
+        c.layers[0].x.set_key(0.0, -24.0);
+        c.layers[0].x.set_key(1.0, 24.0);
+        c.motion_blur.enabled = true;
+        c.motion_blur.angle = 360.0; // a whole frame of blur for a clear effect
+        c.motion_blur.samples = 16;
+        c
+    }
+
+    #[test]
+    fn motion_blur_softens_the_moving_edge() {
+        // With motion blur the leading/trailing edge spans several partly-covered
+        // (0 < a < 255) pixels; without it the edge is a hard 0/255 step. Count
+        // the partial-alpha pixels along the center row at mid-travel.
+        let partial_count = |mb: bool| {
+            let c = moving_solid(mb);
+            let f = render_frame(&c, 0.5);
+            (0..f.width)
+                .filter(|&x| {
+                    let a = f.pixel(x, 32)[3];
+                    a > 0 && a < 255
+                })
+                .count()
+        };
+        let blurred = partial_count(true);
+        let crisp = partial_count(false);
+        assert!(
+            blurred > crisp,
+            "motion blur should add partial-coverage edge pixels: blurred={blurred} crisp={crisp}"
+        );
+    }
+
+    #[test]
+    fn motion_blur_preserves_color_no_bleed() {
+        // A fully-covered pixel near the center of the swept band keeps the
+        // layer's pure-white color (premultiplied averaging must not bleed it
+        // toward black through the transparent samples).
+        let c = moving_solid(true);
+        let f = render_frame(&c, 0.5);
+        // The layer center at t=0.5 sits at comp x=0 -> pixel 32; fully covered
+        // across the sweep, so still opaque white.
+        let [r, g, b, a] = f.pixel(32, 32);
+        assert_eq!(a, 255, "center stays fully covered through the sweep");
+        assert!(
+            r > 250 && g > 250 && b > 250,
+            "color preserved, got {r},{g},{b}"
+        );
+    }
+
+    #[test]
+    fn comp_master_switch_gates_motion_blur() {
+        // Layer opted in but comp master off -> identical to no motion blur.
+        let mut c = moving_solid(true);
+        c.motion_blur.enabled = false;
+        let off = render_frame(&c, 0.5);
+        let mut crisp = solid([1.0, 1.0, 1.0, 1.0]);
+        crisp.layers[0].x.set_key(0.0, -24.0);
+        crisp.layers[0].x.set_key(1.0, 24.0);
+        let baseline = render_frame(&crisp, 0.5);
+        assert_eq!(off.pixels, baseline.pixels);
+    }
+
+    #[test]
+    fn unblurred_layer_unaffected_by_comp_motion_blur() {
+        // Comp MB on but the layer didn't opt in -> crisp render unchanged.
+        let blurred_off = render_frame(&moving_solid(false), 0.5);
+        let mut crisp = solid([1.0, 1.0, 1.0, 1.0]);
+        crisp.layers[0].x.set_key(0.0, -24.0);
+        crisp.layers[0].x.set_key(1.0, 24.0);
+        let baseline = render_frame(&crisp, 0.5);
+        assert_eq!(blurred_off.pixels, baseline.pixels);
+    }
+
+    #[test]
+    fn motion_blur_respects_track_matte() {
+        // A motion-blurred base clipped by a small static alpha matte: the matte
+        // still bounds coverage (no blurred pixels leak past the matte edge far
+        // from the source quad).
+        let mut c = matte_pair([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], 1.0);
+        c.layers[0].matte = MatteMode::Alpha;
+        c.layers[0].motion_blur = true;
+        c.layers[0].x.set_key(0.0, -24.0);
+        c.layers[0].x.set_key(1.0, 24.0);
+        c.motion_blur.enabled = true;
+        let f = render_frame(&c, 0.5);
+        // A far corner is outside the small matte source -> matted out even with
+        // motion blur on.
+        assert_eq!(f.pixel(2, 2)[3], 0, "matte must still clip the blur");
     }
 }

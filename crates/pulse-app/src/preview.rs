@@ -97,6 +97,13 @@ pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected:
         // matte source's constant-color factor (the offline render does this
         // per-pixel; the preview's constant quads can only approximate it).
         let matte = matte_opacity(comp, i, t);
+        // Motion blur: draw faint ghost quads at the shutter's sub-frame sample
+        // times so the on-screen preview hints at the motion the offline render
+        // integrates per-pixel. Only for solids that opt in (and the comp's
+        // master switch is on).
+        if comp.layer_motion_blurred(i) && layer.kind == LayerKind::Solid {
+            paint_motion_blur_ghosts(painter, comp, i, t, center, scale, matte);
+        }
         paint_layer(
             painter,
             layer,
@@ -222,5 +229,61 @@ fn paint_layer(
             outline,
             Stroke::new(1.5, theme::accent()),
         ));
+    }
+}
+
+/// Paint faint **motion-blur ghost** quads for solid layer `i`: one reduced-
+/// opacity copy of the layer at each shutter sub-frame sample time, so the
+/// preview hints at the swept motion the offline renderer integrates per-pixel.
+///
+/// Capped to a handful of evenly-chosen samples (the real render uses the comp's
+/// full count) and each drawn at `1/count` of the layer's opacity, so the stack
+/// of ghosts roughly sums to one solid's worth of coverage — a cheap, legible
+/// approximation, not the true integral.
+fn paint_motion_blur_ghosts(
+    painter: &Painter,
+    comp: &Comp,
+    i: usize,
+    t: f32,
+    center: Pos2,
+    scale: f32,
+    matte: f32,
+) {
+    let layer = &comp.layers[i];
+    let times = comp.motion_blur.sample_times(t, comp.fps);
+    if times.len() <= 1 {
+        return;
+    }
+    // Show at most ~8 ghosts regardless of the render sample count.
+    const MAX_GHOSTS: usize = 8;
+    let step = times.len().div_ceil(MAX_GHOSTS).max(1);
+    let ghosts: Vec<f32> = times.iter().copied().step_by(step).collect();
+    let count = ghosts.len().max(1) as f32;
+
+    let half_w = comp.width as f32 * 0.22;
+    let half_h = comp.height as f32 * 0.22;
+    let local = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
+    ];
+    let base = effected_color(layer);
+
+    for st in ghosts {
+        let world = comp.world_matrix(i, st);
+        let opacity = layer.transform(st).opacity * matte.clamp(0.0, 1.0) / count;
+        if opacity <= 0.0 {
+            continue;
+        }
+        let corners: Vec<Pos2> = local
+            .iter()
+            .map(|&(lx, ly)| {
+                let (wx, wy) = world.apply(lx, ly);
+                center + Vec2::new(wx * scale, wy * scale)
+            })
+            .collect();
+        let fill = to_color32(base, opacity);
+        painter.add(egui::Shape::convex_polygon(corners, fill, Stroke::NONE));
     }
 }

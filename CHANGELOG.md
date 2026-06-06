@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Motion blur** (After-Effects shutter parity) — fast-moving layers can now be
+  rendered with a cinematic shutter instead of a crisp per-frame snapshot, the
+  Phase-4 motion feature.
+  - **`MotionBlur`** — a per-composition shutter model: a master `enabled`
+    switch, a **shutter angle** (degrees: 360° = a whole frame of blur, 180° =
+    half — the default), a **shutter phase** (degrees: where the open window sits
+    relative to the frame; `-angle/2` centers it), and a **sample** count (1–64,
+    default 16). The pure `MotionBlur::shutter_window` (the open `[open, close]`
+    time interval for a frame) and `MotionBlur::sample_times` (the evenly-spread,
+    midpoint-sampled, symmetric sub-frame times across that window) are
+    unit-tested, including angle→width, phase centering, count clamping, and the
+    single-sample-at-center degenerate case. `serde`-defaulted to **off** so
+    pre-motion-blur `.pulse` files still load crisp.
+  - **Per-layer switch** — each layer carries a `motion_blur` flag (After
+    Effects' layer MB toggle); a layer is blurred only when both it and the
+    comp's master switch are on (`Comp::layer_motion_blurred`, unit-tested).
+    `serde`-defaulted to `false`.
+  - The software compositor (`render.rs`) renders a motion-blurred solid as the
+    **average of its sub-frame snapshots**: each shutter sample rasterizes the
+    layer's resolved world transform at that instant into a scratch buffer, and
+    the snapshots are integrated component-wise in the compositor's premultiplied
+    linear-light space (so partly-covered edges average their coverage without
+    bleeding the quad color into the transparent samples) before being matte-
+    clipped and composited over the accumulator. Crisp (un-blurred) layers keep
+    the exact prior direct-composite path, so existing frames are byte-identical;
+    track mattes still clip the integrated coverage. New compositor tests cover
+    edge-softening vs. the crisp render, no-color-bleed, the master-switch and
+    per-layer gates (both must be on; output is byte-identical to crisp when
+    either is off), and matte-clipping under blur.
+  - The egui preview hints at the motion with faint **ghost quads** drawn at the
+    shutter sample times (capped to ~8, each at `1/n` opacity so they sum to
+    roughly one solid's coverage) behind the layer — a cheap, legible
+    approximation of the per-pixel integral the offline render does.
+  - UI: a new **Comp ▸ Motion blur** menu (master enable + angle / phase /
+    samples sliders, the shutter controls disabled while off) and a per-layer
+    **Motion blur** checkbox in the Properties panel (with a "(comp switch off)"
+    hint when the master is disabled). The launch demo enables comp motion blur
+    and opts its sliding/spinning solid in, so the shutter reads out of the box.
 - **Track mattes** (After-Effects compositing parity) — a layer can now borrow
   the layer **directly above it** in the stack to define its own per-pixel
   transparency, instead of every layer compositing in isolation.

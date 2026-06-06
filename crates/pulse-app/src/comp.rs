@@ -697,6 +697,85 @@ impl Prop {
     }
 }
 
+/// **Motion blur** settings for a composition (After Effects' comp shutter
+/// model).
+///
+/// When `enabled` (the comp's master motion-blur switch), every layer that has
+/// its own per-layer motion-blur flag set is rendered by integrating
+/// `samples` sub-frame snapshots of its transform across the time the virtual
+/// shutter is open. The open window is a fraction of the frame interval set by
+/// `angle` (degrees: 360° = the whole frame, 180° = half — the cinematic
+/// default), positioned by `phase` (degrees, relative to the frame): the
+/// shutter opens at `phase/360` of a frame before the frame time and stays open
+/// for `angle/360` of a frame. Accumulating the snapshots in linear light is the
+/// float-compositor motion-blur recipe.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MotionBlur {
+    /// Comp-level master switch. With it off, no layer is motion-blurred.
+    pub enabled: bool,
+    /// Shutter angle in degrees: the fraction of a frame the shutter is open
+    /// (`angle/360`). 360° blurs across a whole frame; 180° (the default) across
+    /// half. Clamped to `(0, 720]` when sampled.
+    pub angle: f32,
+    /// Shutter phase in degrees: where the open window sits relative to the
+    /// frame time (`phase/360` of a frame). The After-Effects default `0` opens
+    /// the shutter slightly before the frame and closes after; `-angle/2`
+    /// centers it on the frame time.
+    pub phase: f32,
+    /// Number of sub-frame samples integrated across the shutter. More samples =
+    /// smoother blur at higher cost. Clamped to `[1, 64]` when sampled.
+    pub samples: u32,
+}
+
+impl Default for MotionBlur {
+    fn default() -> Self {
+        // After Effects' defaults: a 180° shutter at phase 0, sampled enough to
+        // look smooth offline. Disabled by default so a fresh comp renders crisp
+        // until the user opts in.
+        MotionBlur {
+            enabled: false,
+            angle: 180.0,
+            phase: 0.0,
+            samples: 16,
+        }
+    }
+}
+
+impl MotionBlur {
+    /// The shutter-open time window `[open, close]` (seconds) for a frame
+    /// presented at `t`, given the comp's `fps`. The window width is
+    /// `(angle/360)` of a frame; it is shifted by `(phase/360)` of a frame so
+    /// `phase = 0` opens it at `t` and `phase = -angle/2` centers it on `t`.
+    ///
+    /// `angle` is clamped to `(0, 720]` and `fps` floored at 1 so the window is
+    /// always a finite, non-empty interval.
+    pub fn shutter_window(self, t: f32, fps: f32) -> (f32, f32) {
+        let fps = fps.max(1.0);
+        let frame = 1.0 / fps;
+        let angle = self.angle.clamp(1e-3, 720.0);
+        let width = (angle / 360.0) * frame;
+        let offset = (self.phase / 360.0) * frame;
+        let open = t + offset;
+        (open, open + width)
+    }
+
+    /// The presentation times of each motion-blur sample for a frame at `t`:
+    /// `samples` points spread evenly across the shutter window, taken at the
+    /// *center* of each sub-interval (midpoint sampling, so the set is symmetric
+    /// and has no endpoint bias). `samples` is clamped to `[1, 64]`.
+    ///
+    /// A single sample lands at the window center (degrading gracefully to a
+    /// crisp snapshot at the shutter's midpoint).
+    pub fn sample_times(self, t: f32, fps: f32) -> Vec<f32> {
+        let n = self.samples.clamp(1, 64);
+        let (open, close) = self.shutter_window(t, fps);
+        let span = close - open;
+        (0..n)
+            .map(|i| open + span * ((i as f32 + 0.5) / n as f32))
+            .collect()
+    }
+}
+
 /// One animated layer: a solid color rect transformed by its tracks, optionally
 /// **parented** to another layer (whose transform it inherits).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -706,6 +785,12 @@ pub struct PulseLayer {
     /// `Solid` so pre-layer-kind `.pulse` files still load as solids.
     #[serde(default)]
     pub kind: LayerKind,
+    /// **Per-layer motion-blur** switch (After Effects' layer MB toggle). A
+    /// layer is motion-blurred only when both this and the comp's
+    /// [`MotionBlur::enabled`] master switch are on. `serde`-defaulted to `false`
+    /// so pre-motion-blur `.pulse` files still load.
+    #[serde(default)]
+    pub motion_blur: bool,
     /// Solid swatch color (straight sRGB RGBA, 0..=1) for the v0 preview.
     pub color: [f32; 4],
     pub visible: bool,
@@ -747,6 +832,7 @@ impl PulseLayer {
         Self {
             name: name.into(),
             kind: LayerKind::Solid,
+            motion_blur: false,
             color,
             visible: true,
             effects: Vec::new(),
@@ -954,6 +1040,11 @@ pub struct Comp {
     pub height: u32,
     pub duration: f32,
     pub fps: f32,
+    /// Composition **motion-blur** settings (master switch + shutter
+    /// angle/phase + sample count). `serde`-defaulted so pre-motion-blur
+    /// `.pulse` files still load with motion blur off.
+    #[serde(default)]
+    pub motion_blur: MotionBlur,
     pub layers: Vec<PulseLayer>,
 }
 
@@ -965,8 +1056,12 @@ impl Comp {
             height: 720,
             duration: 5.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
+        // Enable comp motion blur so the demo's fast slide/spin reads with a
+        // cinematic shutter out of the box (the sliding solid opts in below).
+        c.motion_blur.enabled = true;
         // Seed an animated layer so the preview/timeline aren't empty on launch.
         // The X slide uses Easy Ease so the easing is visible immediately (it
         // eases in and out of the travel rather than gliding linearly), while
@@ -977,6 +1072,7 @@ impl Comp {
         demo.x.set_interp(0.0, Interp::Ease(Ease::EASY));
         demo.rotation.set_key(0.0, 0.0);
         demo.rotation.set_key(5.0, 180.0);
+        demo.motion_blur = true; // opt this layer into the comp's shutter
         c.layers.push(demo); // index 0
 
         // A smaller satellite parented to Solid 1: it rides the parent's slide
@@ -1035,6 +1131,13 @@ impl Comp {
             }
         }
         m
+    }
+
+    /// Whether layer `idx` is rendered with **motion blur**: the comp's master
+    /// [`MotionBlur::enabled`] switch is on *and* the layer has its own
+    /// per-layer `motion_blur` flag set. A missing index is `false`.
+    pub fn layer_motion_blurred(&self, idx: usize) -> bool {
+        self.motion_blur.enabled && self.layers.get(idx).is_some_and(|layer| layer.motion_blur)
     }
 
     /// The index of layer `idx`'s **matte source** — the layer directly above it
@@ -1452,6 +1555,7 @@ mod tests {
             height: 100,
             duration: 1.0,
             fps: 30.0,
+            motion_blur: MotionBlur::default(),
             layers: Vec::new(),
         };
         c.layers.push(PulseLayer::new("parent", [1.0; 4])); // 0
@@ -1769,5 +1873,134 @@ mod tests {
         assert_eq!(layer.parent, None);
         assert!(layer.anchor_x.keys.is_empty());
         assert!(layer.anchor_y.keys.is_empty());
+    }
+
+    // --- Motion blur --------------------------------------------------------
+
+    #[test]
+    fn motion_blur_defaults_match_ae() {
+        let mb = MotionBlur::default();
+        assert!(!mb.enabled); // off until opted in
+        assert_eq!(mb.angle, 180.0); // cinematic half-frame shutter
+        assert_eq!(mb.phase, 0.0);
+        assert_eq!(mb.samples, 16);
+    }
+
+    #[test]
+    fn shutter_window_width_tracks_angle() {
+        let fps = 25.0; // 1 frame = 0.04 s
+                        // 360° opens the shutter for a whole frame; 180° for half.
+        let full = MotionBlur {
+            angle: 360.0,
+            ..Default::default()
+        };
+        let (o, c) = full.shutter_window(1.0, fps);
+        assert!((o - 1.0).abs() < 1e-6); // phase 0 opens at t
+        assert!((c - o - 0.04).abs() < 1e-6); // width == one frame
+
+        let half = MotionBlur {
+            angle: 180.0,
+            ..Default::default()
+        };
+        let (o, c) = half.shutter_window(1.0, fps);
+        assert!((c - o - 0.02).abs() < 1e-6); // width == half a frame
+    }
+
+    #[test]
+    fn shutter_phase_shifts_window() {
+        let fps = 50.0; // 1 frame = 0.02 s
+                        // phase = -angle/2 centers the window on the frame time.
+        let mb = MotionBlur {
+            angle: 180.0,
+            phase: -90.0,
+            ..Default::default()
+        };
+        let (o, c) = mb.shutter_window(2.0, fps);
+        let mid = 0.5 * (o + c);
+        assert!((mid - 2.0).abs() < 1e-6, "window not centered: mid={mid}");
+    }
+
+    #[test]
+    fn sample_times_span_window_and_count() {
+        let fps = 30.0;
+        let mb = MotionBlur {
+            angle: 360.0,
+            samples: 8,
+            ..Default::default()
+        };
+        let times = mb.sample_times(0.5, fps);
+        assert_eq!(times.len(), 8);
+        let (open, close) = mb.shutter_window(0.5, fps);
+        // Every sample lands strictly inside the open window, ascending.
+        for w in times.windows(2) {
+            assert!(w[0] < w[1]);
+        }
+        assert!(*times.first().unwrap() > open);
+        assert!(*times.last().unwrap() < close);
+        // Midpoint sampling is symmetric about the window center.
+        let mid = 0.5 * (open + close);
+        let first_off = mid - times.first().unwrap();
+        let last_off = times.last().unwrap() - mid;
+        assert!((first_off - last_off).abs() < 1e-5);
+    }
+
+    #[test]
+    fn single_sample_lands_at_window_center() {
+        let mb = MotionBlur {
+            samples: 1,
+            angle: 200.0,
+            phase: 30.0,
+            ..Default::default()
+        };
+        let times = mb.sample_times(1.0, 24.0);
+        assert_eq!(times.len(), 1);
+        let (open, close) = mb.shutter_window(1.0, 24.0);
+        assert!((times[0] - 0.5 * (open + close)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sample_times_clamp_count_into_range() {
+        // 0 samples degrades to 1; absurd counts clamp to 64.
+        let zero = MotionBlur {
+            samples: 0,
+            ..Default::default()
+        };
+        assert_eq!(zero.sample_times(0.0, 30.0).len(), 1);
+        let huge = MotionBlur {
+            samples: 9999,
+            ..Default::default()
+        };
+        assert_eq!(huge.sample_times(0.0, 30.0).len(), 64);
+    }
+
+    #[test]
+    fn layer_motion_blurred_needs_both_switches() {
+        let mut c = parented_comp();
+        c.layers[0].motion_blur = true;
+        // Comp master off -> no layer is blurred even if its flag is on.
+        c.motion_blur.enabled = false;
+        assert!(!c.layer_motion_blurred(0));
+        // Master on, layer flag on -> blurred.
+        c.motion_blur.enabled = true;
+        assert!(c.layer_motion_blurred(0));
+        // Master on but the layer opted out -> not blurred.
+        assert!(!c.layer_motion_blurred(1));
+        // Out-of-range index is never blurred.
+        assert!(!c.layer_motion_blurred(99));
+    }
+
+    #[test]
+    fn motion_blur_serde_defaults_off() {
+        // A pre-motion-blur comp (no `motion_blur` field) loads with MB off and a
+        // layer without the flag loads un-blurred.
+        let json = r#"{"width":16,"height":16,"duration":1.0,"fps":30.0,
+            "layers":[{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+            "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+            "rotation":{"keys":[]},"opacity":{"keys":[]}}]}"#;
+        let comp: Comp = serde_json::from_str(json).unwrap();
+        assert!(!comp.motion_blur.enabled);
+        assert_eq!(comp.motion_blur.angle, 180.0);
+        assert!(!comp.layers[0].motion_blur);
+        assert!(!comp.layer_motion_blurred(0));
     }
 }
