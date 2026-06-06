@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 ///   [`shape`](super::PulseLayer::shape) field): rectangles / ellipses /
 ///   polygons / stars with fills and strokes, rasterized in the layer's local
 ///   frame. Matches AE's shape layer.
+/// - [`LayerKind::Text`] — draws a string with the built-in stroke vector font
+///   (its [`text`](super::PulseLayer::text) field): font size, tracking,
+///   leading, alignment, and a fill / stroke, rasterized in the layer's local
+///   frame. Matches AE's text layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerKind {
     #[default]
@@ -24,12 +28,14 @@ pub enum LayerKind {
     Null,
     Adjustment,
     Shape,
+    Text,
 }
 
 impl LayerKind {
     /// All kinds, in menu order.
-    pub const ALL: [LayerKind; 4] = [
+    pub const ALL: [LayerKind; 5] = [
         LayerKind::Solid,
+        LayerKind::Text,
         LayerKind::Shape,
         LayerKind::Null,
         LayerKind::Adjustment,
@@ -41,14 +47,15 @@ impl LayerKind {
             LayerKind::Null => "Null",
             LayerKind::Adjustment => "Adjustment",
             LayerKind::Shape => "Shape",
+            LayerKind::Text => "Text",
         }
     }
 
     /// Whether a layer of this kind draws its own pixels. A null draws nothing;
     /// an adjustment draws nothing of its own (it only re-processes the layers
-    /// beneath it). A solid and a shape both draw their own pixels.
+    /// beneath it). A solid, a shape, and text all draw their own pixels.
     pub fn draws_own_pixels(self) -> bool {
-        matches!(self, LayerKind::Solid | LayerKind::Shape)
+        matches!(self, LayerKind::Solid | LayerKind::Shape | LayerKind::Text)
     }
 }
 

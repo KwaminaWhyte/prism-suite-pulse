@@ -200,6 +200,12 @@ fn paint_layer(
             // stroke) transformed through the world matrix into screen space.
             paint_shape(painter, layer, center, scale, world, opacity);
         }
+        LayerKind::Text => {
+            // Text layers paint each glyph stroke as a thick line segment through
+            // the world matrix into screen space (a cheap legible twin of the
+            // offline pen-band rasterizer).
+            paint_text(painter, layer, center, scale, world, opacity);
+        }
         LayerKind::Adjustment => {
             // Adjustment layers don't paint pixels (the regrade is render-only);
             // show a dashed bounds outline so they stay visible & selectable.
@@ -331,6 +337,58 @@ fn paint_shape(
             fill,
             stroke: stroke.into(),
         }));
+    }
+}
+
+/// Paint a **text layer**'s glyph strokes: each laid-out segment drawn as a
+/// thick line through the `world` matrix into screen space, faded by `opacity`.
+///
+/// Mirrors the offline text rasterizer's geometry (the same stroke segments,
+/// pen width as the line thickness) so the preview matches an exported frame.
+/// The fill color is the pen body; if the layer has an outline stroke the body
+/// line is drawn slightly thicker in the stroke color underneath, so the glyph
+/// reads as filled-then-outlined.
+fn paint_text(
+    painter: &Painter,
+    layer: &PulseLayer,
+    center: Pos2,
+    scale: f32,
+    world: Affine2,
+    opacity: f32,
+) {
+    let text = &layer.text;
+    let segs = text.segments();
+    if segs.is_empty() {
+        return;
+    }
+    let pen_w = (text.pen_half() * 2.0 * scale).max(1.0);
+    let to_screen = |lx: f32, ly: f32| {
+        let (wx, wy) = world.apply(lx, ly);
+        center + Vec2::new(wx * scale, wy * scale)
+    };
+
+    // Outline stroke underlay (drawn first, thicker), so the body sits over it.
+    if let Some(s) = text.stroke.filter(|s| s.width > 0.0) {
+        let w = ((text.pen_half() * 2.0 + s.width) * scale).max(1.0);
+        let col = to_color32(
+            [s.color[0], s.color[1], s.color[2], 1.0],
+            opacity * s.opacity,
+        );
+        for &((ax, ay), (bx, by)) in &segs {
+            painter.line_segment([to_screen(ax, ay), to_screen(bx, by)], Stroke::new(w, col));
+        }
+    }
+    if let Some(f) = text.fill {
+        let col = to_color32(
+            [f.color[0], f.color[1], f.color[2], 1.0],
+            opacity * f.opacity,
+        );
+        for &((ax, ay), (bx, by)) in &segs {
+            painter.line_segment(
+                [to_screen(ax, ay), to_screen(bx, by)],
+                Stroke::new(pen_w, col),
+            );
+        }
     }
 }
 

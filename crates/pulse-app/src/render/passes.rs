@@ -68,6 +68,65 @@ pub(super) fn composite_shape(
     }
 }
 
+/// Rasterize a **text layer**'s glyph strokes into the (assumed-clear) isolated
+/// `out` buffer, in the compositor's premultiplied linear-light form.
+///
+/// The mirror of [`composite_shape`] for text: the string is laid out into
+/// layer-local stroke segments once, the pixel loop is bounded by the text's
+/// local bounds mapped through `world` to a comp-space AABB, and each candidate
+/// pixel is inverse-mapped back into local space where the text's straight-RGBA
+/// coverage (thickened pen band + optional outline) is sampled, then converted to
+/// linear and scaled by the layer's `opacity`. A singular `world` (zero scale) or
+/// empty text leaves the buffer clear.
+pub(super) fn composite_text(
+    out: &mut [Lin],
+    geom: &Geom,
+    world: Affine2,
+    layer: &PulseLayer,
+    t: f32,
+) {
+    let &Geom { w, cx, cy, .. } = geom;
+    let tf = layer.transform(t);
+    if tf.opacity <= 0.0 {
+        return;
+    }
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+    // Lay the string out into layer-local stroke segments once for sampling.
+    let segs = layer.text.segments();
+    if segs.is_empty() {
+        return;
+    }
+    let Some((lx0, ly0, lx1, ly1)) = layer.text.local_bounds() else {
+        return;
+    };
+    let Some((x0, x1, y0, y1)) = geom.aabb_of_local_box(world, lx0, ly0, lx1, ly1) else {
+        return;
+    };
+
+    for py in y0..=y1 {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in x0..=x1 {
+            let comp_x = px as f32 + 0.5 - cx;
+            let (llx, lly) = inv.apply(comp_x, comp_y);
+            let straight = layer.text.coverage_at(&segs, llx, lly);
+            let cov = straight[3] * tf.opacity;
+            if cov <= 0.0 {
+                continue;
+            }
+            let src = Lin {
+                r: srgb_to_linear(straight[0].clamp(0.0, 1.0)),
+                g: srgb_to_linear(straight[1].clamp(0.0, 1.0)),
+                b: srgb_to_linear(straight[2].clamp(0.0, 1.0)),
+                a: cov,
+            };
+            let idx = (py as u32 * w + px as u32) as usize;
+            out[idx] = over(src, out[idx]);
+        }
+    }
+}
+
 /// Render motion-blurred solid layer `idx` into an isolated `out` buffer
 /// (assumed clear) as the average of sub-frame snapshots across the shutter.
 ///
@@ -93,10 +152,12 @@ pub(super) fn composite_motion_blur(out: &mut [Lin], geom: &Geom, comp: &Comp, i
         let world = comp.world_matrix(idx, st);
         // `scratch` is cleared each sample, so each pixel is the snapshot's
         // premultiplied (color·coverage, coverage) output; accumulate it
-        // directly. A shape layer rasterizes its vector content; any other
-        // pixel-drawing layer (a solid) rasterizes its quad.
+        // directly. Shape and text layers rasterize their vector content; any
+        // other pixel-drawing layer (a solid) rasterizes its quad.
         if layer.has_shape() {
             composite_shape(&mut scratch, geom, world, layer, st);
+        } else if layer.has_text() {
+            composite_text(&mut scratch, geom, world, layer, st);
         } else {
             composite_layer(&mut scratch, geom, world, layer, st);
         }
@@ -282,6 +343,8 @@ pub(super) fn apply_track_matte(
     if let Some(src_layer) = comp.layers.get(src_idx) {
         if src_layer.has_shape() {
             composite_shape(&mut matte, geom, src_world, src_layer, t);
+        } else if src_layer.has_text() {
+            composite_text(&mut matte, geom, src_world, src_layer, t);
         } else {
             composite_layer(&mut matte, geom, src_world, src_layer, t);
         }

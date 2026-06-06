@@ -28,7 +28,7 @@ mod passes;
 pub use export::export_sequence;
 use passes::{
     apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_layer,
-    composite_motion_blur, composite_shape,
+    composite_motion_blur, composite_shape, composite_text,
 };
 
 /// The half-extent of a layer's base quad as a fraction of the comp size. Must
@@ -135,100 +135,98 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
         let masked = layer.has_active_masks();
         let spatial = layer.has_spatial_effects();
         let matte_src = comp.matte_source(i);
+        let world = comp.world_matrix(i, t);
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
-            // A motion-blurred solid (any kind drawing pixels) is rendered into an
-            // isolated buffer as the average of sub-frame snapshots, then mask-
-            // carved, matte-clipped, spatially filtered, and composited over the
-            // accumulator.
-            LayerKind::Solid if blurred => {
+            // A motion-blurred pixel-drawing layer (solid / shape / text) is
+            // rendered into an isolated buffer as the average of sub-frame
+            // snapshots, then mask-carved, matte-clipped, spatially filtered, and
+            // composited over the accumulator. `composite_motion_blur` dispatches
+            // to the right rasterizer per sub-frame.
+            LayerKind::Solid | LayerKind::Shape | LayerKind::Text if blurred => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                 composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
-                if masked {
-                    apply_masks(&mut layer_buf, &geom, comp.world_matrix(i, t), layer);
-                }
-                if let Some(src_idx) = matte_src {
-                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
-                }
-                if spatial {
-                    apply_spatial(&mut layer_buf, &geom, layer);
-                }
-                for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
-                    *dst = over(*src, *dst);
-                }
-            }
-            // A motion-blurred shape layer integrates its vector content across
-            // the shutter into an isolated buffer (the same recipe as a solid),
-            // then mask-carves / matte-clips / spatially filters before
-            // compositing.
-            LayerKind::Shape if blurred => {
-                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
-                if masked {
-                    apply_masks(&mut layer_buf, &geom, comp.world_matrix(i, t), layer);
-                }
-                if let Some(src_idx) = matte_src {
-                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
-                }
-                if spatial {
-                    apply_spatial(&mut layer_buf, &geom, layer);
-                }
-                for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
-                    *dst = over(*src, *dst);
-                }
+                finish_layer(
+                    &mut acc,
+                    &mut layer_buf,
+                    &geom,
+                    comp,
+                    world,
+                    layer,
+                    masked,
+                    spatial,
+                    matte_src,
+                    t,
+                );
             }
             // A crisp shape layer rasterizes its vector content into an isolated
-            // buffer (it draws arbitrary geometry, so it always routes through
-            // the isolated path), then mask / matte / spatial passes apply before
-            // it is composited over the accumulator.
+            // buffer (it draws arbitrary geometry, so it always routes through the
+            // isolated path), then mask / matte / spatial passes apply before it
+            // is composited over the accumulator.
             LayerKind::Shape => {
-                let world = comp.world_matrix(i, t);
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                 composite_shape(&mut layer_buf, &geom, world, layer, t);
-                if masked {
-                    apply_masks(&mut layer_buf, &geom, world, layer);
-                }
-                if let Some(src_idx) = matte_src {
-                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
-                }
-                if spatial {
-                    apply_spatial(&mut layer_buf, &geom, layer);
-                }
-                for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
-                    *dst = over(*src, *dst);
-                }
+                finish_layer(
+                    &mut acc,
+                    &mut layer_buf,
+                    &geom,
+                    comp,
+                    world,
+                    layer,
+                    masked,
+                    spatial,
+                    matte_src,
+                    t,
+                );
+            }
+            // A crisp text layer rasterizes its glyph strokes into an isolated
+            // buffer (vector geometry like a shape), then mask / matte / spatial
+            // passes apply before it is composited.
+            LayerKind::Text => {
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                composite_text(&mut layer_buf, &geom, world, layer, t);
+                finish_layer(
+                    &mut acc,
+                    &mut layer_buf,
+                    &geom,
+                    comp,
+                    world,
+                    layer,
+                    masked,
+                    spatial,
+                    matte_src,
+                    t,
+                );
             }
             // A crisp solid draws its own colored quad (processed by its effect
             // stack) directly into the accumulator — or, when it has masks, a
-            // track matte, or spatial effects, into an isolated buffer whose
-            // alpha the masks/matte modulate and whose whole buffer the spatial
-            // passes filter before it is composited.
+            // track matte, or spatial effects, into an isolated buffer whose alpha
+            // the masks/matte modulate and whose whole buffer the spatial passes
+            // filter before it is composited.
             LayerKind::Solid => {
-                let world = comp.world_matrix(i, t);
                 if masked || spatial || matte_src.is_some() {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, t);
-                    if masked {
-                        apply_masks(&mut layer_buf, &geom, world, layer);
-                    }
-                    if let Some(src_idx) = matte_src {
-                        apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
-                    }
-                    if spatial {
-                        apply_spatial(&mut layer_buf, &geom, layer);
-                    }
-                    for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
-                        *dst = over(*src, *dst);
-                    }
+                    finish_layer(
+                        &mut acc,
+                        &mut layer_buf,
+                        &geom,
+                        comp,
+                        world,
+                        layer,
+                        masked,
+                        spatial,
+                        matte_src,
+                        t,
+                    );
                 } else {
                     composite_layer(&mut acc, &geom, world, layer, t);
                 }
             }
-            // An adjustment re-processes the composite beneath it, within its
-            // own transformed quad bounds.
+            // An adjustment re-processes the composite beneath it, within its own
+            // transformed quad bounds.
             LayerKind::Adjustment => {
-                let world = comp.world_matrix(i, t);
                 apply_adjustment(&mut acc, &geom, world, layer, t);
             }
         }
@@ -248,6 +246,38 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
         width: w,
         height: h,
         pixels,
+    }
+}
+
+/// Finish an isolated layer buffer and composite it over the accumulator: carve
+/// by the layer's masks, clip by its track matte, run its spatial-effect stack,
+/// then source-over the result onto `acc`. Each pass is gated by the
+/// corresponding flag the caller already resolved, so an un-effected layer just
+/// composites. Shared by the solid / shape / text isolated-buffer paths.
+#[allow(clippy::too_many_arguments)]
+fn finish_layer(
+    acc: &mut [Lin],
+    layer_buf: &mut [Lin],
+    geom: &Geom,
+    comp: &Comp,
+    world: Affine2,
+    layer: &crate::comp::PulseLayer,
+    masked: bool,
+    spatial: bool,
+    matte_src: Option<usize>,
+    t: f32,
+) {
+    if masked {
+        apply_masks(layer_buf, geom, world, layer);
+    }
+    if let Some(src_idx) = matte_src {
+        apply_track_matte(layer_buf, geom, comp, src_idx, layer.matte, t);
+    }
+    if spatial {
+        apply_spatial(layer_buf, geom, layer);
+    }
+    for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
+        *dst = over(*src, *dst);
     }
 }
 

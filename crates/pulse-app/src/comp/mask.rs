@@ -357,7 +357,7 @@ pub fn dist_to_polygon(poly: &[(f32, f32)], px: f32, py: f32) -> f32 {
 }
 
 /// Euclidean distance from point `p` to the segment `a→b`.
-fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+pub fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     let (px, py) = p;
     let (ax, ay) = a;
     let (bx, by) = b;

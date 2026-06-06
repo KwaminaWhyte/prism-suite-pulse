@@ -28,6 +28,7 @@ mod matte;
 mod motion_blur;
 mod shape;
 mod spatial;
+mod text;
 mod transform;
 
 pub use effect::{apply_effects, Effect, LayerKind};
@@ -37,6 +38,7 @@ pub use matte::MatteMode;
 pub use motion_blur::{MotionBlur, Prop};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, SpatialEffect};
+pub use text::{TextAlign, TextLayer};
 pub use transform::{Affine2, Transform};
 
 /// One animated layer: a solid color rect transformed by its tracks, optionally
@@ -94,6 +96,11 @@ pub struct PulseLayer {
     /// files still load.
     #[serde(default)]
     pub shape: ShapeLayer,
+    /// **Text** content (a string drawn with the built-in stroke font), drawn
+    /// only when [`kind`](Self::kind) is [`LayerKind::Text`]. `serde`-defaulted
+    /// so pre-text `.pulse` files still load.
+    #[serde(default)]
+    pub text: TextLayer,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -123,6 +130,7 @@ impl PulseLayer {
             matte: MatteMode::None,
             masks: Vec::new(),
             shape: ShapeLayer::default(),
+            text: TextLayer::default(),
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -202,6 +210,11 @@ impl PulseLayer {
     /// item to draw.
     pub fn has_shape(&self) -> bool {
         self.kind == LayerKind::Shape && !self.shape.is_empty()
+    }
+
+    /// Whether this layer is a [`LayerKind::Text`] with text to draw.
+    pub fn has_text(&self) -> bool {
+        self.kind == LayerKind::Text && !self.text.is_empty()
     }
 }
 
@@ -306,6 +319,32 @@ impl Comp {
         star.rotation.set_key(5.0, 90.0);
         c.layers.push(star); // index 2
 
+        // A title text layer near the top, drawn with the built-in stroke font:
+        // it fades up over the first second (an opacity key) and carries a soft
+        // outline, so text layers read out of the box.
+        let mut title = PulseLayer::of_kind(LayerKind::Text, "Title", [1.0; 4]);
+        title.text = TextLayer {
+            text: "PULSE".to_string(),
+            size: 150.0,
+            tracking: 12.0,
+            leading: 0.0,
+            align: TextAlign::Center,
+            fill: Some(Fill {
+                color: [0.96, 0.97, 1.0],
+                opacity: 1.0,
+            }),
+            stroke: Some(Stroke {
+                color: [0.27, 0.55, 0.85],
+                width: 6.0,
+                opacity: 1.0,
+            }),
+        };
+        title.y.set_key(0.0, -230.0);
+        title.opacity.set_key(0.0, 0.0);
+        title.opacity.set_key(1.0, 1.0);
+        title.opacity.set_interp(0.0, Interp::Ease(Ease::EASY));
+        c.layers.push(title); // index 3
+
         // A full-frame adjustment layer on top: its effect stack regrades every
         // layer beneath it (here a punchy Levels contrast) without drawing any
         // pixels of its own — showcasing layer kinds + the effect stack on launch.
@@ -318,7 +357,7 @@ impl Comp {
             out_black: 0.0,
             out_white: 1.0,
         });
-        c.layers.push(grade); // index 3
+        c.layers.push(grade); // index 4
         c
     }
 }

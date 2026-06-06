@@ -89,11 +89,19 @@ impl PulseApp {
             LayerKind::Null => (format!("Null {n}"), [0.6, 0.6, 0.6, 1.0]),
             LayerKind::Adjustment => (format!("Adjustment {n}"), [1.0, 1.0, 1.0, 1.0]),
             LayerKind::Shape => (format!("Shape {n}"), self.next_color()),
+            LayerKind::Text => (format!("Text {n}"), self.next_color()),
         };
         let mut layer = PulseLayer::of_kind(kind, name, color);
         match kind {
             LayerKind::Adjustment => {
                 layer.scale.set_key(0.0, 3.0); // cover the whole comp
+            }
+            LayerKind::Text => {
+                // Tint the default text fill with the layer's color so a new text
+                // layer reads in its own swatch out of the box.
+                if let Some(fill) = layer.text.fill.as_mut() {
+                    fill.color = [color[0], color[1], color[2]];
+                }
             }
             LayerKind::Shape => {
                 // Seed a new shape layer with a filled rectangle in the layer's

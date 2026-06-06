@@ -5,7 +5,7 @@
 use super::PulseApp;
 use crate::comp::{
     Ease, Effect, Fill, Interp, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
-    ShapePrimitive, SpatialEffect, Stroke,
+    ShapePrimitive, SpatialEffect, Stroke, TextAlign,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -72,6 +72,13 @@ impl PulseApp {
                 if self.comp.layers[idx].kind == LayerKind::Shape {
                     ui.separator();
                     self.shape_section(ui, idx);
+                }
+
+                // Text content (string + type settings + fill/stroke), shown
+                // only for text layers.
+                if self.comp.layers[idx].kind == LayerKind::Text {
+                    ui.separator();
+                    self.text_section(ui, idx);
                 }
 
                 // Parent pick-whip: a child inherits this layer's transform.
@@ -292,6 +299,91 @@ impl PulseApp {
             if other < items.len() {
                 items.swap(si, other);
             }
+        }
+    }
+
+    /// The text layer's content editor: a multi-line string, type settings
+    /// (size / tracking / leading / alignment), and a fill / stroke (reused from
+    /// the shape system). The text is drawn with the built-in stroke font.
+    fn text_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.heading("Text");
+        let text = &mut self.comp.layers[idx].text;
+
+        ui.add(
+            egui::TextEdit::multiline(&mut text.text)
+                .desired_rows(2)
+                .hint_text("Type text…")
+                .desired_width(f32::INFINITY),
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("Size");
+            ui.add(egui::Slider::new(&mut text.size, 8.0..=600.0).suffix(" px"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Tracking");
+            ui.add(egui::Slider::new(&mut text.tracking, -50.0..=200.0).suffix(" px"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Leading");
+            ui.add(
+                egui::Slider::new(&mut text.leading, 0.0..=800.0)
+                    .suffix(" px")
+                    .text("(0 = auto)"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Align");
+            egui::ComboBox::from_id_salt(("text_align", idx))
+                .selected_text(text.align.label())
+                .show_ui(ui, |ui| {
+                    for a in TextAlign::ALL {
+                        if ui.selectable_label(text.align == a, a.label()).clicked() {
+                            text.align = a;
+                        }
+                    }
+                });
+        });
+
+        // Fill toggle + color/opacity.
+        ui.horizontal(|ui| {
+            let mut on = text.fill.is_some();
+            if ui.checkbox(&mut on, "Fill").changed() {
+                text.fill = on.then(Fill::default);
+            }
+            if let Some(fill) = text.fill.as_mut() {
+                rgb_button(ui, (idx, 0, 2), &mut fill.color);
+            }
+        });
+        if let Some(fill) = text.fill.as_mut() {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Fill opacity");
+                ui.add(egui::Slider::new(&mut fill.opacity, 0.0..=1.0));
+            });
+        }
+
+        // Stroke toggle + color/width/opacity.
+        ui.horizontal(|ui| {
+            let mut on = text.stroke.is_some();
+            if ui.checkbox(&mut on, "Stroke").changed() {
+                text.stroke = on.then(Stroke::default);
+            }
+            if let Some(stroke) = text.stroke.as_mut() {
+                rgb_button(ui, (idx, 1, 2), &mut stroke.color);
+            }
+        });
+        if let Some(stroke) = text.stroke.as_mut() {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Stroke width");
+                ui.add(egui::Slider::new(&mut stroke.width, 0.0..=80.0).suffix(" px"));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Stroke opacity");
+                ui.add(egui::Slider::new(&mut stroke.opacity, 0.0..=1.0));
+            });
         }
     }
 

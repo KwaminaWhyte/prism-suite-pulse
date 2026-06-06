@@ -10,6 +10,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Text layers** (After-Effects text-layer parity) — a new layer kind that
+  draws a **string** with a self-contained, dependency-free **stroke vector
+  font**, the second layer type whose pixels come from authored geometry rather
+  than a swatch (after shape layers).
+  - **`LayerKind::Text`** — joins Solid / Shape / Null / Adjustment. A text layer
+    carries a [`TextLayer`] (a `serde`-defaulted `text` field on every layer, so
+    pre-text `.pulse` files still load) — a string plus type settings (**font
+    size**, **tracking**, **leading**, **alignment**) and an optional **fill** /
+    **stroke** (reused from the shape system). New text layers are added from
+    *Layer ▸ New* (seeded with the word "TEXT" in the layer's color), and the
+    kind is switchable per-layer in the Properties panel like any other.
+  - **Built-in stroke font** — every printable character (A–Z, 0–9, space, and
+    common punctuation `. , ! ? - _ : / + =`) maps to a small set of **polyline
+    strokes** authored once on a unit em grid; letters are uppercased and laid
+    out in a monospace cell, unknown printables fall back to a box, and
+    control/space characters draw nothing. There is **no font dependency** — the
+    font is intentionally simple so the feature is self-contained and
+    deterministic. Per-character animators and real OpenType/variable fonts are a
+    later step.
+  - **Layout + coverage** — `TextLayer::segments` lays the string out into
+    layer-local stroke segments (multi-line, vertically centered, per-line
+    left/center/right aligned, with each glyph ink centered in its advance cell);
+    `TextLayer::coverage_at` rasterizes a glyph as a **thickened pen band** around
+    the nearest stroke (the fill body), with an optional **outline stroke** band
+    straddling the body edge composited over it, antialiased over a ~1 px ramp via
+    the mask system's segment-distance geometry (`dist_to_segment`, now public).
+    `TextLayer::local_bounds` (pen/stroke-padded AABB) bounds the rasterizer. All
+    pure logic is unit-tested: layout centering/alignment/tracking/leading, the
+    space-advances-without-strokes case, unknown-char fallback, case-insensitive
+    glyphs, on-stroke vs far coverage, fill opacity, stroke-over-fill outline,
+    size-scaled bounds, and the serde round-trip.
+  - The software compositor (`render.rs`) rasterizes a text layer into an
+    **isolated, premultiplied linear-light** buffer (`composite_text`, the mirror
+    of `composite_shape`), then runs the same **masks**, **track matte**, and
+    **spatial-effect** passes a solid/shape does before compositing source-over —
+    so text composes with masks, mattes, blur/shadow/glow, and **motion blur**
+    (the shutter integrator dispatches to the text rasterizer per sub-frame, and a
+    text layer can serve as a track-matte source). The per-layer isolated-buffer
+    finish (mask → matte → spatial → over) was factored into a shared
+    `finish_layer` helper used by the solid / shape / text paths. The egui preview
+    paints each glyph stroke as a thick line through the layer's world matrix
+    (fill body, with the outline stroke drawn thicker underneath). New compositor
+    tests cover glyph coverage + fill color, the blank-text no-op, opacity, mask
+    composition, the stroke outline band, motion-blur footprint widening, a text
+    **luma matte** driving a solid, and the pre-text serde default.
+  - UI: a new **Text** section in the Properties panel (a multi-line text editor,
+    size / tracking / leading sliders, an alignment picker, and fill / stroke
+    toggles with color + opacity/width), shown for text layers. The launch demo
+    now ships a centered **PULSE** title text layer that fades up over the first
+    second with a blue outline, so text layers read out of the box.
 - **Shape layers** (After-Effects shape-layer parity) — a new layer kind that
   draws **parametric vector shapes** instead of a fixed solid quad, the first
   layer type whose pixels come from authored geometry rather than a swatch.
