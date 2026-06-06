@@ -10,6 +10,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Spatial effects** (After-Effects blur / stylize / perspective staples) — the
+  first **whole-buffer** (multi-pixel) effects, beyond the per-pixel
+  color-correction stack: **Gaussian Blur**, **Drop Shadow**, and **Glow**.
+  - **`SpatialEffect`** — a per-layer `Vec<SpatialEffect>` of pure passes that
+    read *neighbouring* pixels (convolve / offset / bloom) and so operate on the
+    layer's **isolated, premultiplied, linear-light** RGBA buffer rather than one
+    pixel at a time. `serde`-defaulted to empty so pre-spatial-effect `.pulse`
+    files still load.
+    - **Gaussian Blur** — a separable Gaussian with independent X/Y blurriness
+      (sigma, comp px) and a **Repeat Edge Pixels** toggle (clamp the kernel to
+      the edge vs. fade to transparent at the frame border).
+    - **Drop Shadow** — a blurred, tinted copy of the layer's alpha offset by a
+      **distance** at an **angle**, composited behind the layer at **opacity**,
+      with a **softness** (blur) and a **Shadow Only** mode.
+    - **Glow** — extracts the layer's bright areas above a **threshold**, blurs
+      them by a **radius**, and screens the bloom back over the layer at an
+      **intensity**, blooming the highlights and extending the glow past the edge.
+  - **Pure convolution core** — `gaussian_kernel` (normalized, symmetric,
+    `3·sigma` half-width; identity at sigma ≤ 0), a separable `gaussian_blur`
+    (horizontal-then-vertical, premultiplied so soft edges don't bleed the quad
+    color, with optional edge clamp), and the drop-shadow / glow builders, plus
+    `apply_spatial_effects` (in-order stack) — all unit-tested: kernel
+    normalization/symmetry/identity, alpha-mass conservation, no-color-bleed,
+    zero-sigma no-op, shadow offset + shadow-only, glow brightening vs. an inert
+    below-threshold glow, stack ordering, degenerate-buffer safety, and the serde
+    default.
+  - The software compositor (`render.rs`) runs the spatial stack on the layer's
+    isolated buffer **after** its color-correction effects, masks, and track
+    matte (a zero-conversion bridge — the compositor's accumulator is already
+    premultiplied linear-light), then composites the filtered buffer over the
+    frame. Crisp solids gain the isolated-buffer path only when they carry
+    spatial effects, so un-effected layers stay byte-identical; motion-blurred
+    layers route through the same path so blur/shadow/glow compose with the
+    shutter, masks, and mattes. New compositor tests cover edge-softening,
+    drop-shadow coverage + darkness in the composite, glow brightening, and the
+    identity-blur byte-for-byte equivalence.
+  - UI: a new **Spatial effects** section in the Properties panel (add via menu,
+    reorder, remove, per-parameter sliders / color picker), shown for layers that
+    draw their own pixels. The launch demo's satellite now ships a soft drop
+    shadow plus a glow so the buffer passes read out of the box.
 - **Masks** (After-Effects layer-mask parity) — a layer can now be carved by one
   or more closed Bézier mask paths instead of always compositing as a full quad.
   - **`Mask`** — a closed path of **`MaskVertex`** (anchor + in/out Bézier

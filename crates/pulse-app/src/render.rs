@@ -21,7 +21,8 @@
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
 
 use crate::comp::{
-    apply_effects, mask_stack_coverage, Affine2, Comp, LayerKind, MatteMode, PulseLayer,
+    apply_effects, apply_spatial_effects, mask_stack_coverage, Affine2, Comp, LayerKind, MatteMode,
+    PulseLayer,
 };
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
 use std::path::{Path, PathBuf};
@@ -128,13 +129,15 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
         }
         let blurred = comp.layer_motion_blurred(i);
         let masked = layer.has_active_masks();
+        let spatial = layer.has_spatial_effects();
         let matte_src = comp.matte_source(i);
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
             // A motion-blurred solid (any kind drawing pixels) is rendered into an
             // isolated buffer as the average of sub-frame snapshots, then mask-
-            // carved, matte-clipped, and composited over the accumulator.
+            // carved, matte-clipped, spatially filtered, and composited over the
+            // accumulator.
             LayerKind::Solid if blurred => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                 composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
@@ -144,17 +147,21 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                 if let Some(src_idx) = matte_src {
                     apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
                 }
+                if spatial {
+                    apply_spatial(&mut layer_buf, &geom, layer);
+                }
                 for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
                     *dst = over(*src, *dst);
                 }
             }
             // A crisp solid draws its own colored quad (processed by its effect
-            // stack) directly into the accumulator — or, when it has masks or a
-            // track matte, into an isolated buffer whose alpha the masks and/or
-            // matte source modulate before it is composited.
+            // stack) directly into the accumulator — or, when it has masks, a
+            // track matte, or spatial effects, into an isolated buffer whose
+            // alpha the masks/matte modulate and whose whole buffer the spatial
+            // passes filter before it is composited.
             LayerKind::Solid => {
                 let world = comp.world_matrix(i, t);
-                if masked || matte_src.is_some() {
+                if masked || spatial || matte_src.is_some() {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, t);
                     if masked {
@@ -162,6 +169,9 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                     }
                     if let Some(src_idx) = matte_src {
                         apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                    }
+                    if spatial {
+                        apply_spatial(&mut layer_buf, &geom, layer);
                     }
                     for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
                         *dst = over(*src, *dst);
@@ -472,6 +482,27 @@ fn apply_masks(layer_buf: &mut [Lin], geom: &Geom, world: Affine2, layer: &Pulse
             let cov = mask_stack_coverage(&layer.masks, &polys, lx, ly);
             layer_buf[idx].a *= cov;
         }
+    }
+}
+
+/// Run a layer's **spatial effect stack** (Gaussian Blur / Drop Shadow / Glow)
+/// over its isolated rendered buffer.
+///
+/// The compositor's [`Lin`] accumulator is already **premultiplied** linear-light
+/// (RGB = color·coverage, A = coverage) — exactly the representation the spatial
+/// passes operate on — so this is a zero-conversion bridge: view the `Lin` slice
+/// as `[[f32; 4]]`, run [`apply_spatial_effects`], then write the filtered values
+/// back. Assumes the layer has at least one spatial effect (the caller gates on
+/// [`PulseLayer::has_spatial_effects`]).
+fn apply_spatial(layer_buf: &mut [Lin], geom: &Geom, layer: &PulseLayer) {
+    let (w, h) = (geom.w as usize, geom.h as usize);
+    let mut rgba: Vec<[f32; 4]> = layer_buf.iter().map(|p| [p.r, p.g, p.b, p.a]).collect();
+    apply_spatial_effects(&layer.spatial_effects, &mut rgba, w, h);
+    for (dst, src) in layer_buf.iter_mut().zip(rgba.iter()) {
+        dst.r = src[0];
+        dst.g = src[1];
+        dst.b = src[2];
+        dst.a = src[3];
     }
 }
 
@@ -1227,6 +1258,110 @@ mod tests {
         // The masked patch moved to ~x=48; the old center is now outside it.
         assert_eq!(f.pixel(48, 32)[3], 255, "masked patch followed the layer");
         assert_eq!(f.pixel(20, 32)[3], 0, "old position no longer covered");
+    }
+
+    // --- Spatial effects ----------------------------------------------------
+
+    use crate::comp::SpatialEffect;
+
+    #[test]
+    fn gaussian_blur_softens_the_layer_edge() {
+        // A small centered solid: blurring it adds a band of partial-alpha edge
+        // pixels along the center row vs. the crisp render.
+        let partial_count = |sigma: f32| {
+            let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+            if sigma > 0.0 {
+                c.layers[0]
+                    .spatial_effects
+                    .push(SpatialEffect::GaussianBlur {
+                        sigma_x: sigma,
+                        sigma_y: sigma,
+                        repeat_edge: false,
+                    });
+            }
+            let f = render_frame(&c, 0.0);
+            (0..f.width)
+                .filter(|&x| {
+                    let a = f.pixel(x, 32)[3];
+                    a > 0 && a < 255
+                })
+                .count()
+        };
+        assert!(
+            partial_count(4.0) > partial_count(0.0),
+            "blur should add partial-coverage edge pixels"
+        );
+    }
+
+    #[test]
+    fn drop_shadow_appears_in_the_composite() {
+        // A solid with a hard (0-softness) black drop shadow offset down-right:
+        // a pixel just past the quad in the shadow direction picks up dark,
+        // semi-opaque shadow coverage where the crisp layer had nothing.
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].spatial_effects.push(SpatialEffect::DropShadow {
+            color: [0.0, 0.0, 0.0],
+            opacity: 1.0,
+            angle: 45.0, // down-right (+x,+y)
+            distance: 10.0,
+            softness: 0.0,
+            shadow_only: false,
+        });
+        let crisp = render_frame(&solid([1.0, 1.0, 1.0, 1.0]), 0.0);
+        let shad = render_frame(&c, 0.0);
+        // The half-extent is ~14px; sample a pixel down-right of the quad's
+        // bottom-right corner that the shadow offset reaches.
+        let (sx, sy) = (32 + 16, 32 + 16);
+        assert_eq!(
+            crisp.pixel(sx, sy)[3],
+            0,
+            "no coverage here without a shadow"
+        );
+        let p = shad.pixel(sx, sy);
+        assert!(p[3] > 0, "drop shadow added coverage past the layer");
+        assert!(
+            p[0] < 60 && p[1] < 60 && p[2] < 60,
+            "shadow should be dark, got {},{},{}",
+            p[0],
+            p[1],
+            p[2]
+        );
+    }
+
+    #[test]
+    fn glow_brightens_a_bright_layer() {
+        // A bright (but not pure-white) layer reads brighter at center once a
+        // glow blooms its highlights back on top.
+        let center_r = |with_glow: bool| {
+            let mut c = solid([0.85, 0.85, 0.85, 1.0]);
+            if with_glow {
+                c.layers[0].spatial_effects.push(SpatialEffect::Glow {
+                    threshold: 0.4,
+                    radius: 6.0,
+                    intensity: 2.0,
+                });
+            }
+            render_frame(&c, 0.0).pixel(32, 32)[0]
+        };
+        assert!(center_r(true) >= center_r(false), "glow should not darken");
+    }
+
+    #[test]
+    fn spatial_effect_routes_layer_through_isolated_buffer() {
+        // A solid with only a (zero-sigma, identity) blur still renders the same
+        // as the crisp solid — the isolated-buffer routing is value-neutral when
+        // the pass is identity.
+        let mut c = solid([0.3, 0.6, 0.9, 1.0]);
+        c.layers[0]
+            .spatial_effects
+            .push(SpatialEffect::GaussianBlur {
+                sigma_x: 0.0,
+                sigma_y: 0.0,
+                repeat_edge: false,
+            });
+        let base = render_frame(&solid([0.3, 0.6, 0.9, 1.0]), 0.0);
+        let routed = render_frame(&c, 0.0);
+        assert_eq!(base.pixels, routed.pixels);
     }
 
     #[test]

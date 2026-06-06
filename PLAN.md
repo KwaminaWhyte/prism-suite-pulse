@@ -165,12 +165,12 @@ Build effects on a unified **`prism-fx`** OpenFX-style GPU pass registry (suite-
 authored once and stacks non-destructively per layer.
 - [ ] **Effect engine** (M): per-layer ordered effect stack; effect params are full `Property<T>` (keyframable/expressable); effect masks
 - [ ] **Color correction** (M, reuse `prism-core::adjust`): Levels, Curves, Hue/Sat, Exposure, Brightness/Contrast, Color Balance, Channel Mixer, Tint, Tritone, **Lumetri-style** grade, **gradient map**
-- [ ] **Blur & sharpen** (M): Gaussian/Box/**Camera Lens** blur, Directional/Radial, Smart Sharpen, **CC**-style; depth/alpha-aware
+- [~] **Blur & sharpen** (M): **Gaussian blur** done (separable, per-axis sigma, repeat-edge, premultiplied so soft edges don't bleed — unit-tested; runs as a whole-buffer pass after color-correction/masks/matte, composes with motion blur); Box/**Camera Lens** blur, Directional/Radial, Smart Sharpen, **CC**-style still TODO
 - [ ] **Distort** (M): Transform, Warp, Mesh/Bezier warp, Displacement map, Turbulent/Wave, Optics-comp, Corner Pin, Mirror, Polar
 - [ ] **Generate** (M): **Fractal/Turbulent Noise** (the motion-design workhorse), Gradient/Ramp, Cell Pattern, 4-Color/Grid, Checkerboard, Lightning/Beam, Lens Flare, Audio-Spectrum/Waveform
 - [ ] **Keying** (L): Linear/Color/Luma key, **Keylight-style** chroma key, spill suppression, matte choke/refine, Difference Matte
-- [ ] **Stylize / Channel / Matte / Time** (M): Glow, Find-Edges, Mosaic, Posterize; channel combiner/shift/invert; matte choke/simple-choker; **Echo**, Posterize-Time, **Time Displacement**
-- [ ] **Perspective / Simulation** (M/L): 3D-ish Drop Shadow/Bevel, **Particle** system (CC-particle-style), Shatter/Card-dance (lower priority)
+- [~] **Stylize / Channel / Matte / Time** (M): **Glow** done (threshold→blur→screen bloom, unit-tested); Find-Edges, Mosaic, Posterize; channel combiner/shift/invert; matte choke/simple-choker; **Echo**, Posterize-Time, **Time Displacement** still TODO
+- [~] **Perspective / Simulation** (M/L): **Drop Shadow** done (angled/offset blurred tint behind the layer, shadow-only, unit-tested); Bevel, **Particle** system (CC-particle-style), Shatter/Card-dance still TODO
 - [ ] **Presets / animation presets** (S): save an effect+keyframe stack as a named preset
 - [ ] Tests: golden-frame per effect; keyer matte quality; noise determinism (seeded)
 
@@ -229,7 +229,7 @@ authored once and stacks non-destructively per layer.
 | Masks / roto | Bézier masks, modes, feather, roto brush | **Partial** (Bézier masks: add/subtract/intersect/difference, feather, expansion, opacity, invert — done; animated shapes / on-canvas editing / roto brush **Planned**) | 2,7 |
 | Track mattes | alpha/luma | **Planned** | 2 |
 | Precomps / parenting | nesting, collapse, pick-whip | **Planned** | 2 |
-| Effects | ~hundreds; color/blur/distort/generate/keying/stylize/time | **Planned** (via `prism-fx`) | 3 |
+| Effects | ~hundreds; color/blur/distort/generate/keying/stylize/time | **Partial** (color-correction stack + spatial **Gaussian Blur / Drop Shadow / Glow**; the rest **Planned** via `prism-fx`) | 3 |
 | Motion blur / frame blend | full | **Planned** | 4 |
 | Time remap / stretch | full | **Planned** | 4 |
 | Expressions | full JS expression language | **Planned** (`rhai`/`rune`) | 4 |

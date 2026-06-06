@@ -4,6 +4,7 @@
 
 use crate::comp::{
     Comp, Ease, Effect, Interp, LayerKind, Mask, MaskMode, MatteMode, Prop, PulseLayer,
+    SpatialEffect,
 };
 use crate::graph::GraphState;
 use crate::{graph, icons, preview, render, theme, timeline};
@@ -498,6 +499,14 @@ impl PulseApp {
                     self.effects_section(ui, idx);
                 }
 
+                // Spatial effects (Gaussian Blur / Drop Shadow / Glow). Only
+                // meaningful for layers that draw their own pixels (a null draws
+                // nothing; an adjustment's grade is per-pixel, not a buffer pass).
+                if self.comp.layers[idx].kind.draws_own_pixels() {
+                    ui.separator();
+                    self.spatial_effects_section(ui, idx);
+                }
+
                 // Masks carve the layer's coverage — only meaningful for layers
                 // that draw their own pixels (a null/adjustment has no coverage).
                 if self.comp.layers[idx].kind.draws_own_pixels() {
@@ -645,6 +654,75 @@ impl PulseApp {
         }
         if let Some((ei, up)) = to_move {
             let effects = &mut self.comp.layers[idx].effects;
+            let other = if up { ei.wrapping_sub(1) } else { ei + 1 };
+            if other < effects.len() {
+                effects.swap(ei, other);
+            }
+        }
+    }
+
+    /// The layer's **spatial effect stack** editor: an "Add" menu (Gaussian
+    /// Blur / Drop Shadow / Glow), then each effect with reorder / remove
+    /// controls and per-parameter sliders. Spatial effects convolve / bloom /
+    /// shadow the layer's whole rendered buffer, after its color-correction
+    /// stack, masks, and track matte.
+    fn spatial_effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.horizontal(|ui| {
+            ui.heading("Spatial effects");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    for eff in SpatialEffect::defaults() {
+                        if ui.button(eff.label()).clicked() {
+                            self.comp.layers[idx].spatial_effects.push(eff);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].spatial_effects.is_empty() {
+            ui.weak("No spatial effects. Add blur, shadow, or glow.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].spatial_effects.len();
+        for ei in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(self.comp.layers[idx].spatial_effects[ei].label()).strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(ei);
+                    }
+                    if ui
+                        .add_enabled(ei > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((ei, true));
+                    }
+                    if ui
+                        .add_enabled(ei + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((ei, false));
+                    }
+                });
+            });
+            spatial_effect_params(ui, idx, ei, &mut self.comp.layers[idx].spatial_effects[ei]);
+        }
+
+        if let Some(ei) = to_remove {
+            self.comp.layers[idx].spatial_effects.remove(ei);
+        }
+        if let Some((ei, up)) = to_move {
+            let effects = &mut self.comp.layers[idx].spatial_effects;
             let other = if up { ei.wrapping_sub(1) } else { ei + 1 };
             if other < effects.len() {
                 effects.swap(ei, other);
@@ -1021,6 +1099,65 @@ fn effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut Effect) 
             slider(ui, "Gamma", gamma, 0.1, 3.0);
             slider(ui, "Out black", out_black, 0.0, 1.0);
             slider(ui, "Out white", out_white, 0.0, 1.0);
+        }
+    }
+}
+
+/// Parameter sliders / color pickers for one [`SpatialEffect`], editing it in
+/// place. `idx`/`ei` salt widget ids so multiple effects don't collide.
+fn spatial_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut SpatialEffect) {
+    let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32, suffix: &str| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi).suffix(suffix.to_owned()));
+        });
+    };
+    match effect {
+        SpatialEffect::GaussianBlur {
+            sigma_x,
+            sigma_y,
+            repeat_edge,
+        } => {
+            slider(ui, "Blur X", sigma_x, 0.0, 100.0, " px");
+            slider(ui, "Blur Y", sigma_y, 0.0, 100.0, " px");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(repeat_edge, "Repeat edge pixels")
+                    .on_hover_text("Clamp the kernel to the edge instead of fading to transparent");
+            });
+        }
+        SpatialEffect::DropShadow {
+            color,
+            opacity,
+            angle,
+            distance,
+            softness,
+            shadow_only,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Color");
+                rgb_button(ui, (idx, ei, 0), color);
+            });
+            slider(ui, "Opacity", opacity, 0.0, 1.0, "");
+            slider(ui, "Direction", angle, -180.0, 180.0, "°");
+            slider(ui, "Distance", distance, 0.0, 200.0, " px");
+            slider(ui, "Softness", softness, 0.0, 100.0, " px");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(shadow_only, "Shadow only")
+                    .on_hover_text("Drop the layer, keeping just its shadow");
+            });
+        }
+        SpatialEffect::Glow {
+            threshold,
+            radius,
+            intensity,
+        } => {
+            slider(ui, "Threshold", threshold, 0.0, 1.0, "");
+            slider(ui, "Radius", radius, 0.0, 100.0, " px");
+            slider(ui, "Intensity", intensity, 0.0, 4.0, "");
         }
     }
 }
