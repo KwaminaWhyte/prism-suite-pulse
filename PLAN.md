@@ -248,6 +248,40 @@ authored once and stacks non-destructively per layer.
 
 ---
 
+## UI/UX & workspace
+
+What a pro motion app's shell needs that we lack today (fixed four-panel layout, dark
+theme, no docking). Phase-8 "Preferences / shortcuts / workspaces" tracks the deep cut;
+this section is the concrete, near-term shell work. (Scroll + collapsible Properties
+sections landed first — the rest below is unchecked.)
+
+- [ ] **Scrollable panel bodies** — every long panel (Properties, Layers, Timeline lanes) wraps its body in a `ScrollArea` so content never overflows the window. *(done: Properties / Layers / Timeline)*
+- [ ] **Collapsible Properties sections** — Transform / Effects / Spatial / Masks / Matte / Text / Shape each its own `CollapsingHeader` so users hide what they don't need. *(done — open by default, per-layer state)*
+- [ ] **Dockable panels** — drag panels to re-dock / float / resize (egui `Tile`/`dock` or `egui_dock`); replace the hard-coded `SidePanel`/`TopBottomPanel` layout.
+- [ ] **Saveable workspaces** — named layouts (Animation / Effects / Paint-style) persisted to prefs; quick-switch; reset-to-default.
+- [ ] **Panel show/hide via a Window menu** — toggle each panel's visibility; remember per-workspace.
+- [ ] **Tabbed panel groups** — stack panels as tabs in one dock slot (Affinity "Studio" / AE panel groups); drag a tab out to float.
+- [ ] **Contextual options strip** — an Affinity-style toolbar row whose controls change with the active tool / selected layer kind.
+- [ ] **Timeline panel ergonomics pass** — resizable label/lane columns, horizontal time zoom + scroll, sticky ruler/header, collapse-to-mini, layer search/filter (overlaps Phase-8 Timeline UX but is a focused shell job).
+- [ ] **Keyboard shortcuts** — a remappable shortcut map for transport, layer ops, panel toggles (AE muscle-memory: `Space`, `[`/`]`, `T`/`P`/`S`/`R`, `U`); a shortcut-help overlay.
+- [ ] **Theme toggle** — light / dark (and high-contrast) switch; today `theme.rs` hard-codes one dark theme. Persist the choice.
+
+## UI/UX & workspace — parity gaps (vs AE + Affinity)
+
+Important features still missing after skimming the plan against After Effects and Affinity
+(Photo/Designer). One-line note each; not implemented this turn.
+
+- [ ] **Per-layer blend mode picker** — the compositor has 18 blend modes (`prism-core`) but layers expose no blend-mode dropdown; add one in Properties + a Layers-panel column.
+- [ ] **Effect search / browser** — a searchable Effects & Presets panel (type to filter, categorized tree, drag-onto-layer) instead of today's flat "Add" menu.
+- [ ] **Onion-skinning** — ghost neighboring frames behind the playhead (frames before/after, count + opacity falloff) for hand-keyed timing — standard in motion tooling, absent from the plan.
+- [ ] **On-canvas transform gizmo** — drag/scale/rotate the selected layer directly in the preview (anchor handle, bounding box), not just via Properties sliders.
+- [ ] **Snapping & smart guides in the preview** — snap to layer edges/centers, comp center, and user guides while dragging (plan only lists *timeline* snapping + static guides).
+- [ ] **Color / swatch picker reuse** — a shared eyedropper + recent-swatches across fill/stroke/effect colors (Affinity-style), instead of isolated `color_edit_button`s.
+- [ ] **Numeric drag-edit on every value field** — click-drag a label to scrub, double-click to type (AE/Affinity convention) for all sliders, not just the slider track.
+- [ ] **Undo / redo** — no command history exists yet; a core requirement for any editor (likely a shared `prism-core` edit-stack), gating real editing ergonomics.
+
+---
+
 ## 5. Milestones
 
 | Milestone | Phases | Capability | Approx parity |

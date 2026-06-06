@@ -28,106 +28,124 @@ impl PulseApp {
                     return;
                 }
 
-                // Layer name + kind.
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut self.comp.layers[idx].name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Kind");
-                    let cur = self.comp.layers[idx].kind;
-                    egui::ComboBox::from_id_salt(("kind", idx))
-                        .selected_text(cur.label())
-                        .show_ui(ui, |ui| {
-                            for kind in LayerKind::ALL {
-                                if ui.selectable_label(cur == kind, kind.label()).clicked() {
-                                    self.comp.layers[idx].kind = kind;
+                // The properties body can far exceed the window height (transform
+                // tracks + effects + spatial + masks + text/shape sections), so
+                // scroll it. `auto_shrink([false, false])` keeps the panel full
+                // width/height even when the content is short.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Layer name + kind.
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.text_edit_singleline(&mut self.comp.layers[idx].name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Kind");
+                            let cur = self.comp.layers[idx].kind;
+                            egui::ComboBox::from_id_salt(("kind", idx))
+                                .selected_text(cur.label())
+                                .show_ui(ui, |ui| {
+                                    for kind in LayerKind::ALL {
+                                        if ui.selectable_label(cur == kind, kind.label()).clicked()
+                                        {
+                                            self.comp.layers[idx].kind = kind;
+                                        }
+                                    }
+                                });
+                        });
+
+                        // Color is only meaningful for layers that draw their own pixels.
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            ui.horizontal(|ui| {
+                                ui.label("Color");
+                                let c = &mut self.comp.layers[idx].color;
+                                let mut col = Color32::from_rgba_unmultiplied(
+                                    (c[0] * 255.0) as u8,
+                                    (c[1] * 255.0) as u8,
+                                    (c[2] * 255.0) as u8,
+                                    (c[3] * 255.0) as u8,
+                                );
+                                if ui.color_edit_button_srgba(&mut col).changed() {
+                                    c[0] = col.r() as f32 / 255.0;
+                                    c[1] = col.g() as f32 / 255.0;
+                                    c[2] = col.b() as f32 / 255.0;
+                                    c[3] = col.a() as f32 / 255.0;
                                 }
+                            });
+                        }
+
+                        // Shape content (rect / ellipse / polygon / star + fill/stroke),
+                        // shown only for shape layers.
+                        if self.comp.layers[idx].kind == LayerKind::Shape {
+                            section(ui, ("sec_shape", idx), "Shape", |ui| {
+                                self.shape_section(ui, idx);
+                            });
+                        }
+
+                        // Text content (string + type settings + fill/stroke), shown
+                        // only for text layers.
+                        if self.comp.layers[idx].kind == LayerKind::Text {
+                            section(ui, ("sec_text", idx), "Text", |ui| {
+                                self.text_section(ui, idx);
+                            });
+                        }
+
+                        // Parent pick-whip: a child inherits this layer's transform.
+                        self.parent_row(ui, idx);
+
+                        // Track matte: borrow the layer above as this layer's alpha/luma.
+                        self.matte_row(ui, idx);
+
+                        // Per-layer motion-blur switch (only meaningful for layers that
+                        // draw their own pixels — a null/adjustment has nothing to blur).
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.comp.layers[idx].motion_blur, "Motion blur")
+                                    .on_hover_text(
+                                        "Blur this layer's motion across the comp shutter",
+                                    );
+                                if self.comp.layers[idx].motion_blur
+                                    && !self.comp.motion_blur.enabled
+                                {
+                                    ui.weak("(comp switch off)")
+                                        .on_hover_text("Enable Comp ▸ Motion blur to see it");
+                                }
+                            });
+                        }
+
+                        let t = self.time;
+                        section(ui, ("sec_transform", idx), "Transform", |ui| {
+                            for prop in Prop::ALL {
+                                self.property_row(ui, idx, prop, t);
                             }
                         });
-                });
 
-                // Color is only meaningful for layers that draw their own pixels.
-                if self.comp.layers[idx].kind.draws_own_pixels() {
-                    ui.horizontal(|ui| {
-                        ui.label("Color");
-                        let c = &mut self.comp.layers[idx].color;
-                        let mut col = Color32::from_rgba_unmultiplied(
-                            (c[0] * 255.0) as u8,
-                            (c[1] * 255.0) as u8,
-                            (c[2] * 255.0) as u8,
-                            (c[3] * 255.0) as u8,
-                        );
-                        if ui.color_edit_button_srgba(&mut col).changed() {
-                            c[0] = col.r() as f32 / 255.0;
-                            c[1] = col.g() as f32 / 255.0;
-                            c[2] = col.b() as f32 / 255.0;
-                            c[3] = col.a() as f32 / 255.0;
+                        // Effect stack (color-correction passes). Nulls draw nothing, so
+                        // an effect stack on them would do nothing — hide the section.
+                        if self.comp.layers[idx].kind != LayerKind::Null {
+                            section(ui, ("sec_effects", idx), "Effects", |ui| {
+                                self.effects_section(ui, idx);
+                            });
+                        }
+
+                        // Spatial effects (Gaussian Blur / Drop Shadow / Glow). Only
+                        // meaningful for layers that draw their own pixels (a null draws
+                        // nothing; an adjustment's grade is per-pixel, not a buffer pass).
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            section(ui, ("sec_spatial", idx), "Spatial effects", |ui| {
+                                self.spatial_effects_section(ui, idx);
+                            });
+                        }
+
+                        // Masks carve the layer's coverage — only meaningful for layers
+                        // that draw their own pixels (a null/adjustment has no coverage).
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            section(ui, ("sec_masks", idx), "Masks", |ui| {
+                                self.masks_section(ui, idx);
+                            });
                         }
                     });
-                }
-
-                // Shape content (rect / ellipse / polygon / star + fill/stroke),
-                // shown only for shape layers.
-                if self.comp.layers[idx].kind == LayerKind::Shape {
-                    ui.separator();
-                    self.shape_section(ui, idx);
-                }
-
-                // Text content (string + type settings + fill/stroke), shown
-                // only for text layers.
-                if self.comp.layers[idx].kind == LayerKind::Text {
-                    ui.separator();
-                    self.text_section(ui, idx);
-                }
-
-                // Parent pick-whip: a child inherits this layer's transform.
-                self.parent_row(ui, idx);
-
-                // Track matte: borrow the layer above as this layer's alpha/luma.
-                self.matte_row(ui, idx);
-
-                // Per-layer motion-blur switch (only meaningful for layers that
-                // draw their own pixels — a null/adjustment has nothing to blur).
-                if self.comp.layers[idx].kind.draws_own_pixels() {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.comp.layers[idx].motion_blur, "Motion blur")
-                            .on_hover_text("Blur this layer's motion across the comp shutter");
-                        if self.comp.layers[idx].motion_blur && !self.comp.motion_blur.enabled {
-                            ui.weak("(comp switch off)")
-                                .on_hover_text("Enable Comp ▸ Motion blur to see it");
-                        }
-                    });
-                }
-
-                ui.separator();
-
-                let t = self.time;
-                for prop in Prop::ALL {
-                    self.property_row(ui, idx, prop, t);
-                }
-
-                // Effect stack (color-correction passes). Nulls draw nothing, so
-                // an effect stack on them would do nothing — hide the section.
-                if self.comp.layers[idx].kind != LayerKind::Null {
-                    ui.separator();
-                    self.effects_section(ui, idx);
-                }
-
-                // Spatial effects (Gaussian Blur / Drop Shadow / Glow). Only
-                // meaningful for layers that draw their own pixels (a null draws
-                // nothing; an adjustment's grade is per-pixel, not a buffer pass).
-                if self.comp.layers[idx].kind.draws_own_pixels() {
-                    ui.separator();
-                    self.spatial_effects_section(ui, idx);
-                }
-
-                // Masks carve the layer's coverage — only meaningful for layers
-                // that draw their own pixels (a null/adjustment has no coverage).
-                if self.comp.layers[idx].kind.draws_own_pixels() {
-                    ui.separator();
-                    self.masks_section(ui, idx);
-                }
             });
     }
 
@@ -140,7 +158,6 @@ impl PulseApp {
         let half_w = self.comp.width as f32 * render::LAYER_HALF_FRAC * 0.5;
         let half_h = self.comp.height as f32 * render::LAYER_HALF_FRAC * 0.5;
         ui.horizontal(|ui| {
-            ui.heading("Masks");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
                     if ui.button("Rectangle").clicked() {
@@ -215,7 +232,6 @@ impl PulseApp {
         // Size a fresh shape to roughly half the layer's base quad.
         let half = self.comp.width as f32 * render::LAYER_HALF_FRAC * 0.5;
         ui.horizontal(|ui| {
-            ui.heading("Shape");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
                     let prims = [
@@ -306,7 +322,6 @@ impl PulseApp {
     /// (size / tracking / leading / alignment), and a fill / stroke (reused from
     /// the shape system). The text is drawn with the built-in stroke font.
     fn text_section(&mut self, ui: &mut egui::Ui, idx: usize) {
-        ui.heading("Text");
         let text = &mut self.comp.layers[idx].text;
 
         ui.add(
@@ -392,7 +407,6 @@ impl PulseApp {
     /// process the layer's own color (solid) or the layers below (adjustment).
     fn effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
         ui.horizontal(|ui| {
-            ui.heading("Effects");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
                     for eff in Effect::defaults() {
@@ -462,7 +476,6 @@ impl PulseApp {
     /// stack, masks, and track matte.
     fn spatial_effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
         ui.horizontal(|ui| {
-            ui.heading("Spatial effects");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
                     for eff in SpatialEffect::defaults() {
@@ -951,6 +964,21 @@ fn shape_item_params(ui: &mut egui::Ui, idx: usize, si: usize, item: &mut ShapeI
         slider(ui, "Stroke width", &mut stroke.width, 0.0, 80.0, " px");
         slider(ui, "Stroke opacity", &mut stroke.opacity, 0.0, 1.0, "");
     }
+}
+
+/// A collapsible Properties section (Affinity-style Studio panel): a titled
+/// [`egui::CollapsingHeader`], open by default, whose body is rendered by `add`.
+/// `id` salts the header so per-layer open/closed state doesn't collide.
+fn section<R>(
+    ui: &mut egui::Ui,
+    id: (&str, usize),
+    title: &str,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    egui::CollapsingHeader::new(egui::RichText::new(title).heading().size(15.0))
+        .id_salt(id)
+        .default_open(true)
+        .show_unindented(ui, add);
 }
 
 /// An sRGB color-edit button bound to an `[f32; 3]` (0..1), salted by `id`.

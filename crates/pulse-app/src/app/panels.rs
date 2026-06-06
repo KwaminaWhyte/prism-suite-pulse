@@ -74,15 +74,17 @@ impl PulseApp {
 
                 match self.mode {
                     EditorMode::Timeline => {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            let resp = timeline::show(ui, &self.comp, self.time, self.selected);
-                            if let Some(t) = resp.scrub_time {
-                                self.time = t.clamp(0.0, self.comp.duration);
-                            }
-                            if let Some(i) = resp.clicked_layer {
-                                self.selected = Some(i);
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let resp = timeline::show(ui, &self.comp, self.time, self.selected);
+                                if let Some(t) = resp.scrub_time {
+                                    self.time = t.clamp(0.0, self.comp.duration);
+                                }
+                                if let Some(i) = resp.clicked_layer {
+                                    self.selected = Some(i);
+                                }
+                            });
                     }
                     EditorMode::Graph => {
                         self.graph_property_chips(ui);
