@@ -1,7 +1,7 @@
 # Pulse — Research Findings (June 2026)
 
 Cited findings backing [PLAN.md](./PLAN.md). Verify all crate versions against crates.io at build time
-— third-party version metadata is sometimes stale. Pulse is **app #4 of the Prism suite**; shared
+— third-party version metadata is sometimes stale. Pulse is **app #3 of the Prism suite**; shared
 infrastructure decisions live in [../SUITE.md](../SUITE.md) and reuse [Pigment's engine research](../pigment/RESEARCH.md)
 (compositor, blend math, color, AI runtime).
 

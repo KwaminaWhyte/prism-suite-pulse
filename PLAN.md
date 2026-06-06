@@ -1,6 +1,6 @@
 # Pulse — Open Source After Effects Alternative
 
-Professional motion-graphics, VFX & compositing app in Rust, and **app #4 of the Prism suite** (sibling
+Professional motion-graphics, VFX & compositing app in Rust, and **app #3 of the Prism suite** (sibling
 to [Pigment](../pigment) raster, [Contour](../contour) vector). **Goal: reach ≥85% of Adobe After
 Effects' real-world capability** — features, reliability, and ease-of-use — in staged milestones, on the
 suite's shared engine: `prism-core` (layers, blend math, render graph), `prism-color` (linear/OCIO),
