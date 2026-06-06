@@ -154,7 +154,7 @@ Phase 0 is **done** (see §1); the rest is the road to parity.
 - [ ] **Footage layers** (L, shared `prism-media`): import image / **image sequence** / **video** / audio; footage interpretation (alpha, frame rate, color/OCIO, looping); proxies/placeholders
 - [ ] **Text layers** (M): `cosmic-text`; fill/stroke; per-character layout (animator-ready); variable fonts
 - [ ] **Shape layers** (M, shared `prism-vector`): paths, fills/strokes, **trim paths**, **repeater**, merge, offset, wiggle-path; path keyframing
-- [ ] **Masks** (L): Bézier mask paths per layer; modes (add/subtract/intersect/difference); **mask feather** (incl. variable-width), expansion, opacity; animated mask shapes
+- [~] **Masks** (L): Bézier mask paths per layer **done** (closed `Mask` of `MaskVertex` in layer-local space, rect/ellipse seeds, flatten → even-odd coverage; modes **add/subtract/intersect/difference** + none; **feather**, **expansion**, **opacity**, **invert**; folded per-pixel into the layer's alpha in the software compositor, composing with motion blur + track mattes; preview outlines + Properties editor — all pure logic unit-tested); still TODO: **animated mask shapes** (keyframable `Property<Path>`), variable-width feather, and on-canvas vertex editing
 - [ ] **Track mattes** (M): alpha / luma (inverted) mattes; preserve-underlying-transparency; stencil/silhouette
 - [ ] **Precomps** (M): nest a comp as a layer; pre-compose selection; collapse transformations; comp navigator
 - [ ] **Null / parenting** (S): parent transforms, pick-whip parenting
@@ -226,7 +226,7 @@ authored once and stacks non-destructively per layer.
 | Keyframe interpolation / graph editor | linear/hold/Bézier/auto, graph editor | **Partial** (linear/hold/Bézier ease + value-curve graph editor w/ draggable keys & handles; auto-Bézier/speed-graph/roving **Planned**) | 1 |
 | Compositor / blend modes | GPU, 18+ modes, 32-bpc, linear | **Planned** (reuse `prism-core`) | 1 |
 | Layer types | solid/text/shape/footage/adj/null/cam/light/precomp | **Partial** (solid) → **Planned** | 1,2,5 |
-| Masks / roto | Bézier masks, modes, feather, roto brush | **Planned** | 2,7 |
+| Masks / roto | Bézier masks, modes, feather, roto brush | **Partial** (Bézier masks: add/subtract/intersect/difference, feather, expansion, opacity, invert — done; animated shapes / on-canvas editing / roto brush **Planned**) | 2,7 |
 | Track mattes | alpha/luma | **Planned** | 2 |
 | Precomps / parenting | nesting, collapse, pick-whip | **Planned** | 2 |
 | Effects | ~hundreds; color/blur/distort/generate/keying/stylize/time | **Planned** (via `prism-fx`) | 3 |

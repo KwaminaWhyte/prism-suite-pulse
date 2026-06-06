@@ -8,7 +8,7 @@
 //! coordinates are in comp pixels with the origin at the comp center; we map
 //! them to screen via a single fitted scale factor.
 
-use crate::comp::{apply_effects, Comp, LayerKind, PulseLayer};
+use crate::comp::{apply_effects, Comp, LayerKind, MaskMode, PulseLayer};
 use crate::theme;
 use egui::{Color32, Painter, Pos2, Rect, Stroke, Vec2};
 
@@ -229,6 +229,45 @@ fn paint_layer(
             outline,
             Stroke::new(1.5, theme::accent()),
         ));
+        // Draw the layer's mask paths (in layer-local space) on top, so the
+        // editable mask region is visible while the layer is selected.
+        paint_masks(painter, layer, center, scale, world);
+    }
+}
+
+/// Paint the selected layer's **mask** paths as outlines, transformed through
+/// the layer's `world` matrix into screen space.
+///
+/// Each active mask's flattened polygon is stroked closed; the stroke color
+/// hints at the mode (subtractive/inverted masks are dimmed) so the carve reads
+/// at a glance. This is an editor overlay only — coverage itself is computed in
+/// the renderer.
+fn paint_masks(painter: &Painter, layer: &PulseLayer, center: Pos2, scale: f32, world: Affine2) {
+    for mask in &layer.masks {
+        if !mask.is_active() {
+            continue;
+        }
+        let poly = mask.flatten();
+        if poly.len() < 2 {
+            continue;
+        }
+        let mut pts: Vec<Pos2> = poly
+            .iter()
+            .map(|&(lx, ly)| {
+                let (wx, wy) = world.apply(lx, ly);
+                center + Vec2::new(wx * scale, wy * scale)
+            })
+            .collect();
+        pts.push(pts[0]); // close the path
+                          // Subtract / inverted masks read as "removing" — dim them; Add/Intersect
+                          // are the "keep" ops — draw them in the accent color.
+        let removes = mask.inverted || matches!(mask.mode, MaskMode::Subtract);
+        let color = if removes {
+            theme::muted().gamma_multiply(0.9)
+        } else {
+            theme::accent().gamma_multiply(0.9)
+        };
+        painter.add(egui::Shape::line(pts, Stroke::new(1.0, color)));
     }
 }
 

@@ -2,7 +2,9 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{Comp, Ease, Effect, Interp, LayerKind, MatteMode, Prop, PulseLayer};
+use crate::comp::{
+    Comp, Ease, Effect, Interp, LayerKind, Mask, MaskMode, MatteMode, Prop, PulseLayer,
+};
 use crate::graph::GraphState;
 use crate::{graph, icons, preview, render, theme, timeline};
 use egui::{Color32, Sense};
@@ -495,7 +497,91 @@ impl PulseApp {
                     ui.separator();
                     self.effects_section(ui, idx);
                 }
+
+                // Masks carve the layer's coverage — only meaningful for layers
+                // that draw their own pixels (a null/adjustment has no coverage).
+                if self.comp.layers[idx].kind.draws_own_pixels() {
+                    ui.separator();
+                    self.masks_section(ui, idx);
+                }
             });
+    }
+
+    /// The layer's **mask** editor: an "Add mask" menu (rectangle / ellipse),
+    /// then each mask with its mode / invert / opacity / feather / expansion
+    /// controls and reorder / remove buttons. Masks fold top-down into the
+    /// layer's coverage.
+    fn masks_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        // Size a fresh mask to roughly half the layer's base quad.
+        let half_w = self.comp.width as f32 * render::LAYER_HALF_FRAC * 0.5;
+        let half_h = self.comp.height as f32 * render::LAYER_HALF_FRAC * 0.5;
+        ui.horizontal(|ui| {
+            ui.heading("Masks");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    if ui.button("Rectangle").clicked() {
+                        let n = self.comp.layers[idx].masks.len() + 1;
+                        let mut m = Mask::rect(half_w, half_h);
+                        m.name = format!("Mask {n}");
+                        self.comp.layers[idx].masks.push(m);
+                        ui.close_menu();
+                    }
+                    if ui.button("Ellipse").clicked() {
+                        let n = self.comp.layers[idx].masks.len() + 1;
+                        let mut m = Mask::ellipse(half_w, half_h);
+                        m.name = format!("Mask {n}");
+                        self.comp.layers[idx].masks.push(m);
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].masks.is_empty() {
+            ui.weak("No masks. Add one to carve this layer's coverage.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].masks.len();
+        for mi in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&self.comp.layers[idx].masks[mi].name).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(mi);
+                    }
+                    if ui
+                        .add_enabled(mi > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((mi, true));
+                    }
+                    if ui
+                        .add_enabled(mi + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((mi, false));
+                    }
+                });
+            });
+            mask_params(ui, idx, mi, &mut self.comp.layers[idx].masks[mi]);
+        }
+
+        if let Some(mi) = to_remove {
+            self.comp.layers[idx].masks.remove(mi);
+        }
+        if let Some((mi, up)) = to_move {
+            let masks = &mut self.comp.layers[idx].masks;
+            let other = if up { mi.wrapping_sub(1) } else { mi + 1 };
+            if other < masks.len() {
+                masks.swap(mi, other);
+            }
+        }
     }
 
     /// The layer's **effect stack** editor: an "Add effect" menu, then each
@@ -937,6 +1023,49 @@ fn effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut Effect) 
             slider(ui, "Out white", out_white, 0.0, 1.0);
         }
     }
+}
+
+/// Parameter controls for one [`Mask`], editing it in place: name, the
+/// boolean mode + invert toggle, and opacity / feather / expansion sliders.
+/// `idx`/`mi` salt widget ids so multiple masks don't collide.
+fn mask_params(ui: &mut egui::Ui, idx: usize, mi: usize, mask: &mut Mask) {
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label("Name");
+        ui.add(
+            egui::TextEdit::singleline(&mut mask.name)
+                .id_salt(("mask_name", idx, mi))
+                .desired_width(120.0),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label("Mode");
+        egui::ComboBox::from_id_salt(("mask_mode", idx, mi))
+            .selected_text(mask.mode.label())
+            .show_ui(ui, |ui| {
+                for mode in MaskMode::ALL {
+                    if ui
+                        .selectable_label(mask.mode == mode, mode.label())
+                        .clicked()
+                    {
+                        mask.mode = mode;
+                    }
+                }
+            });
+        ui.checkbox(&mut mask.inverted, "Invert")
+            .on_hover_text("Show the layer outside the shape instead of inside");
+    });
+    let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi));
+        });
+    };
+    slider(ui, "Opacity", &mut mask.opacity, 0.0, 1.0);
+    slider(ui, "Feather", &mut mask.feather, 0.0, 200.0);
+    slider(ui, "Expansion", &mut mask.expansion, -200.0, 200.0);
 }
 
 /// An sRGB color-edit button bound to an `[f32; 3]` (0..1), salted by `id`.

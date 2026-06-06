@@ -10,6 +10,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Masks** (After-Effects layer-mask parity) — a layer can now be carved by one
+  or more closed Bézier mask paths instead of always compositing as a full quad.
+  - **`Mask`** — a closed path of **`MaskVertex`** (anchor + in/out Bézier
+    tangent handles, layer-local comp px) with a [`MaskMode`], an **invert**
+    toggle, **opacity**, **feather** (soft edge, px), and **expansion** (signed
+    offset that grows/shrinks the shape). Masks live in the layer's local frame
+    (the same space the layer's quad lives in), so a mask rides the layer's
+    position / scale / rotation / parenting for free. `Mask::rect` and
+    `Mask::ellipse` (with the standard `k ≈ 0.5523` circle handles) seed the two
+    default shapes. `serde`-defaulted to an empty list so pre-mask `.pulse` files
+    still load unmasked.
+  - **`MaskMode`** — the After-Effects boolean modes **Add** (union), **Subtract**
+    (knockout), **Intersect** (overlap), **Difference** (symmetric difference),
+    and **None** (disabled). `MaskMode::combine` folds each mask's coverage into a
+    running accumulator top-down; the topmost mask composites against an empty
+    base (so an Add reveals exactly its shape), matching AE.
+  - **Pure geometry** — `Mask::flatten` subdivides each cubic segment into a
+    polygon; `point_in_polygon` (even-odd ray cast), `dist_to_polygon`
+    (nearest-edge distance), `Mask::coverage_at` (signed-distance → expansion →
+    feather ramp → invert → opacity), and `mask_stack_coverage` (the folded
+    per-pixel multiplier, returning full coverage when no mask is active) are all
+    unit-tested — square/concave inside tests, edge distances, hard vs feathered
+    coverage, inversion, expansion grow/shrink, opacity scaling, the smooth
+    ellipse, every mode's algebra, and an Add-then-Subtract stack punching a hole.
+  - The software compositor (`render.rs`) renders a masked solid into an isolated
+    linear-light buffer, then `apply_masks` inverse-maps each comp pixel back into
+    layer-local space and multiplies its alpha by the folded mask coverage — color
+    is never touched, only coverage — before any track matte and the source-over.
+    Motion-blurred and track-matted layers both route through the same masked
+    path, so masks compose with blur and mattes. New compositor tests cover
+    shape-clipping, inversion keeping the outside, a disabled mask being
+    byte-identical to unmasked, color preservation, feather edge-softening, the
+    Add/Subtract hole, masks following the layer transform, and mask + track
+    matte together.
+  - The egui preview draws the selected layer's mask outlines (flattened through
+    its world matrix), dimming subtractive/inverted masks so the carve reads at a
+    glance. A new **Masks** section in the Properties panel adds rectangle /
+    ellipse masks and edits each one's name / mode / invert / opacity / feather /
+    expansion, with reorder + remove. The launch demo's solid now ships a soft
+    elliptical mask so masks read out of the box.
 - **Motion blur** (After-Effects shutter parity) — fast-moving layers can now be
   rendered with a cinematic shutter instead of a crisp per-frame snapshot, the
   Phase-4 motion feature.

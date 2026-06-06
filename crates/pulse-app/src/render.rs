@@ -20,7 +20,9 @@
 //! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
 
-use crate::comp::{apply_effects, Affine2, Comp, LayerKind, MatteMode, PulseLayer};
+use crate::comp::{
+    apply_effects, mask_stack_coverage, Affine2, Comp, LayerKind, MatteMode, PulseLayer,
+};
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
 use std::path::{Path, PathBuf};
 
@@ -125,16 +127,21 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
             continue;
         }
         let blurred = comp.layer_motion_blurred(i);
+        let masked = layer.has_active_masks();
+        let matte_src = comp.matte_source(i);
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
             // A motion-blurred solid (any kind drawing pixels) is rendered into an
-            // isolated buffer as the average of sub-frame snapshots, then matte-
-            // clipped and composited over the accumulator.
+            // isolated buffer as the average of sub-frame snapshots, then mask-
+            // carved, matte-clipped, and composited over the accumulator.
             LayerKind::Solid if blurred => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                 composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
-                if let Some(src_idx) = comp.matte_source(i) {
+                if masked {
+                    apply_masks(&mut layer_buf, &geom, comp.world_matrix(i, t), layer);
+                }
+                if let Some(src_idx) = matte_src {
                     apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
                 }
                 for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
@@ -142,14 +149,20 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                 }
             }
             // A crisp solid draws its own colored quad (processed by its effect
-            // stack) directly into the accumulator — or, with a track matte, into
-            // an isolated buffer whose alpha the matte source modulates first.
+            // stack) directly into the accumulator — or, when it has masks or a
+            // track matte, into an isolated buffer whose alpha the masks and/or
+            // matte source modulate before it is composited.
             LayerKind::Solid => {
                 let world = comp.world_matrix(i, t);
-                if let Some(src_idx) = comp.matte_source(i) {
+                if masked || matte_src.is_some() {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, t);
-                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                    if masked {
+                        apply_masks(&mut layer_buf, &geom, world, layer);
+                    }
+                    if let Some(src_idx) = matte_src {
+                        apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                    }
                     for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
                         *dst = over(*src, *dst);
                     }
@@ -423,6 +436,42 @@ fn apply_track_matte(
     for (px, m) in matte.iter().enumerate() {
         let f = mode.factor([m.r, m.g, m.b, m.a]);
         layer_buf[px].a *= f;
+    }
+}
+
+/// Carve a rendered layer buffer's alpha by the layer's **mask stack**.
+///
+/// `layer_buf` holds the layer's isolated straight-linear RGBA. Each pixel is
+/// inverse-mapped through the layer's `world` matrix back into layer-local space
+/// (where the masks are authored), and the folded [`mask_stack_coverage`] there
+/// multiplies the pixel's alpha — color is untouched, only coverage changes, so
+/// the subsequent source-over honors the masks. A singular world matrix (zero
+/// scale) leaves nothing to mask. Assumes the layer has at least one active mask
+/// (the caller gates on [`PulseLayer::has_active_masks`]).
+fn apply_masks(layer_buf: &mut [Lin], geom: &Geom, world: Affine2, layer: &PulseLayer) {
+    let &Geom { w, h, cx, cy, .. } = geom;
+    let Some(inv) = world.inverse() else {
+        // Collapsed transform: no coverage survives.
+        for px in layer_buf.iter_mut() {
+            px.a = 0.0;
+        }
+        return;
+    };
+    // Pre-flatten each mask once so the per-pixel loop is just point tests.
+    let polys: Vec<Vec<(f32, f32)>> = layer.masks.iter().map(|m| m.flatten()).collect();
+    for py in 0..h {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in 0..w {
+            let idx = (py * w + px) as usize;
+            // Skip already-transparent pixels — masking them is a no-op.
+            if layer_buf[idx].a <= 0.0 {
+                continue;
+            }
+            let comp_x = px as f32 + 0.5 - cx;
+            let (lx, ly) = inv.apply(comp_x, comp_y);
+            let cov = mask_stack_coverage(&layer.masks, &polys, lx, ly);
+            layer_buf[idx].a *= cov;
+        }
     }
 }
 
@@ -1065,5 +1114,132 @@ mod tests {
         // A far corner is outside the small matte source -> matted out even with
         // motion blur on.
         assert_eq!(f.pixel(2, 2)[3], 0, "matte must still clip the blur");
+    }
+
+    // --- Masks --------------------------------------------------------------
+
+    use crate::comp::{Mask, MaskMode};
+
+    /// A 64x64 comp with a single full-frame opaque white solid (index 0).
+    fn full_frame_solid() -> Comp {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].scale.set_key(0.0, 3.0); // cover the whole frame
+        c
+    }
+
+    #[test]
+    fn mask_clips_layer_to_its_shape() {
+        // A small centered rectangular Add mask on a full-frame solid: the center
+        // stays opaque, a far corner (outside the mask) is carved away.
+        let mut c = full_frame_solid();
+        c.layers[0].masks.push(Mask::rect(8.0, 8.0));
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(32, 32)[3], 255, "center inside mask stays covered");
+        assert_eq!(f.pixel(2, 2)[3], 0, "corner outside mask is carved away");
+    }
+
+    #[test]
+    fn inverted_mask_keeps_the_outside() {
+        // Inverting the same mask flips it: the center is punched out, the
+        // surrounding frame survives.
+        let mut c = full_frame_solid();
+        let mut m = Mask::rect(8.0, 8.0);
+        m.inverted = true;
+        c.layers[0].masks.push(m);
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(32, 32)[3], 0, "center punched out by inverted mask");
+        assert_eq!(f.pixel(2, 2)[3], 255, "outside survives inversion");
+    }
+
+    #[test]
+    fn no_active_mask_is_identical_to_unmasked() {
+        // A layer whose only mask is disabled (mode None) renders byte-identical
+        // to the same layer with no masks at all.
+        let base = render_frame(&full_frame_solid(), 0.0);
+        let mut c = full_frame_solid();
+        let mut m = Mask::rect(8.0, 8.0);
+        m.mode = MaskMode::None;
+        c.layers[0].masks.push(m);
+        let withmask = render_frame(&c, 0.0);
+        assert_eq!(base.pixels, withmask.pixels);
+    }
+
+    #[test]
+    fn mask_preserves_layer_color() {
+        // Masking changes coverage, never color: a blue solid masked to a small
+        // rect still reads blue at the center.
+        let mut c = solid([0.0, 0.0, 1.0, 1.0]);
+        c.layers[0].scale.set_key(0.0, 3.0);
+        c.layers[0].masks.push(Mask::rect(8.0, 8.0));
+        let [r, g, b, a] = render_frame(&c, 0.0).pixel(32, 32);
+        assert_eq!(a, 255);
+        assert!(b > r && b > g, "center should stay blue, got {r},{g},{b}");
+    }
+
+    #[test]
+    fn feathered_mask_softens_the_edge() {
+        // A hard mask has a crisp 0/255 boundary; a feathered one adds a band of
+        // partial-alpha pixels along the center row.
+        let partial_count = |feather: f32| {
+            let mut c = full_frame_solid();
+            let mut m = Mask::rect(12.0, 12.0);
+            m.feather = feather;
+            c.layers[0].masks.push(m);
+            let f = render_frame(&c, 0.0);
+            (0..f.width)
+                .filter(|&x| {
+                    let a = f.pixel(x, 32)[3];
+                    a > 0 && a < 255
+                })
+                .count()
+        };
+        assert!(
+            partial_count(8.0) > partial_count(0.0),
+            "feather should add partial-coverage edge pixels"
+        );
+    }
+
+    #[test]
+    fn add_subtract_mask_stack_punches_a_hole() {
+        // A big Add mask with a smaller Subtract mask leaves a covered ring with a
+        // transparent hole at the center.
+        let mut c = full_frame_solid();
+        c.layers[0].masks.push(Mask::rect(13.0, 13.0)); // Add (default)
+        let mut sub = Mask::rect(5.0, 5.0);
+        sub.mode = MaskMode::Subtract;
+        c.layers[0].masks.push(sub);
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(32, 32)[3], 0, "center hole subtracted away");
+        // A pixel inside the big rect (local ~9.5px after the layer's 3x scale)
+        // but outside the small hole stays covered.
+        assert_eq!(f.pixel(60, 32)[3], 255, "ring stays covered");
+    }
+
+    #[test]
+    fn mask_rides_layer_transform() {
+        // The mask is in layer-local space, so moving the layer moves the masked
+        // region with it. Shift the layer right and the surviving coverage shifts
+        // too: the original center loses coverage, a point to the right gains it.
+        let mut c = full_frame_solid();
+        c.layers[0].masks.push(Mask::rect(8.0, 8.0));
+        c.layers[0].x.set_key(0.0, 16.0); // slide right 16 comp px
+        let f = render_frame(&c, 0.0);
+        // The masked patch moved to ~x=48; the old center is now outside it.
+        assert_eq!(f.pixel(48, 32)[3], 255, "masked patch followed the layer");
+        assert_eq!(f.pixel(20, 32)[3], 0, "old position no longer covered");
+    }
+
+    #[test]
+    fn mask_and_track_matte_compose() {
+        // A masked base under a static alpha matte: both must clip. The mask is
+        // small (rect 8) and centered; the matte source is unit-scale (~14 px).
+        // The center survives both; a far corner is matted out.
+        let mut c = matte_pair([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], 1.0);
+        c.layers[0].matte = crate::comp::MatteMode::Alpha;
+        c.layers[0].masks.push(Mask::rect(8.0, 8.0));
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(32, 32)[3], 255, "center passes mask and matte");
+        // Outside the small mask -> carved by the mask even within the matte.
+        assert_eq!(f.pixel(2, 2)[3], 0, "corner clipped by mask+matte");
     }
 }
