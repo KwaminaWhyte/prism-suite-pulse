@@ -8,13 +8,38 @@
 //! coordinates are in comp pixels with the origin at the comp center; we map
 //! them to screen via a single fitted scale factor.
 
-use crate::comp::{Comp, PulseLayer};
+use crate::comp::{apply_effects, Comp, LayerKind, PulseLayer};
 use crate::theme;
 use egui::{Color32, Painter, Pos2, Rect, Stroke, Vec2};
 
 use crate::comp::Affine2;
 
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
+
+/// The solid layer's effect-processed display color (straight sRGB `[f32; 4]`).
+///
+/// Mirrors the offline renderer: convert to linear, run the effect stack, encode
+/// back to sRGB — so the preview swatch matches an exported frame's color. Only
+/// the solid's own constant color is processed here (per-pixel adjustment-layer
+/// grading is render-only; the preview shows adjustments as outlines).
+fn effected_color(layer: &PulseLayer) -> [f32; 4] {
+    if layer.effects.is_empty() {
+        return layer.color;
+    }
+    let lin = [
+        srgb_to_linear(layer.color[0].clamp(0.0, 1.0)),
+        srgb_to_linear(layer.color[1].clamp(0.0, 1.0)),
+        srgb_to_linear(layer.color[2].clamp(0.0, 1.0)),
+        layer.color[3],
+    ];
+    let out = apply_effects(&layer.effects, lin);
+    [
+        linear_to_srgb(out[0]),
+        linear_to_srgb(out[1]),
+        linear_to_srgb(out[2]),
+        out[3],
+    ]
+}
 
 /// Convert a straight sRGB `[f32; 4]` (0..=1) into an egui [`Color32`], scaling
 /// alpha by `opacity`.
@@ -116,12 +141,42 @@ fn paint_layer(
         })
         .collect();
 
-    let fill = to_color32(layer.color, tf.opacity);
-    painter.add(egui::Shape::convex_polygon(
-        corners.clone(),
-        fill,
-        Stroke::NONE,
-    ));
+    match layer.kind {
+        LayerKind::Solid => {
+            // Solids paint their (effect-processed) color, faded by opacity.
+            let fill = to_color32(effected_color(layer), tf.opacity);
+            painter.add(egui::Shape::convex_polygon(
+                corners.clone(),
+                fill,
+                Stroke::NONE,
+            ));
+        }
+        LayerKind::Adjustment => {
+            // Adjustment layers don't paint pixels (the regrade is render-only);
+            // show a dashed bounds outline so they stay visible & selectable.
+            let mut outline = corners.clone();
+            outline.push(corners[0]);
+            painter.add(egui::Shape::line(
+                outline,
+                Stroke::new(1.0, theme::muted().gamma_multiply(0.8)),
+            ));
+        }
+        LayerKind::Null => {
+            // Nulls are invisible reference handles: draw a small pivot marker at
+            // the layer origin so the rig is locatable.
+            let (ox, oy) = world.apply(0.0, 0.0);
+            let o = center + Vec2::new(ox * scale, oy * scale);
+            let s = 8.0;
+            painter.line_segment(
+                [o - Vec2::new(s, 0.0), o + Vec2::new(s, 0.0)],
+                Stroke::new(1.0, theme::muted()),
+            );
+            painter.line_segment(
+                [o - Vec2::new(0.0, s), o + Vec2::new(0.0, s)],
+                Stroke::new(1.0, theme::muted()),
+            );
+        }
+    }
 
     if selected {
         let mut outline = corners.clone();

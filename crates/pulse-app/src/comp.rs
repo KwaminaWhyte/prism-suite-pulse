@@ -359,6 +359,207 @@ impl Track {
     }
 }
 
+/// What a layer *is* — its source/role in the composite, in the After-Effects
+/// sense.
+///
+/// - [`LayerKind::Solid`] — a solid color quad (the v0 layer): it draws its own
+///   pixels and its effect stack processes those pixels.
+/// - [`LayerKind::Null`] — an invisible reference layer: it renders nothing, but
+///   its transform is real, so it's useful purely as a **parent** (a controllable
+///   pivot/rig handle). Matches AE's null object.
+/// - [`LayerKind::Adjustment`] — draws nothing of its own; instead its **effect
+///   stack** is applied to the composite of every layer *below* it, within the
+///   layer's transformed bounds. Matches AE's adjustment layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerKind {
+    #[default]
+    Solid,
+    Null,
+    Adjustment,
+}
+
+impl LayerKind {
+    /// All kinds, in menu order.
+    pub const ALL: [LayerKind; 3] = [LayerKind::Solid, LayerKind::Null, LayerKind::Adjustment];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LayerKind::Solid => "Solid",
+            LayerKind::Null => "Null",
+            LayerKind::Adjustment => "Adjustment",
+        }
+    }
+
+    /// Whether a layer of this kind draws its own pixels. A null draws nothing;
+    /// an adjustment draws nothing of its own (it only re-processes the layers
+    /// beneath it).
+    pub fn draws_own_pixels(self) -> bool {
+        matches!(self, LayerKind::Solid)
+    }
+}
+
+/// A single non-destructive **effect** in a layer's effect stack.
+///
+/// Effects are pure color-correction passes evaluated in **linear light** on a
+/// straight (non-premultiplied) RGBA pixel: `apply` maps a linear-light RGBA in
+/// `[0,1]` (alpha carried through unchanged) to a new linear-light RGBA. They
+/// stack in order — the output of one feeds the next. Kept Pulse-side and pure
+/// (no GPU, no time) so each is unit-testable; they'll migrate to the suite's
+/// `prism-fx` host when that lands.
+///
+/// These are the After-Effects color-correction staples: **Tint**, **Brightness
+/// & Contrast**, **Exposure**, and **Levels** (input/output black & white +
+/// gamma). All parameters are plain scalars (not yet animatable `Property`s —
+/// that arrives with the typed-property rebuild), so the stack is a fixed look
+/// per layer for now.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Effect {
+    /// Map black→`black`, white→`white`, blending by per-pixel luminance and
+    /// `amount` (0 = original, 1 = fully tinted). The classic two-color Tint.
+    Tint {
+        black: [f32; 3],
+        white: [f32; 3],
+        amount: f32,
+    },
+    /// Linear brightness offset + contrast pivot about 0.5.
+    /// `out = (in - 0.5) * contrast + 0.5 + brightness`.
+    BrightnessContrast { brightness: f32, contrast: f32 },
+    /// Photographic exposure in stops: `out = in * 2^stops`, then an `offset`
+    /// lift and a `gamma` (so it doubles as a simple grade).
+    Exposure { stops: f32, offset: f32, gamma: f32 },
+    /// Levels: remap `[in_black, in_white]` to `[0,1]` with a midtone `gamma`,
+    /// then to the `[out_black, out_white]` output range. The motion-graphics
+    /// contrast workhorse.
+    Levels {
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+    },
+}
+
+impl Effect {
+    /// A short, stable label for the UI and for the "add effect" menu.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Effect::Tint { .. } => "Tint",
+            Effect::BrightnessContrast { .. } => "Brightness & Contrast",
+            Effect::Exposure { .. } => "Exposure",
+            Effect::Levels { .. } => "Levels",
+        }
+    }
+
+    /// A fresh, value-neutral (or sensibly-default) instance of each effect, for
+    /// the "add effect" menu. Defaults are identity where possible so adding an
+    /// effect never changes the look until a parameter is touched — except Tint,
+    /// which seeds a recognizable black→white map at full strength.
+    pub fn defaults() -> [Effect; 4] {
+        [
+            Effect::Tint {
+                black: [0.0, 0.0, 0.0],
+                white: [1.0, 1.0, 1.0],
+                amount: 1.0,
+            },
+            Effect::BrightnessContrast {
+                brightness: 0.0,
+                contrast: 1.0,
+            },
+            Effect::Exposure {
+                stops: 0.0,
+                offset: 0.0,
+                gamma: 1.0,
+            },
+            Effect::Levels {
+                in_black: 0.0,
+                in_white: 1.0,
+                gamma: 1.0,
+                out_black: 0.0,
+                out_white: 1.0,
+            },
+        ]
+    }
+
+    /// Apply this effect to a straight linear-light RGBA pixel, returning the
+    /// processed pixel. Alpha is passed through untouched (these are color
+    /// operations); RGB stays clamped to `[0,1]` on output.
+    pub fn apply(&self, rgba: [f32; 4]) -> [f32; 4] {
+        let [r, g, b, a] = rgba;
+        let out = match *self {
+            Effect::Tint {
+                black,
+                white,
+                amount,
+            } => {
+                // Rec.709 luma in linear light, used as the tint mix parameter.
+                let l = (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0);
+                let lerp = |lo: f32, hi: f32| lo + (hi - lo) * l;
+                let tinted = [
+                    lerp(black[0], white[0]),
+                    lerp(black[1], white[1]),
+                    lerp(black[2], white[2]),
+                ];
+                let m = amount.clamp(0.0, 1.0);
+                [
+                    r + (tinted[0] - r) * m,
+                    g + (tinted[1] - g) * m,
+                    b + (tinted[2] - b) * m,
+                ]
+            }
+            Effect::BrightnessContrast {
+                brightness,
+                contrast,
+            } => {
+                let f = |v: f32| (v - 0.5) * contrast + 0.5 + brightness;
+                [f(r), f(g), f(b)]
+            }
+            Effect::Exposure {
+                stops,
+                offset,
+                gamma,
+            } => {
+                let mul = 2.0_f32.powf(stops);
+                let g_inv = 1.0 / gamma.max(1e-3);
+                let f = |v: f32| {
+                    let lifted = (v * mul + offset).max(0.0);
+                    lifted.powf(g_inv)
+                };
+                [f(r), f(g), f(b)]
+            }
+            Effect::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+            } => {
+                let span = (in_white - in_black).abs().max(1e-3);
+                let g_inv = 1.0 / gamma.max(1e-3);
+                let f = |v: f32| {
+                    let normalized = ((v - in_black) / span).clamp(0.0, 1.0);
+                    let curved = normalized.powf(g_inv);
+                    out_black + (out_white - out_black) * curved
+                };
+                [f(r), f(g), f(b)]
+            }
+        };
+        [
+            out[0].clamp(0.0, 1.0),
+            out[1].clamp(0.0, 1.0),
+            out[2].clamp(0.0, 1.0),
+            a,
+        ]
+    }
+}
+
+/// Apply an ordered effect stack to a straight linear-light RGBA pixel.
+pub fn apply_effects(effects: &[Effect], mut rgba: [f32; 4]) -> [f32; 4] {
+    for e in effects {
+        rgba = e.apply(rgba);
+    }
+    rgba
+}
+
 /// Which of a layer's animatable tracks; used to drive generic property UI.
 ///
 /// [`Prop::AnchorX`] / [`Prop::AnchorY`] are the layer's **anchor point**: the
@@ -428,9 +629,19 @@ impl Prop {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PulseLayer {
     pub name: String,
+    /// What this layer *is* (solid / null / adjustment). `serde`-defaulted to
+    /// `Solid` so pre-layer-kind `.pulse` files still load as solids.
+    #[serde(default)]
+    pub kind: LayerKind,
     /// Solid swatch color (straight sRGB RGBA, 0..=1) for the v0 preview.
     pub color: [f32; 4],
     pub visible: bool,
+    /// Non-destructive, ordered **effect stack**. For a solid layer the stack
+    /// processes the layer's own pixels; for an adjustment layer it processes
+    /// the composite of everything below. `serde`-defaulted to empty for old
+    /// projects.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
     /// Parent layer index, if this layer is parented. A child inherits its
     /// parent's full transform (position, scale, rotation, anchor) but **not**
     /// its opacity (matching After Effects). `serde`-defaulted so pre-parenting
@@ -456,8 +667,10 @@ impl PulseLayer {
     pub fn new(name: impl Into<String>, color: [f32; 4]) -> Self {
         Self {
             name: name.into(),
+            kind: LayerKind::Solid,
             color,
             visible: true,
+            effects: Vec::new(),
             parent: None,
             anchor_x: Track::default(),
             anchor_y: Track::default(),
@@ -466,6 +679,14 @@ impl PulseLayer {
             scale: Track::default(),
             rotation: Track::default(),
             opacity: Track::default(),
+        }
+    }
+
+    /// A new layer of the given kind, name, and color (empty tracks/effects).
+    pub fn of_kind(kind: LayerKind, name: impl Into<String>, color: [f32; 4]) -> Self {
+        Self {
+            kind,
+            ..Self::new(name, color)
         }
     }
 
@@ -687,6 +908,20 @@ impl Comp {
         satellite.x.set_key(0.0, 360.0);
         satellite.y.set_key(0.0, -180.0);
         c.layers.push(satellite); // index 1
+
+        // A full-frame adjustment layer on top: its effect stack regrades every
+        // layer beneath it (here a punchy Levels contrast) without drawing any
+        // pixels of its own — showcasing layer kinds + the effect stack on launch.
+        let mut grade = PulseLayer::of_kind(LayerKind::Adjustment, "Grade", [1.0; 4]);
+        grade.scale.set_key(0.0, 3.0); // cover the whole frame
+        grade.effects.push(Effect::Levels {
+            in_black: 0.05,
+            in_white: 0.85,
+            gamma: 1.1,
+            out_black: 0.0,
+            out_white: 1.0,
+        });
+        c.layers.push(grade); // index 2
         c
     }
 }
@@ -1192,6 +1427,152 @@ mod tests {
         assert!(!c.can_parent(0, 2));
         // Re-pointing the tail (2) at the root (0) is acyclic and allowed.
         assert!(c.can_parent(2, 0));
+    }
+
+    // --- Layer kinds --------------------------------------------------------
+
+    #[test]
+    fn only_solid_draws_own_pixels() {
+        assert!(LayerKind::Solid.draws_own_pixels());
+        assert!(!LayerKind::Null.draws_own_pixels());
+        assert!(!LayerKind::Adjustment.draws_own_pixels());
+    }
+
+    #[test]
+    fn layer_kind_serde_defaults_to_solid() {
+        // A pre-kind layer (no `kind`/`effects` fields) loads as a Solid with no
+        // effects.
+        let json = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+            "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+            "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+        let layer: PulseLayer = serde_json::from_str(json).unwrap();
+        assert_eq!(layer.kind, LayerKind::Solid);
+        assert!(layer.effects.is_empty());
+    }
+
+    // --- Effects ------------------------------------------------------------
+
+    fn approx_rgb(a: [f32; 4], b: [f32; 3]) -> bool {
+        (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4 && (a[2] - b[2]).abs() < 1e-4
+    }
+
+    #[test]
+    fn effect_preserves_alpha() {
+        let px = [0.5, 0.5, 0.5, 0.37];
+        for e in Effect::defaults() {
+            assert_eq!(e.apply(px)[3], 0.37, "{} changed alpha", e.label());
+        }
+    }
+
+    #[test]
+    fn brightness_contrast_identity_is_neutral() {
+        let e = Effect::BrightnessContrast {
+            brightness: 0.0,
+            contrast: 1.0,
+        };
+        assert!(approx_rgb(e.apply([0.2, 0.5, 0.8, 1.0]), [0.2, 0.5, 0.8]));
+    }
+
+    #[test]
+    fn brightness_lifts_and_contrast_pivots_about_half() {
+        // +0.1 brightness lifts everything.
+        let b = Effect::BrightnessContrast {
+            brightness: 0.1,
+            contrast: 1.0,
+        };
+        assert!(approx_rgb(b.apply([0.4, 0.4, 0.4, 1.0]), [0.5, 0.5, 0.5]));
+        // 2x contrast: 0.5 is the pivot (unchanged), 0.75 pushes toward white.
+        let c = Effect::BrightnessContrast {
+            brightness: 0.0,
+            contrast: 2.0,
+        };
+        assert!((c.apply([0.5, 0.5, 0.5, 1.0])[0] - 0.5).abs() < 1e-4);
+        assert!(c.apply([0.75, 0.75, 0.75, 1.0])[0] > 0.75);
+    }
+
+    #[test]
+    fn exposure_doubles_per_stop_and_clamps() {
+        let e = Effect::Exposure {
+            stops: 1.0,
+            offset: 0.0,
+            gamma: 1.0,
+        };
+        // +1 stop doubles linear value: 0.25 -> 0.5.
+        assert!((e.apply([0.25, 0.25, 0.25, 1.0])[0] - 0.5).abs() < 1e-4);
+        // Output is clamped into [0,1] (0.8 * 2 = 1.6 -> 1.0).
+        assert_eq!(e.apply([0.8, 0.8, 0.8, 1.0])[0], 1.0);
+    }
+
+    #[test]
+    fn levels_identity_is_neutral_and_remaps_range() {
+        let id = Effect::Levels {
+            in_black: 0.0,
+            in_white: 1.0,
+            gamma: 1.0,
+            out_black: 0.0,
+            out_white: 1.0,
+        };
+        assert!(approx_rgb(id.apply([0.3, 0.6, 0.9, 1.0]), [0.3, 0.6, 0.9]));
+        // Lift the input black point to 0.5: anything <=0.5 clamps to out_black 0.
+        let lift = Effect::Levels {
+            in_black: 0.5,
+            in_white: 1.0,
+            gamma: 1.0,
+            out_black: 0.0,
+            out_white: 1.0,
+        };
+        assert_eq!(lift.apply([0.5, 0.5, 0.5, 1.0])[0], 0.0);
+        // The new white point (1.0) maps to out_white (1.0).
+        assert!((lift.apply([1.0, 1.0, 1.0, 1.0])[0] - 1.0).abs() < 1e-4);
+        // Midway (0.75) sits halfway in the remapped range.
+        assert!((lift.apply([0.75, 0.75, 0.75, 1.0])[0] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn tint_maps_luma_between_black_and_white() {
+        // Tint black->blue, white->red at full strength: a mid-gray maps to a
+        // blend, pure black to blue, pure white to red.
+        let e = Effect::Tint {
+            black: [0.0, 0.0, 1.0],
+            white: [1.0, 0.0, 0.0],
+            amount: 1.0,
+        };
+        assert!(approx_rgb(e.apply([0.0, 0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]));
+        assert!(approx_rgb(e.apply([1.0, 1.0, 1.0, 1.0]), [1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn tint_amount_zero_is_passthrough() {
+        let e = Effect::Tint {
+            black: [0.0, 0.0, 0.0],
+            white: [1.0, 1.0, 1.0],
+            amount: 0.0,
+        };
+        assert!(approx_rgb(e.apply([0.2, 0.5, 0.8, 1.0]), [0.2, 0.5, 0.8]));
+    }
+
+    #[test]
+    fn apply_effects_chains_in_order() {
+        // Brightness +0.5 then a Levels that remaps [0,0.5]->[0,1]: order matters.
+        let stack = [
+            Effect::BrightnessContrast {
+                brightness: 0.5,
+                contrast: 1.0,
+            },
+            Effect::Levels {
+                in_black: 0.0,
+                in_white: 0.5,
+                gamma: 1.0,
+                out_black: 0.0,
+                out_white: 1.0,
+            },
+        ];
+        // 0.0 -> +0.5 -> remapped (0.5/0.5)=1.0.
+        let out = apply_effects(&stack, [0.0, 0.0, 0.0, 1.0]);
+        assert!((out[0] - 1.0).abs() < 1e-4);
+        // Empty stack is a passthrough.
+        let same = apply_effects(&[], [0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(same, [0.1, 0.2, 0.3, 0.4]);
     }
 
     #[test]

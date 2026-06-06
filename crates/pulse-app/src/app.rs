@@ -2,7 +2,7 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{Comp, Ease, Interp, Prop, PulseLayer};
+use crate::comp::{Comp, Ease, Effect, Interp, LayerKind, Prop, PulseLayer};
 use crate::graph::GraphState;
 use crate::{graph, icons, preview, render, theme, timeline};
 use egui::{Color32, Sense};
@@ -72,11 +72,24 @@ impl PulseApp {
     }
 
     fn add_layer(&mut self) {
-        let color = self.next_color();
+        self.add_layer_of_kind(LayerKind::Solid);
+    }
+
+    /// Add a new layer of the given kind, named and colored to suit. Null layers
+    /// default to a neutral swatch (they don't draw); adjustment layers cover
+    /// the frame (scale 3x) so their grade affects everything below out of the box.
+    fn add_layer_of_kind(&mut self, kind: LayerKind) {
         let n = self.comp.layers.len() + 1;
-        self.comp
-            .layers
-            .push(PulseLayer::new(format!("Solid {n}"), color));
+        let (name, color) = match kind {
+            LayerKind::Solid => (format!("Solid {n}"), self.next_color()),
+            LayerKind::Null => (format!("Null {n}"), [0.6, 0.6, 0.6, 1.0]),
+            LayerKind::Adjustment => (format!("Adjustment {n}"), [1.0, 1.0, 1.0, 1.0]),
+        };
+        let mut layer = PulseLayer::of_kind(kind, name, color);
+        if kind == LayerKind::Adjustment {
+            layer.scale.set_key(0.0, 3.0); // cover the whole comp
+        }
+        self.comp.layers.push(layer);
         self.selected = Some(self.comp.layers.len() - 1);
     }
 
@@ -240,13 +253,14 @@ impl PulseApp {
                     }
                 });
                 ui.menu_button("Layer", |ui| {
-                    if ui
-                        .button(format!("{}  Add layer", icons::ADD_LAYER))
-                        .clicked()
-                    {
-                        self.add_layer();
-                        ui.close_menu();
-                    }
+                    ui.menu_button(format!("{}  New", icons::ADD_LAYER), |ui| {
+                        for kind in LayerKind::ALL {
+                            if ui.button(kind.label()).clicked() {
+                                self.add_layer_of_kind(kind);
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     ui.add_enabled_ui(self.selected.is_some(), |ui| {
                         if ui
                             .button(format!("{}  Delete layer", icons::TRASH))
@@ -374,27 +388,44 @@ impl PulseApp {
                     return;
                 }
 
-                // Layer name + color swatch.
+                // Layer name + kind.
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(&mut self.comp.layers[idx].name);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Color");
-                    let c = &mut self.comp.layers[idx].color;
-                    let mut col = Color32::from_rgba_unmultiplied(
-                        (c[0] * 255.0) as u8,
-                        (c[1] * 255.0) as u8,
-                        (c[2] * 255.0) as u8,
-                        (c[3] * 255.0) as u8,
-                    );
-                    if ui.color_edit_button_srgba(&mut col).changed() {
-                        c[0] = col.r() as f32 / 255.0;
-                        c[1] = col.g() as f32 / 255.0;
-                        c[2] = col.b() as f32 / 255.0;
-                        c[3] = col.a() as f32 / 255.0;
-                    }
+                    ui.label("Kind");
+                    let cur = self.comp.layers[idx].kind;
+                    egui::ComboBox::from_id_salt(("kind", idx))
+                        .selected_text(cur.label())
+                        .show_ui(ui, |ui| {
+                            for kind in LayerKind::ALL {
+                                if ui.selectable_label(cur == kind, kind.label()).clicked() {
+                                    self.comp.layers[idx].kind = kind;
+                                }
+                            }
+                        });
                 });
+
+                // Color is only meaningful for layers that draw their own pixels.
+                if self.comp.layers[idx].kind.draws_own_pixels() {
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        let c = &mut self.comp.layers[idx].color;
+                        let mut col = Color32::from_rgba_unmultiplied(
+                            (c[0] * 255.0) as u8,
+                            (c[1] * 255.0) as u8,
+                            (c[2] * 255.0) as u8,
+                            (c[3] * 255.0) as u8,
+                        );
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            c[0] = col.r() as f32 / 255.0;
+                            c[1] = col.g() as f32 / 255.0;
+                            c[2] = col.b() as f32 / 255.0;
+                            c[3] = col.a() as f32 / 255.0;
+                        }
+                    });
+                }
 
                 // Parent pick-whip: a child inherits this layer's transform.
                 self.parent_row(ui, idx);
@@ -405,7 +436,82 @@ impl PulseApp {
                 for prop in Prop::ALL {
                     self.property_row(ui, idx, prop, t);
                 }
+
+                // Effect stack (color-correction passes). Nulls draw nothing, so
+                // an effect stack on them would do nothing — hide the section.
+                if self.comp.layers[idx].kind != LayerKind::Null {
+                    ui.separator();
+                    self.effects_section(ui, idx);
+                }
             });
+    }
+
+    /// The layer's **effect stack** editor: an "Add effect" menu, then each
+    /// effect with reorder / remove controls and per-parameter sliders. Effects
+    /// process the layer's own color (solid) or the layers below (adjustment).
+    fn effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.horizontal(|ui| {
+            ui.heading("Effects");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    for eff in Effect::defaults() {
+                        if ui.button(eff.label()).clicked() {
+                            self.comp.layers[idx].effects.push(eff);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].kind == LayerKind::Adjustment {
+            ui.weak("Grades every layer below, within this layer's bounds.");
+        }
+        if self.comp.layers[idx].effects.is_empty() {
+            ui.weak("No effects. Click Add to apply one.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].effects.len();
+        for ei in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(self.comp.layers[idx].effects[ei].label()).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(ei);
+                    }
+                    if ui
+                        .add_enabled(ei > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((ei, true));
+                    }
+                    if ui
+                        .add_enabled(ei + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((ei, false));
+                    }
+                });
+            });
+            effect_params(ui, idx, ei, &mut self.comp.layers[idx].effects[ei]);
+        }
+
+        if let Some(ei) = to_remove {
+            self.comp.layers[idx].effects.remove(ei);
+        }
+        if let Some((ei, up)) = to_move {
+            let effects = &mut self.comp.layers[idx].effects;
+            let other = if up { ei.wrapping_sub(1) } else { ei + 1 };
+            if other < effects.len() {
+                effects.swap(ei, other);
+            }
+        }
     }
 
     /// The Parent selector for layer `idx`: a combo of "None" plus every other
@@ -674,6 +780,78 @@ fn interp_picker(ui: &mut egui::Ui, current: Interp) -> Option<Interp> {
         }
     }
     chosen
+}
+
+/// Parameter sliders / color pickers for one [`Effect`], editing it in place.
+/// `idx`/`ei` salt widget ids so multiple effects don't collide.
+fn effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut Effect) {
+    let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi));
+        });
+    };
+    match effect {
+        Effect::Tint {
+            black,
+            white,
+            amount,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Black");
+                rgb_button(ui, (idx, ei, 0), black);
+                ui.label("White");
+                rgb_button(ui, (idx, ei, 1), white);
+            });
+            slider(ui, "Amount", amount, 0.0, 1.0);
+        }
+        Effect::BrightnessContrast {
+            brightness,
+            contrast,
+        } => {
+            slider(ui, "Brightness", brightness, -1.0, 1.0);
+            slider(ui, "Contrast", contrast, 0.0, 3.0);
+        }
+        Effect::Exposure {
+            stops,
+            offset,
+            gamma,
+        } => {
+            slider(ui, "Stops", stops, -5.0, 5.0);
+            slider(ui, "Offset", offset, -0.5, 0.5);
+            slider(ui, "Gamma", gamma, 0.1, 3.0);
+        }
+        Effect::Levels {
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+        } => {
+            slider(ui, "In black", in_black, 0.0, 1.0);
+            slider(ui, "In white", in_white, 0.0, 1.0);
+            slider(ui, "Gamma", gamma, 0.1, 3.0);
+            slider(ui, "Out black", out_black, 0.0, 1.0);
+            slider(ui, "Out white", out_white, 0.0, 1.0);
+        }
+    }
+}
+
+/// An sRGB color-edit button bound to an `[f32; 3]` (0..1), salted by `id`.
+fn rgb_button(ui: &mut egui::Ui, id: (usize, usize, u8), c: &mut [f32; 3]) {
+    let mut col = Color32::from_rgb(
+        (c[0] * 255.0) as u8,
+        (c[1] * 255.0) as u8,
+        (c[2] * 255.0) as u8,
+    );
+    let resp = ui.push_id(id, |ui| ui.color_edit_button_srgba(&mut col));
+    if resp.inner.changed() {
+        c[0] = col.r() as f32 / 255.0;
+        c[1] = col.g() as f32 / 255.0;
+        c[2] = col.b() as f32 / 255.0;
+    }
 }
 
 /// Convert HSV (h in degrees, s/v in 0..1) to RGB in 0..1.

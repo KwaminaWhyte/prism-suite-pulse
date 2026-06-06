@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Layer types + effect stack** (After-Effects layer-kind & color-correction
+  parity) — layers are no longer all solids: each carries a **kind** and an
+  ordered, non-destructive **effect stack**.
+  - **Layer kinds** (`LayerKind`) — **Solid** (draws its colored quad, as
+    before), **Null** (an invisible reference layer that renders nothing but
+    whose transform is real — a controllable parent/pivot handle, shown as a
+    small pivot cross in the preview), and **Adjustment** (draws nothing of its
+    own; its effect stack regrades the composite of every layer *below* it,
+    within the layer's transformed bounds, blended by its opacity — AE's
+    adjustment layer). New layers of any kind are added from *Layer ▸ New*; the
+    kind is switchable per-layer in the Properties panel. `serde`-defaulted to
+    `Solid` so pre-kind `.pulse` files still load.
+  - **Effect stack** (`Effect`) — a per-layer `Vec<Effect>` of pure
+    color-correction passes evaluated in **linear light** (alpha preserved),
+    stacking in order. Ships the After-Effects staples: **Tint** (luminance map
+    between two colors with an amount mix), **Brightness & Contrast** (offset +
+    pivot about 0.5), **Exposure** (stops + offset + gamma), and **Levels**
+    (input/output black & white + midtone gamma). Edited in a new **Effects**
+    section of the Properties panel (add via menu, reorder, remove, per-parameter
+    sliders / color pickers). For a solid the stack processes the layer's own
+    color; for an adjustment it reprocesses the layers beneath.
+  - The software compositor (`render.rs`) and the egui preview both honor kinds
+    and effects: nulls are skipped, solids composite their effect-processed
+    color, and adjustments inverse-map their quad to regrade covered (non-
+    transparent) pixels in place — so exported frames match the preview. The
+    launch demo now ships a full-frame **Adjustment** layer applying a punchy
+    Levels grade over the parented solid pair. All new pure logic — each effect's
+    transfer function, alpha preservation, stack ordering, kind-dispatch, and
+    adjustment quad-bounds / transparency handling — is unit-tested.
 - **Anchor point + layer parenting** (After-Effects transform parity) — the
   transform model is now a composed 2-D affine chain instead of an ad-hoc inline
   rotate/scale, bringing two AE staples online.

@@ -20,7 +20,7 @@
 //! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
 
-use crate::comp::{Affine2, Comp, PulseLayer};
+use crate::comp::{apply_effects, Affine2, Comp, LayerKind, PulseLayer};
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
 use std::path::{Path, PathBuf};
 
@@ -93,7 +93,19 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
         // layer-local points (origin at the layer's geometric center) into comp
         // space (origin at the comp center, +y down).
         let world = comp.world_matrix(i, t);
-        composite_layer(&mut acc, w, h, cx, cy, half_w, half_h, world, layer, t);
+        match layer.kind {
+            // A null draws nothing — it's a transform reference (parent) only.
+            LayerKind::Null => {}
+            // A solid draws its own colored quad, processed by its effect stack.
+            LayerKind::Solid => {
+                composite_layer(&mut acc, w, h, cx, cy, half_w, half_h, world, layer, t);
+            }
+            // An adjustment re-processes the composite beneath it, within its
+            // own transformed quad bounds.
+            LayerKind::Adjustment => {
+                apply_adjustment(&mut acc, w, h, cx, cy, half_w, half_h, world, layer, t);
+            }
+        }
     }
 
     // Encode linear accumulator -> straight sRGB 8-bit RGBA.
@@ -147,6 +159,10 @@ fn composite_layer(
     if src_a <= 0.0 {
         return;
     }
+    // The layer's own effect stack processes its (linear, straight) color before
+    // it's composited — the solid is a constant-color source, so one evaluation
+    // covers the whole quad.
+    let [lr, lg, lb, _] = apply_effects(&layer.effects, [lr, lg, lb, layer.color[3]]);
 
     // Invert the world matrix once: a zero-scale (or otherwise singular) chain
     // collapses to nothing, so there is no coverage to composite.
@@ -199,6 +215,90 @@ fn composite_layer(
                 g: lg * src_a + dst.g * ia,
                 b: lb * src_a + dst.b * ia,
                 a: src_a + dst.a * ia,
+            };
+        }
+    }
+}
+
+/// Apply an **adjustment layer**'s effect stack to the composite beneath it,
+/// within the layer's transformed quad.
+///
+/// Unlike a solid (a constant-color source), an adjustment re-grades whatever is
+/// already in the accumulator: for each covered pixel we run the effect stack on
+/// the existing linear-light straight RGBA and write the result back. Coverage is
+/// the same inverse-mapped quad test the solid path uses; the layer's `opacity`
+/// blends the regraded result against the original so a partly-opaque adjustment
+/// is a partial grade. An empty effect stack is a no-op.
+#[allow(clippy::too_many_arguments)]
+fn apply_adjustment(
+    acc: &mut [Lin],
+    w: u32,
+    h: u32,
+    cx: f32,
+    cy: f32,
+    half_w: f32,
+    half_h: f32,
+    world: Affine2,
+    layer: &PulseLayer,
+    t: f32,
+) {
+    if layer.effects.is_empty() {
+        return;
+    }
+    let tf = layer.transform(t);
+    let mix = tf.opacity.clamp(0.0, 1.0);
+    if mix <= 0.0 {
+        return;
+    }
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+
+    let corners = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
+    ];
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (lx, ly) in corners {
+        let (wx, wy) = world.apply(lx, ly);
+        min_x = min_x.min(wx);
+        min_y = min_y.min(wy);
+        max_x = max_x.max(wx);
+        max_y = max_y.max(wy);
+    }
+    let x0 = ((cx + min_x).floor() as i32).max(0);
+    let x1 = ((cx + max_x).ceil() as i32).min(w as i32 - 1);
+    let y0 = ((cy + min_y).floor() as i32).max(0);
+    let y1 = ((cy + max_y).ceil() as i32).min(h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+
+    for py in y0..=y1 {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in x0..=x1 {
+            let comp_x = px as f32 + 0.5 - cx;
+            let (lx, ly) = inv.apply(comp_x, comp_y);
+            if lx.abs() > half_w || ly.abs() > half_h {
+                continue;
+            }
+            let idx = (py as u32 * w + px as u32) as usize;
+            let src = acc[idx];
+            // Nothing underneath here — grading transparent pixels would lift
+            // their (invisible) color into the buffer for no reason. Skip them.
+            if src.a <= 0.0 {
+                continue;
+            }
+            let graded = apply_effects(&layer.effects, [src.r, src.g, src.b, src.a]);
+            // Blend the regrade against the original by the adjustment's opacity.
+            acc[idx] = Lin {
+                r: src.r + (graded[0] - src.r) * mix,
+                g: src.g + (graded[1] - src.g) * mix,
+                b: src.b + (graded[2] - src.b) * mix,
+                a: src.a, // alpha is untouched by color grading
             };
         }
     }
@@ -528,6 +628,103 @@ mod tests {
         // Child's coverage rode the parent's +18 offset to the right.
         assert_eq!(f.pixel(50, 32)[3], 255);
         assert_eq!(f.pixel(10, 32)[3], 0);
+    }
+
+    // --- Layer kinds + effects ---------------------------------------------
+
+    #[test]
+    fn null_layer_renders_nothing() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].kind = crate::comp::LayerKind::Null;
+        let f = render_frame(&c, 0.0);
+        assert!(f.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn solid_effect_stack_recolors_the_quad() {
+        // A black solid with a Tint mapping black->white should now read white at
+        // the center (the effect runs on the layer's own color before compositing).
+        let mut c = solid([0.0, 0.0, 0.0, 1.0]);
+        c.layers[0].effects.push(crate::comp::Effect::Tint {
+            black: [1.0, 1.0, 1.0],
+            white: [1.0, 1.0, 1.0],
+            amount: 1.0,
+        });
+        let f = render_frame(&c, 0.0);
+        let [r, g, b, a] = f.pixel(32, 32);
+        assert_eq!(a, 255);
+        assert!(
+            r > 250 && g > 250 && b > 250,
+            "expected white, got {r},{g},{b}"
+        );
+    }
+
+    #[test]
+    fn adjustment_layer_regrades_layers_below() {
+        // A mid-gray solid beneath a full-frame adjustment that lifts brightness
+        // should read brighter at the center than without the adjustment.
+        let make = |with_adj: bool| {
+            let mut c = solid([0.5, 0.5, 0.5, 1.0]);
+            if with_adj {
+                let mut adj =
+                    PulseLayer::of_kind(crate::comp::LayerKind::Adjustment, "adj", [1.0; 4]);
+                adj.scale.set_key(0.0, 3.0); // cover the frame
+                adj.effects.push(crate::comp::Effect::BrightnessContrast {
+                    brightness: 0.3,
+                    contrast: 1.0,
+                });
+                c.layers.push(adj);
+            }
+            render_frame(&c, 0.0).pixel(32, 32)[0]
+        };
+        assert!(
+            make(true) > make(false),
+            "adjustment did not brighten below"
+        );
+    }
+
+    #[test]
+    fn adjustment_layer_draws_no_pixels_of_its_own() {
+        // An adjustment over an empty comp leaves it transparent (no source).
+        let mut c = Comp {
+            width: 16,
+            height: 16,
+            duration: 1.0,
+            fps: 30.0,
+            layers: Vec::new(),
+        };
+        let mut adj = PulseLayer::of_kind(crate::comp::LayerKind::Adjustment, "adj", [1.0; 4]);
+        adj.scale.set_key(0.0, 3.0);
+        adj.effects.push(crate::comp::Effect::BrightnessContrast {
+            brightness: 0.5,
+            contrast: 1.0,
+        });
+        c.layers.push(adj);
+        let f = render_frame(&c, 0.0);
+        assert!(f.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn adjustment_only_affects_its_quad_bounds() {
+        // A small (unscaled) adjustment over a full-frame solid grades only the
+        // pixels inside its quad: the center changes, a far corner does not.
+        let mut c = solid([0.5, 0.5, 0.5, 1.0]);
+        c.layers[0].scale.set_key(0.0, 3.0); // bottom solid covers the frame
+        let mut adj = PulseLayer::of_kind(crate::comp::LayerKind::Adjustment, "adj", [1.0; 4]);
+        adj.effects.push(crate::comp::Effect::BrightnessContrast {
+            brightness: 0.3,
+            contrast: 1.0,
+        });
+        c.layers.push(adj); // unit-scale: covers only ~the center quad
+        let f = render_frame(&c, 0.0);
+        let center = f.pixel(32, 32)[0];
+        let corner = f.pixel(1, 1)[0];
+        // Center (inside the small adjustment quad) is brighter than an edge
+        // pixel (covered by the solid but outside the adjustment).
+        assert!(
+            center > corner,
+            "center {center} should exceed corner {corner}"
+        );
     }
 
     #[test]
