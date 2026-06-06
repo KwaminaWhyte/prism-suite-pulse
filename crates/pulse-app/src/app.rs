@@ -83,6 +83,15 @@ impl PulseApp {
     fn delete_layer(&mut self, idx: usize) {
         if idx < self.comp.layers.len() {
             self.comp.layers.remove(idx);
+            // Fix up parent references: children of the removed layer become
+            // unparented; indices above `idx` shift down by one.
+            for layer in &mut self.comp.layers {
+                layer.parent = match layer.parent {
+                    Some(p) if p == idx => None,
+                    Some(p) if p > idx => Some(p - 1),
+                    other => other,
+                };
+            }
             self.selected = match self.selected {
                 Some(s) if s == idx => None,
                 Some(s) if s > idx => Some(s - 1),
@@ -107,6 +116,15 @@ impl PulseApp {
             idx - 1
         };
         self.comp.layers.swap(idx, target);
+        // Swapping two layers swaps their positional indices, so any parent
+        // reference pointing at one must now point at the other.
+        for layer in &mut self.comp.layers {
+            layer.parent = match layer.parent {
+                Some(p) if p == idx => Some(target),
+                Some(p) if p == target => Some(idx),
+                other => other,
+            };
+        }
         if self.selected == Some(idx) {
             self.selected = Some(target);
         } else if self.selected == Some(target) {
@@ -378,6 +396,9 @@ impl PulseApp {
                     }
                 });
 
+                // Parent pick-whip: a child inherits this layer's transform.
+                self.parent_row(ui, idx);
+
                 ui.separator();
 
                 let t = self.time;
@@ -385,6 +406,48 @@ impl PulseApp {
                     self.property_row(ui, idx, prop, t);
                 }
             });
+    }
+
+    /// The Parent selector for layer `idx`: a combo of "None" plus every other
+    /// layer that can legally be a parent (no self, no cycle). Choosing a parent
+    /// makes `idx` inherit that layer's transform.
+    fn parent_row(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let current = self.comp.layers[idx].parent;
+        let current_label = match current {
+            Some(p) if p < self.comp.layers.len() => self.comp.layers[p].name.clone(),
+            _ => "None".to_owned(),
+        };
+        let mut chosen: Option<Option<usize>> = None;
+        ui.horizontal(|ui| {
+            ui.label("Parent");
+            egui::ComboBox::from_id_salt(("parent", idx))
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_none(), "None").clicked() {
+                        chosen = Some(None);
+                    }
+                    for other in 0..self.comp.layers.len() {
+                        if other == idx || !self.comp.can_parent(idx, other) {
+                            continue;
+                        }
+                        let sel = current == Some(other);
+                        if ui
+                            .selectable_label(sel, &self.comp.layers[other].name)
+                            .clicked()
+                        {
+                            chosen = Some(Some(other));
+                        }
+                    }
+                });
+        });
+        if let Some(next) = chosen {
+            // Re-validate (the combo only lists safe options, but be defensive).
+            self.comp.layers[idx].parent = match next {
+                Some(p) if self.comp.can_parent(idx, p) => Some(p),
+                Some(_) => current,
+                None => None,
+            };
+        }
     }
 
     /// One property: live value slider + keyframe controls.

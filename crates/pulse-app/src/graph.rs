@@ -31,9 +31,11 @@ const GRAB_R: f32 = 7.0;
 /// the dark plot. Indexed by [`Prop::ALL`] order.
 fn prop_color(prop: Prop) -> Color32 {
     match prop {
-        Prop::X => Color32::from_rgb(0xE5, 0x6B, 0x6B), // red
-        Prop::Y => Color32::from_rgb(0x6B, 0xC2, 0x7A), // green
-        Prop::Scale => Color32::from_rgb(0x4E, 0x9B, 0xE6), // blue
+        Prop::AnchorX => Color32::from_rgb(0xD0, 0x6B, 0x9C), // pink
+        Prop::AnchorY => Color32::from_rgb(0x4E, 0xC2, 0xC2), // teal
+        Prop::X => Color32::from_rgb(0xE5, 0x6B, 0x6B),       // red
+        Prop::Y => Color32::from_rgb(0x6B, 0xC2, 0x7A),       // green
+        Prop::Scale => Color32::from_rgb(0x4E, 0x9B, 0xE6),   // blue
         Prop::Rotation => Color32::from_rgb(0xE6, 0xA1, 0x3C), // amber
         Prop::Opacity => Color32::from_rgb(0xB8, 0x7B, 0xE6), // violet
     }

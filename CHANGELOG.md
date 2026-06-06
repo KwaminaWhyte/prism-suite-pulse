@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Anchor point + layer parenting** (After-Effects transform parity) — the
+  transform model is now a composed 2-D affine chain instead of an ad-hoc inline
+  rotate/scale, bringing two AE staples online.
+  - **Anchor point** — two new animatable properties (`Anchor X` / `Anchor Y`,
+    comp-px offset from the layer's geometric center). The anchor is the pivot
+    that scale and rotation happen about, and the layer-local point aligned to
+    `(X, Y)` position — built as `Translate(pos)·Rotate·Scale·Translate(-anchor)`,
+    the standard AE transform order. The default `(0, 0)` keeps a layer pivoting
+    about its center, so existing comps render identically.
+  - **Parenting** — a layer can be **parented** to another (`Parent` pick-whip in
+    the Properties panel); the child inherits the parent's full transform
+    (position, scale, rotation, anchor) but **not** opacity, matching AE. Parent
+    references survive layer delete / reorder (indices are fixed up; orphaned
+    children are unparented), and the picker only offers cycle-free targets.
+  - **`Affine2`** — a 2-D affine matrix (translate / scale / rotate / compose /
+    apply / invert) plus `Transform::local_matrix`, `Comp::world_matrix`
+    (parent-chain composition with a cycle guard), and `Comp::can_parent`
+    (self/missing/descendant rejection) — all unit-tested. The preview and the
+    software compositor (`render.rs`) both rasterize through the resolved world
+    matrix (inverse-mapping each pixel for coverage), so offline frames match the
+    on-screen preview. The launch demo now ships a satellite layer parented to
+    the sliding solid to showcase it.
 - **PNG image-sequence export** — File ▸ *Export PNG sequence…* renders the whole
   composition to a folder of numbered PNGs (`comp_0000.png`, `comp_0001.png`, …),
   one file per frame across the comp's `[0, duration]` timeline at its fps

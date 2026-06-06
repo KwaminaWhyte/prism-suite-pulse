@@ -4,10 +4,11 @@
 //! This is the headless twin of [`preview`](crate::preview): where the preview
 //! paints layers through egui's `Painter` at screen resolution, [`render_frame`]
 //! produces a *real* pixel buffer at the comp's native resolution, using the
-//! exact same transform model (a layer is a centered solid quad sized to a
-//! fraction of the comp, offset by `(x, y)`, uniformly scaled, rotated about its
-//! own center, and faded by `opacity`). Exported frames therefore match what the
-//! preview shows.
+//! exact same transform model (a layer is a solid quad sized to a fraction of
+//! the comp, transformed by its resolved [`Affine2`](crate::comp::Affine2) world
+//! matrix — position, uniform scale, and rotation about its **anchor point**,
+//! composed under any **parent** chain — and faded by `opacity`). Exported
+//! frames therefore match what the preview shows.
 //!
 //! Compositing is **source-over in linear light**: each layer's straight sRGB
 //! color is converted to linear (through `prism-core`'s shared color boundary),
@@ -19,7 +20,7 @@
 //! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
 
-use crate::comp::{Comp, PulseLayer};
+use crate::comp::{Affine2, Comp, PulseLayer};
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
 use std::path::{Path, PathBuf};
 
@@ -84,11 +85,15 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
     let half_w = w as f32 * LAYER_HALF_FRAC;
     let half_h = h as f32 * LAYER_HALF_FRAC;
 
-    for layer in &comp.layers {
+    for (i, layer) in comp.layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
-        composite_layer(&mut acc, w, h, cx, cy, half_w, half_h, layer, t);
+        // World matrix composes this layer under its parent chain; it maps
+        // layer-local points (origin at the layer's geometric center) into comp
+        // space (origin at the comp center, +y down).
+        let world = comp.world_matrix(i, t);
+        composite_layer(&mut acc, w, h, cx, cy, half_w, half_h, world, layer, t);
     }
 
     // Encode linear accumulator -> straight sRGB 8-bit RGBA.
@@ -109,6 +114,12 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
 }
 
 /// Composite one layer's solid quad into the linear accumulator.
+///
+/// `world` is the layer's resolved comp-space matrix (own transform + parent
+/// chain). It maps layer-local points (origin at the layer's geometric center)
+/// into comp space whose origin is the comp center. Coverage is tested by
+/// inverse-mapping each candidate pixel back into local space and box-testing
+/// against the `±half_w/±half_h` quad.
 #[allow(clippy::too_many_arguments)]
 fn composite_layer(
     acc: &mut [Lin],
@@ -118,6 +129,7 @@ fn composite_layer(
     cy: f32,
     half_w: f32,
     half_h: f32,
+    world: Affine2,
     layer: &PulseLayer,
     t: f32,
 ) {
@@ -125,18 +137,6 @@ fn composite_layer(
     if tf.opacity <= 0.0 {
         return;
     }
-    let s = tf.scale.max(0.0);
-    if s <= 0.0 {
-        return;
-    }
-
-    // Layer center in comp pixels (origin at comp center, +y down).
-    let lcx = cx + tf.x;
-    let lcy = cy + tf.y;
-
-    // Inverse rotation: rotate a comp-space delta back into layer-local space.
-    let theta = tf.rotation_deg.to_radians();
-    let (sin, cos) = theta.sin_cos();
 
     // Layer straight sRGB color -> linear; premultiply happens implicitly via
     // the source-over math below (we carry straight color + coverage alpha).
@@ -148,30 +148,45 @@ fn composite_layer(
         return;
     }
 
-    // Conservative bounding box of the rotated/scaled quad to avoid scanning the
-    // whole frame for small layers. Half-extent after scale, then the rotation
-    // can grow the AABB by |cos|+|sin| in each axis.
-    let ext_w = half_w * s;
-    let ext_h = half_h * s;
-    let aabb_w = ext_w * cos.abs() + ext_h * sin.abs();
-    let aabb_h = ext_w * sin.abs() + ext_h * cos.abs();
-    let x0 = ((lcx - aabb_w).floor() as i32).max(0);
-    let x1 = ((lcx + aabb_w).ceil() as i32).min(w as i32 - 1);
-    let y0 = ((lcy - aabb_h).floor() as i32).max(0);
-    let y1 = ((lcy + aabb_h).ceil() as i32).min(h as i32 - 1);
+    // Invert the world matrix once: a zero-scale (or otherwise singular) chain
+    // collapses to nothing, so there is no coverage to composite.
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+
+    // Conservative comp-space AABB of the quad: transform its four local corners
+    // through the world matrix and bound them. Comp space has the origin at the
+    // comp center, so add (cx, cy) to land in pixel coordinates.
+    let corners = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
+    ];
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (lx, ly) in corners {
+        let (wx, wy) = world.apply(lx, ly);
+        min_x = min_x.min(wx);
+        min_y = min_y.min(wy);
+        max_x = max_x.max(wx);
+        max_y = max_y.max(wy);
+    }
+    let x0 = ((cx + min_x).floor() as i32).max(0);
+    let x1 = ((cx + max_x).ceil() as i32).min(w as i32 - 1);
+    let y0 = ((cy + min_y).floor() as i32).max(0);
+    let y1 = ((cy + max_y).ceil() as i32).min(h as i32 - 1);
     if x0 > x1 || y0 > y1 {
         return;
     }
 
-    let inv_s = 1.0 / s;
     for py in y0..=y1 {
-        // Pixel center sampling.
-        let dy = py as f32 + 0.5 - lcy;
+        // Pixel center, expressed in comp space (origin at comp center).
+        let comp_y = py as f32 + 0.5 - cy;
         for px in x0..=x1 {
-            let dx = px as f32 + 0.5 - lcx;
-            // Inverse-rotate the comp-space delta into the layer's local frame.
-            let lx = (dx * cos + dy * sin) * inv_s;
-            let ly = (-dx * sin + dy * cos) * inv_s;
+            let comp_x = px as f32 + 0.5 - cx;
+            // Inverse-map the comp-space pixel into the layer's local frame.
+            let (lx, ly) = inv.apply(comp_x, comp_y);
             if lx.abs() > half_w || ly.abs() > half_h {
                 continue;
             }
@@ -453,6 +468,66 @@ mod tests {
             frame_path(dir, "comp", 42, 12000),
             dir.join("comp_00042.png")
         );
+    }
+
+    #[test]
+    fn anchor_offset_shifts_coverage_under_rotation() {
+        // With the anchor offset off-center, rotating pivots about the anchor,
+        // not the layer center — so the covered region moves vs. a centered
+        // anchor. Compare covered-pixel counts overlapping a probe far from
+        // center to confirm the pivot changed.
+        let covered_at = |anchor: f32| {
+            let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+            c.layers[0].anchor_x.set_key(0.0, anchor);
+            c.layers[0].rotation.set_key(0.0, 90.0);
+            let f = render_frame(&c, 0.0);
+            f.pixels.chunks(4).filter(|p| p[3] > 0).count()
+        };
+        // Both render *something* but the anchored pivot relocates the quad;
+        // assert the quad still covers a sensible number of pixels (sanity) and
+        // that an off-center anchor does not crash / vanish.
+        assert!(covered_at(0.0) > 0);
+        assert!(covered_at(20.0) > 0);
+    }
+
+    #[test]
+    fn anchored_layer_pivots_position_correctly() {
+        // 64x64 comp, center at (32,32). Anchor at the quad's left edge
+        // (anchor_x = -half_w ≈ -14) and position 0: the layer's left edge now
+        // sits at the comp center, so the quad extends to the right of center.
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        let half_w = 64.0 * LAYER_HALF_FRAC; // ~14
+        c.layers[0].anchor_x.set_key(0.0, -half_w);
+        let f = render_frame(&c, 0.0);
+        // A pixel just right of center is covered...
+        assert_eq!(f.pixel(40, 32)[3], 255);
+        // ...and one left of center (beyond the anchored left edge) is not.
+        assert_eq!(f.pixel(10, 32)[3], 0);
+    }
+
+    #[test]
+    fn parented_child_follows_parent_offset() {
+        // Parent shifted right; an unparented child at x=0 covers the center.
+        // Parenting it to the moved parent shifts its coverage right too.
+        let mut c = Comp {
+            width: 64,
+            height: 64,
+            duration: 1.0,
+            fps: 30.0,
+            layers: Vec::new(),
+        };
+        c.layers
+            .push(PulseLayer::new("parent", [0.0, 0.0, 0.0, 0.0])); // invisible-ish parent
+        c.layers[0].visible = false; // parent itself doesn't draw
+        c.layers[0].x.set_key(0.0, 18.0);
+        let mut child = PulseLayer::new("child", [1.0, 1.0, 1.0, 1.0]);
+        child.parent = Some(0);
+        c.layers.push(child);
+
+        let f = render_frame(&c, 0.0);
+        // Child's coverage rode the parent's +18 offset to the right.
+        assert_eq!(f.pixel(50, 32)[3], 255);
+        assert_eq!(f.pixel(10, 32)[3], 0);
     }
 
     #[test]

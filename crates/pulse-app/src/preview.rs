@@ -2,14 +2,17 @@
 //! playhead time through egui's [`Painter`].
 //!
 //! The comp is shown as a centered, aspect-fit rectangle inside the central
-//! panel. Each visible layer is a solid color rect, transformed by its sampled
-//! (x, y) offset, uniform scale, and rotation about its center, and faded by
-//! opacity. Layer coordinates are in comp pixels with the origin at the comp
-//! center; we map them to screen via a single fitted scale factor.
+//! panel. Each visible layer is a solid color rect, transformed by its resolved
+//! [`Affine2`] world matrix (position, uniform scale, and rotation about its
+//! anchor point, composed under any parent chain) and faded by opacity. Layer
+//! coordinates are in comp pixels with the origin at the comp center; we map
+//! them to screen via a single fitted scale factor.
 
 use crate::comp::{Comp, PulseLayer};
 use crate::theme;
 use egui::{Color32, Painter, Pos2, Rect, Stroke, Vec2};
+
+use crate::comp::Affine2;
 
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
 
@@ -58,16 +61,30 @@ pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected:
         if !layer.visible {
             continue;
         }
-        paint_layer(painter, layer, center, scale, comp, t, selected == Some(i));
+        // World matrix folds the layer's own transform under its parent chain.
+        let world = comp.world_matrix(i, t);
+        paint_layer(
+            painter,
+            layer,
+            center,
+            scale,
+            world,
+            comp,
+            t,
+            selected == Some(i),
+        );
     }
 }
 
-/// Paint a single layer as a rotated/scaled solid quad.
+/// Paint a single layer as a rotated/scaled solid quad, transformed by its
+/// resolved `world` matrix (own transform + parent chain).
+#[allow(clippy::too_many_arguments)]
 fn paint_layer(
     painter: &Painter,
     layer: &PulseLayer,
     center: Pos2,
     scale: f32,
+    world: Affine2,
     comp: &Comp,
     t: f32,
     selected: bool,
@@ -81,29 +98,21 @@ fn paint_layer(
     let half_w = comp.width as f32 * 0.22;
     let half_h = comp.height as f32 * 0.22;
 
-    // Local-space corners (comp px, origin at layer center), pre-rotation.
-    let s = tf.scale.max(0.0);
+    // Local-space corners (comp px, origin at the layer's geometric center).
     let local = [
-        Vec2::new(-half_w, -half_h),
-        Vec2::new(half_w, -half_h),
-        Vec2::new(half_w, half_h),
-        Vec2::new(-half_w, half_h),
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
     ];
 
-    let theta = tf.rotation_deg.to_radians();
-    let (sin, cos) = theta.sin_cos();
-
-    // Layer center on screen: comp center + (x, y) offset, all scaled to screen.
-    let lc = center + Vec2::new(tf.x * scale, tf.y * scale);
-
+    // Map each local corner through the world matrix into comp space, then to
+    // screen: comp center + comp-space offset scaled to screen.
     let corners: Vec<Pos2> = local
         .iter()
-        .map(|p| {
-            let sx = p.x * s;
-            let sy = p.y * s;
-            let rx = sx * cos - sy * sin;
-            let ry = sx * sin + sy * cos;
-            lc + Vec2::new(rx * scale, ry * scale)
+        .map(|&(lx, ly)| {
+            let (wx, wy) = world.apply(lx, ly);
+            center + Vec2::new(wx * scale, wy * scale)
         })
         .collect();
 
