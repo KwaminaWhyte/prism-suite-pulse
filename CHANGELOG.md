@@ -10,6 +10,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shape layers** (After-Effects shape-layer parity) — a new layer kind that
+  draws **parametric vector shapes** instead of a fixed solid quad, the first
+  layer type whose pixels come from authored geometry rather than a swatch.
+  - **`LayerKind::Shape`** — joins Solid / Null / Adjustment. A shape layer
+    carries a [`ShapeLayer`] (a `serde`-defaulted `shape` field on every layer,
+    so pre-shape `.pulse` files still load) — an ordered stack of [`ShapeItem`]s
+    composited bottom-up. New shape layers are added from *Layer ▸ New* (seeded
+    with a filled rectangle in the layer's color), and the kind is switchable
+    per-layer in the Properties panel like any other.
+  - **`ShapePrimitive`** — four parametric primitives, each centered at its
+    local origin and flattened to a closed layer-local polygon: **Rectangle**
+    (with an optional corner **radius** → rounded rect, each corner a
+    quarter-arc), **Ellipse** (sampled smooth), **Polygon** (a regular
+    `points`-gon, first vertex straight up), and **Star** (`points`-pointed,
+    alternating **outer**/**inner** circumradii). Degenerate parameters
+    (non-positive size, <3 polygon/star points) flatten to nothing.
+  - **`Fill` + `Stroke`** — each item has an optional solid **fill** (straight
+    sRGB color + opacity) and an optional **stroke** (color + width centered on
+    the path + opacity). Coverage is antialiased over a ~1 px ramp using the
+    nearest-edge signed distance (reusing the mask system's even-odd
+    point-in-polygon + segment-distance geometry); the stroke is a band of
+    `width` straddling the boundary, composited over the fill, so an item reads
+    as a filled-then-outlined shape.
+  - **Pure geometry** — `ShapePrimitive::flatten` (per-primitive polygon),
+    `ShapeItem::polygon` (offset into layer-local space), `item_coverage`
+    (fill + stroke straight-RGBA at a point), `ShapeLayer::coverage_at` (the
+    bottom-up item stack), and `ShapeLayer::local_bounds` (stroke-padded AABB to
+    bound the rasterizer) — all unit-tested: corner extents, rounded-corner
+    clipping, ellipse/polygon/star inside-outside + vertex radii, degenerate
+    emptiness, fill coverage/opacity/edge-AA, stroke-only band + stroke-over-fill,
+    bottom-up stacking, stroke-padded bounds, and the serde round-trip.
+  - The software compositor (`render.rs`) rasterizes a shape layer into an
+    **isolated, premultiplied linear-light** buffer (bounding the pixel loop to
+    the shape's transformed extent), then runs the same **masks**, **track
+    matte**, and **spatial-effect** passes a solid uses before compositing
+    source-over — so a shape composes with masks, mattes, blur/shadow/glow, and
+    **motion blur** (the shutter integrator dispatches to the shape rasterizer
+    per sub-frame). The egui preview paints each item's flattened polygon through
+    the layer's world matrix (fill via the tessellator, stroke as a closed
+    outline). New compositor tests cover fill coverage + color, the empty-shape
+    no-op, opacity, ellipse corner-clipping, mask composition, the unfilled
+    stroke outline, motion-blur footprint widening, and the pre-shape serde
+    default.
+  - UI: a new **Shape** section in the Properties panel (an "Add" menu for the
+    four primitives, then per-item primitive sliders, local offset, and fill /
+    stroke toggles with color + opacity/width), shown for shape layers. The
+    launch demo now ships a stroked five-point **Star** shape layer sliding and
+    rotating across the frame (graded by the adjustment layer above it) so shape
+    layers read out of the box.
 - **Spatial effects** (After-Effects blur / stylize / perspective staples) — the
   first **whole-buffer** (multi-pixel) effects, beyond the per-pixel
   color-correction stack: **Gaussian Blur**, **Drop Shadow**, and **Glow**.

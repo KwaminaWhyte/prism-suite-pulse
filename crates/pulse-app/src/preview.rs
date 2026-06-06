@@ -10,7 +10,7 @@
 
 use crate::comp::{apply_effects, Comp, LayerKind, MaskMode, PulseLayer};
 use crate::theme;
-use egui::{Color32, Painter, Pos2, Rect, Stroke, Vec2};
+use egui::{epaint::PathShape, Color32, Painter, Pos2, Rect, Stroke, Vec2};
 
 use crate::comp::Affine2;
 
@@ -195,6 +195,11 @@ fn paint_layer(
                 Stroke::NONE,
             ));
         }
+        LayerKind::Shape => {
+            // Shape layers paint each item's flattened polygon (fill, then
+            // stroke) transformed through the world matrix into screen space.
+            paint_shape(painter, layer, center, scale, world, opacity);
+        }
         LayerKind::Adjustment => {
             // Adjustment layers don't paint pixels (the regrade is render-only);
             // show a dashed bounds outline so they stay visible & selectable.
@@ -268,6 +273,64 @@ fn paint_masks(painter: &Painter, layer: &PulseLayer, center: Pos2, scale: f32, 
             theme::accent().gamma_multiply(0.9)
         };
         painter.add(egui::Shape::line(pts, Stroke::new(1.0, color)));
+    }
+}
+
+/// Paint a **shape layer**'s items: each item's flattened polygon, mapped from
+/// layer-local space through the `world` matrix to screen, filled and/or
+/// stroked. Items are drawn bottom-up (under to over), faded by `opacity`.
+///
+/// Mirrors the offline shape rasterizer's geometry so the preview matches an
+/// exported frame; egui's tessellator handles the (possibly concave) fill, and
+/// the stroke is drawn as a closed outline of the configured width.
+fn paint_shape(
+    painter: &Painter,
+    layer: &PulseLayer,
+    center: Pos2,
+    scale: f32,
+    world: crate::comp::Affine2,
+    opacity: f32,
+) {
+    for item in &layer.shape.items {
+        let poly = item.polygon();
+        if poly.len() < 3 {
+            continue;
+        }
+        let pts: Vec<Pos2> = poly
+            .iter()
+            .map(|&(lx, ly)| {
+                let (wx, wy) = world.apply(lx, ly);
+                center + Vec2::new(wx * scale, wy * scale)
+            })
+            .collect();
+
+        let fill = item
+            .fill
+            .map(|f| {
+                to_color32(
+                    [f.color[0], f.color[1], f.color[2], 1.0],
+                    opacity * f.opacity,
+                )
+            })
+            .unwrap_or(Color32::TRANSPARENT);
+        let stroke = item
+            .stroke
+            .filter(|s| s.width > 0.0)
+            .map(|s| {
+                let c = to_color32(
+                    [s.color[0], s.color[1], s.color[2], 1.0],
+                    opacity * s.opacity,
+                );
+                Stroke::new((s.width * scale).max(1.0), c)
+            })
+            .unwrap_or(Stroke::NONE);
+
+        painter.add(egui::Shape::Path(PathShape {
+            points: pts,
+            closed: true,
+            fill,
+            stroke: stroke.into(),
+        }));
     }
 }
 

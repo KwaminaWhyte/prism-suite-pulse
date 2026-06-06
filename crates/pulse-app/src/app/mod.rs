@@ -2,7 +2,7 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{Comp, LayerKind, PulseLayer};
+use crate::comp::{Comp, LayerKind, PulseLayer, ShapeItem, ShapePrimitive};
 use crate::graph::GraphState;
 use crate::{icons, render, theme};
 
@@ -88,10 +88,28 @@ impl PulseApp {
             LayerKind::Solid => (format!("Solid {n}"), self.next_color()),
             LayerKind::Null => (format!("Null {n}"), [0.6, 0.6, 0.6, 1.0]),
             LayerKind::Adjustment => (format!("Adjustment {n}"), [1.0, 1.0, 1.0, 1.0]),
+            LayerKind::Shape => (format!("Shape {n}"), self.next_color()),
         };
         let mut layer = PulseLayer::of_kind(kind, name, color);
-        if kind == LayerKind::Adjustment {
-            layer.scale.set_key(0.0, 3.0); // cover the whole comp
+        match kind {
+            LayerKind::Adjustment => {
+                layer.scale.set_key(0.0, 3.0); // cover the whole comp
+            }
+            LayerKind::Shape => {
+                // Seed a new shape layer with a filled rectangle in the layer's
+                // own color so it draws something out of the box.
+                let half = self.comp.width as f32 * render::LAYER_HALF_FRAC * 0.5;
+                let mut item = ShapeItem::new(ShapePrimitive::Rectangle {
+                    half_w: half,
+                    half_h: half,
+                    radius: 0.0,
+                });
+                if let Some(fill) = item.fill.as_mut() {
+                    fill.color = [color[0], color[1], color[2]];
+                }
+                layer.shape.items.push(item);
+            }
+            _ => {}
         }
         self.comp.layers.push(layer);
         self.selected = Some(self.comp.layers.len() - 1);

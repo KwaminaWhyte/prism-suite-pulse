@@ -26,6 +26,7 @@ mod keyframe;
 mod mask;
 mod matte;
 mod motion_blur;
+mod shape;
 mod spatial;
 mod transform;
 
@@ -34,6 +35,7 @@ pub use keyframe::{Ease, Handle, Interp, Track};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
 pub use matte::MatteMode;
 pub use motion_blur::{MotionBlur, Prop};
+pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, SpatialEffect};
 pub use transform::{Affine2, Transform};
 
@@ -86,6 +88,12 @@ pub struct PulseLayer {
     /// so pre-mask `.pulse` files still load unmasked.
     #[serde(default)]
     pub masks: Vec<Mask>,
+    /// **Shape** content (rectangles / ellipses / polygons / stars with fills
+    /// and strokes), drawn only when [`kind`](Self::kind) is
+    /// [`LayerKind::Shape`]. `serde`-defaulted to empty so pre-shape `.pulse`
+    /// files still load.
+    #[serde(default)]
+    pub shape: ShapeLayer,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -114,6 +122,7 @@ impl PulseLayer {
             parent: None,
             matte: MatteMode::None,
             masks: Vec::new(),
+            shape: ShapeLayer::default(),
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -187,6 +196,12 @@ impl PulseLayer {
     /// to run the whole-buffer passes.
     pub fn has_spatial_effects(&self) -> bool {
         !self.spatial_effects.is_empty()
+    }
+
+    /// Whether this layer is a [`LayerKind::Shape`] with at least one shape
+    /// item to draw.
+    pub fn has_shape(&self) -> bool {
+        self.kind == LayerKind::Shape && !self.shape.is_empty()
     }
 }
 
@@ -264,6 +279,33 @@ impl Comp {
         });
         c.layers.push(satellite); // index 1
 
+        // A shape layer: a stroked five-point star drifting up the frame, so the
+        // vector shape rasterizer (fill + stroke, parametric primitive) reads out
+        // of the box. It slides on its own X position with an Easy Ease.
+        let mut star = PulseLayer::of_kind(LayerKind::Shape, "Star", [0.9, 0.3, 0.45, 1.0]);
+        let mut star_item = ShapeItem::new(ShapePrimitive::Star {
+            points: 5,
+            outer: 130.0,
+            inner: 56.0,
+        });
+        star_item.fill = Some(Fill {
+            color: [0.95, 0.35, 0.5],
+            opacity: 1.0,
+        });
+        star_item.stroke = Some(Stroke {
+            color: [1.0, 1.0, 1.0],
+            width: 8.0,
+            opacity: 1.0,
+        });
+        star.shape.items.push(star_item);
+        star.x.set_key(0.0, -260.0);
+        star.x.set_key(5.0, 260.0);
+        star.x.set_interp(0.0, Interp::Ease(Ease::EASY));
+        star.y.set_key(0.0, 180.0);
+        star.rotation.set_key(0.0, 0.0);
+        star.rotation.set_key(5.0, 90.0);
+        c.layers.push(star); // index 2
+
         // A full-frame adjustment layer on top: its effect stack regrades every
         // layer beneath it (here a punchy Levels contrast) without drawing any
         // pixels of its own — showcasing layer kinds + the effect stack on launch.
@@ -276,7 +318,7 @@ impl Comp {
             out_black: 0.0,
             out_white: 1.0,
         });
-        c.layers.push(grade); // index 2
+        c.layers.push(grade); // index 3
         c
     }
 }

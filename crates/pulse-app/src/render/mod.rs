@@ -28,7 +28,7 @@ mod passes;
 pub use export::export_sequence;
 use passes::{
     apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_layer,
-    composite_motion_blur,
+    composite_motion_blur, composite_shape,
 };
 
 /// The half-extent of a layer's base quad as a fraction of the comp size. Must
@@ -158,6 +158,47 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                     *dst = over(*src, *dst);
                 }
             }
+            // A motion-blurred shape layer integrates its vector content across
+            // the shutter into an isolated buffer (the same recipe as a solid),
+            // then mask-carves / matte-clips / spatially filters before
+            // compositing.
+            LayerKind::Shape if blurred => {
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
+                if masked {
+                    apply_masks(&mut layer_buf, &geom, comp.world_matrix(i, t), layer);
+                }
+                if let Some(src_idx) = matte_src {
+                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                }
+                if spatial {
+                    apply_spatial(&mut layer_buf, &geom, layer);
+                }
+                for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
+                    *dst = over(*src, *dst);
+                }
+            }
+            // A crisp shape layer rasterizes its vector content into an isolated
+            // buffer (it draws arbitrary geometry, so it always routes through
+            // the isolated path), then mask / matte / spatial passes apply before
+            // it is composited over the accumulator.
+            LayerKind::Shape => {
+                let world = comp.world_matrix(i, t);
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                composite_shape(&mut layer_buf, &geom, world, layer, t);
+                if masked {
+                    apply_masks(&mut layer_buf, &geom, world, layer);
+                }
+                if let Some(src_idx) = matte_src {
+                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                }
+                if spatial {
+                    apply_spatial(&mut layer_buf, &geom, layer);
+                }
+                for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
+                    *dst = over(*src, *dst);
+                }
+            }
             // A crisp solid draws its own colored quad (processed by its effect
             // stack) directly into the accumulator — or, when it has masks, a
             // track matte, or spatial effects, into an isolated buffer whose
@@ -234,6 +275,35 @@ impl Geom {
             (self.half_w, self.half_h),
             (-self.half_w, self.half_h),
         ];
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for (lx, ly) in corners {
+            let (wx, wy) = world.apply(lx, ly);
+            min_x = min_x.min(wx);
+            min_y = min_y.min(wy);
+            max_x = max_x.max(wx);
+            max_y = max_y.max(wy);
+        }
+        let x0 = ((self.cx + min_x).floor() as i32).max(0);
+        let x1 = ((self.cx + max_x).ceil() as i32).min(self.w as i32 - 1);
+        let y0 = ((self.cy + min_y).floor() as i32).max(0);
+        let y1 = ((self.cy + max_y).ceil() as i32).min(self.h as i32 - 1);
+        (x0 <= x1 && y0 <= y1).then_some((x0, x1, y0, y1))
+    }
+
+    /// The conservative comp-space pixel AABB of a layer-local rectangle
+    /// `[lx0, lx1] × [ly0, ly1]` transformed by `world`, clamped to the frame.
+    /// `None` when the box falls entirely outside the frame. Used to bound the
+    /// shape rasterizer's pixel loop to the shape's transformed extent.
+    fn aabb_of_local_box(
+        &self,
+        world: Affine2,
+        lx0: f32,
+        ly0: f32,
+        lx1: f32,
+        ly1: f32,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let corners = [(lx0, ly0), (lx1, ly0), (lx1, ly1), (lx0, ly1)];
         let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
         let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
         for (lx, ly) in corners {

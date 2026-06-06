@@ -4,7 +4,8 @@
 
 use super::PulseApp;
 use crate::comp::{
-    Ease, Effect, Interp, LayerKind, Mask, MaskMode, MatteMode, Prop, SpatialEffect,
+    Ease, Effect, Fill, Interp, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
+    ShapePrimitive, SpatialEffect, Stroke,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -64,6 +65,13 @@ impl PulseApp {
                             c[3] = col.a() as f32 / 255.0;
                         }
                     });
+                }
+
+                // Shape content (rect / ellipse / polygon / star + fill/stroke),
+                // shown only for shape layers.
+                if self.comp.layers[idx].kind == LayerKind::Shape {
+                    ui.separator();
+                    self.shape_section(ui, idx);
                 }
 
                 // Parent pick-whip: a child inherits this layer's transform.
@@ -189,6 +197,100 @@ impl PulseApp {
             let other = if up { mi.wrapping_sub(1) } else { mi + 1 };
             if other < masks.len() {
                 masks.swap(mi, other);
+            }
+        }
+    }
+
+    /// The shape layer's **content** editor: an "Add shape" menu (rectangle /
+    /// ellipse / polygon / star), then each item with its primitive parameters,
+    /// fill, and stroke, plus reorder / remove. Items composite bottom-up.
+    fn shape_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        // Size a fresh shape to roughly half the layer's base quad.
+        let half = self.comp.width as f32 * render::LAYER_HALF_FRAC * 0.5;
+        ui.horizontal(|ui| {
+            ui.heading("Shape");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    let prims = [
+                        (
+                            "Rectangle",
+                            ShapePrimitive::Rectangle {
+                                half_w: half,
+                                half_h: half,
+                                radius: 0.0,
+                            },
+                        ),
+                        ("Ellipse", ShapePrimitive::Ellipse { rx: half, ry: half }),
+                        (
+                            "Polygon",
+                            ShapePrimitive::Polygon {
+                                points: 5,
+                                radius: half,
+                            },
+                        ),
+                        (
+                            "Star",
+                            ShapePrimitive::Star {
+                                points: 5,
+                                outer: half,
+                                inner: half * 0.5,
+                            },
+                        ),
+                    ];
+                    for (label, prim) in prims {
+                        if ui.button(label).clicked() {
+                            self.comp.layers[idx].shape.items.push(ShapeItem::new(prim));
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].shape.items.is_empty() {
+            ui.weak("No shapes. Click Add to draw one.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].shape.items.len();
+        for si in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                let label = self.comp.layers[idx].shape.items[si].primitive.label();
+                ui.label(egui::RichText::new(label).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(si);
+                    }
+                    if ui
+                        .add_enabled(si > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((si, true));
+                    }
+                    if ui
+                        .add_enabled(si + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((si, false));
+                    }
+                });
+            });
+            shape_item_params(ui, idx, si, &mut self.comp.layers[idx].shape.items[si]);
+        }
+
+        if let Some(si) = to_remove {
+            self.comp.layers[idx].shape.items.remove(si);
+        }
+        if let Some((si, up)) = to_move {
+            let items = &mut self.comp.layers[idx].shape.items;
+            let other = if up { si.wrapping_sub(1) } else { si + 1 };
+            if other < items.len() {
+                items.swap(si, other);
             }
         }
     }
@@ -674,6 +776,89 @@ fn mask_params(ui: &mut egui::Ui, idx: usize, mi: usize, mask: &mut Mask) {
     slider(ui, "Opacity", &mut mask.opacity, 0.0, 1.0);
     slider(ui, "Feather", &mut mask.feather, 0.0, 200.0);
     slider(ui, "Expansion", &mut mask.expansion, -200.0, 200.0);
+}
+
+/// Parameter controls for one [`ShapeItem`], editing it in place: the
+/// primitive's parameters, its local offset, and fill / stroke toggles with
+/// their color and sliders. `idx`/`si` salt widget ids so multiple items don't
+/// collide.
+fn shape_item_params(ui: &mut egui::Ui, idx: usize, si: usize, item: &mut ShapeItem) {
+    let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32, suffix: &str| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi).suffix(suffix.to_owned()));
+        });
+    };
+    let int_slider = |ui: &mut egui::Ui, label: &str, v: &mut u32, lo: u32, hi: u32| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi));
+        });
+    };
+
+    match &mut item.primitive {
+        ShapePrimitive::Rectangle {
+            half_w,
+            half_h,
+            radius,
+        } => {
+            slider(ui, "Width", half_w, 1.0, 800.0, " px");
+            slider(ui, "Height", half_h, 1.0, 800.0, " px");
+            slider(ui, "Roundness", radius, 0.0, 400.0, " px");
+        }
+        ShapePrimitive::Ellipse { rx, ry } => {
+            slider(ui, "Radius X", rx, 1.0, 800.0, " px");
+            slider(ui, "Radius Y", ry, 1.0, 800.0, " px");
+        }
+        ShapePrimitive::Polygon { points, radius } => {
+            int_slider(ui, "Points", points, 3, 24);
+            slider(ui, "Radius", radius, 1.0, 800.0, " px");
+        }
+        ShapePrimitive::Star {
+            points,
+            outer,
+            inner,
+        } => {
+            int_slider(ui, "Points", points, 2, 24);
+            slider(ui, "Outer", outer, 1.0, 800.0, " px");
+            slider(ui, "Inner", inner, 1.0, 800.0, " px");
+        }
+    }
+    slider(ui, "Offset X", &mut item.offset_x, -800.0, 800.0, " px");
+    slider(ui, "Offset Y", &mut item.offset_y, -800.0, 800.0, " px");
+
+    // Fill toggle + color/opacity.
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let mut on = item.fill.is_some();
+        if ui.checkbox(&mut on, "Fill").changed() {
+            item.fill = on.then(Fill::default);
+        }
+        if let Some(fill) = item.fill.as_mut() {
+            rgb_button(ui, (idx, si, 0), &mut fill.color);
+        }
+    });
+    if let Some(fill) = item.fill.as_mut() {
+        slider(ui, "Fill opacity", &mut fill.opacity, 0.0, 1.0, "");
+    }
+
+    // Stroke toggle + color/width/opacity.
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let mut on = item.stroke.is_some();
+        if ui.checkbox(&mut on, "Stroke").changed() {
+            item.stroke = on.then(Stroke::default);
+        }
+        if let Some(stroke) = item.stroke.as_mut() {
+            rgb_button(ui, (idx, si, 1), &mut stroke.color);
+        }
+    });
+    if let Some(stroke) = item.stroke.as_mut() {
+        slider(ui, "Stroke width", &mut stroke.width, 0.0, 80.0, " px");
+        slider(ui, "Stroke opacity", &mut stroke.opacity, 0.0, 1.0, "");
+    }
 }
 
 /// An sRGB color-edit button bound to an `[f32; 3]` (0..1), salted by `id`.

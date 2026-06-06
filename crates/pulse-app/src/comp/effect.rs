@@ -13,31 +13,42 @@ use serde::{Deserialize, Serialize};
 /// - [`LayerKind::Adjustment`] — draws nothing of its own; instead its **effect
 ///   stack** is applied to the composite of every layer *below* it, within the
 ///   layer's transformed bounds. Matches AE's adjustment layer.
+/// - [`LayerKind::Shape`] — draws a parametric vector **shape** stack (its
+///   [`shape`](super::PulseLayer::shape) field): rectangles / ellipses /
+///   polygons / stars with fills and strokes, rasterized in the layer's local
+///   frame. Matches AE's shape layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerKind {
     #[default]
     Solid,
     Null,
     Adjustment,
+    Shape,
 }
 
 impl LayerKind {
     /// All kinds, in menu order.
-    pub const ALL: [LayerKind; 3] = [LayerKind::Solid, LayerKind::Null, LayerKind::Adjustment];
+    pub const ALL: [LayerKind; 4] = [
+        LayerKind::Solid,
+        LayerKind::Shape,
+        LayerKind::Null,
+        LayerKind::Adjustment,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             LayerKind::Solid => "Solid",
             LayerKind::Null => "Null",
             LayerKind::Adjustment => "Adjustment",
+            LayerKind::Shape => "Shape",
         }
     }
 
     /// Whether a layer of this kind draws its own pixels. A null draws nothing;
     /// an adjustment draws nothing of its own (it only re-processes the layers
-    /// beneath it).
+    /// beneath it). A solid and a shape both draw their own pixels.
     pub fn draws_own_pixels(self) -> bool {
-        matches!(self, LayerKind::Solid)
+        matches!(self, LayerKind::Solid | LayerKind::Shape)
     }
 }
 

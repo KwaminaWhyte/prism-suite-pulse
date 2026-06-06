@@ -8,6 +8,66 @@ use crate::comp::{
 };
 use prism_core::color::srgb_to_linear;
 
+/// Rasterize a **shape layer**'s vector content into the (assumed-clear)
+/// isolated `out` buffer, in the compositor's premultiplied linear-light form.
+///
+/// The shape stack lives in the layer's local frame; `world` maps that frame
+/// into comp space (own transform + parent chain). The pixel loop is bounded by
+/// the layer-local shape bounds mapped through `world` to a comp-space AABB, and
+/// each candidate pixel is inverse-mapped back into local space where the shape
+/// stack's straight-RGBA coverage is sampled, then converted to premultiplied
+/// linear and scaled by the layer's `opacity`. Color is straight sRGB → linear
+/// at the boundary, matching the solid path. A singular `world` (zero scale) or
+/// empty bounds leaves the buffer clear.
+pub(super) fn composite_shape(
+    out: &mut [Lin],
+    geom: &Geom,
+    world: Affine2,
+    layer: &PulseLayer,
+    t: f32,
+) {
+    let &Geom { w, cx, cy, .. } = geom;
+    let tf = layer.transform(t);
+    if tf.opacity <= 0.0 {
+        return;
+    }
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+    // Pre-flatten each item once for the per-pixel sampling.
+    let polys: Vec<Vec<(f32, f32)>> = layer.shape.items.iter().map(|it| it.polygon()).collect();
+    let Some((lx0, ly0, lx1, ly1)) = layer.shape.local_bounds() else {
+        return;
+    };
+    // Map the local-space bounds corners through `world` to a comp-space AABB.
+    let Some((x0, x1, y0, y1)) = geom.aabb_of_local_box(world, lx0, ly0, lx1, ly1) else {
+        return;
+    };
+
+    for py in y0..=y1 {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in x0..=x1 {
+            let comp_x = px as f32 + 0.5 - cx;
+            let (llx, lly) = inv.apply(comp_x, comp_y);
+            let straight = layer.shape.coverage_at(&polys, llx, lly);
+            let cov = straight[3] * tf.opacity;
+            if cov <= 0.0 {
+                continue;
+            }
+            // Straight sRGB color -> linear; carry straight color + coverage and
+            // composite source-over (the buffer is premultiplied-free `Lin`).
+            let src = Lin {
+                r: srgb_to_linear(straight[0].clamp(0.0, 1.0)),
+                g: srgb_to_linear(straight[1].clamp(0.0, 1.0)),
+                b: srgb_to_linear(straight[2].clamp(0.0, 1.0)),
+                a: cov,
+            };
+            let idx = (py as u32 * w + px as u32) as usize;
+            out[idx] = over(src, out[idx]);
+        }
+    }
+}
+
 /// Render motion-blurred solid layer `idx` into an isolated `out` buffer
 /// (assumed clear) as the average of sub-frame snapshots across the shutter.
 ///
@@ -31,9 +91,15 @@ pub(super) fn composite_motion_blur(out: &mut [Lin], geom: &Geom, comp: &Comp, i
             *px = Lin::CLEAR;
         }
         let world = comp.world_matrix(idx, st);
-        // `scratch` is cleared each sample, so each pixel is `composite_layer`'s
-        // premultiplied (color·coverage, coverage) output; accumulate it directly.
-        composite_layer(&mut scratch, geom, world, layer, st);
+        // `scratch` is cleared each sample, so each pixel is the snapshot's
+        // premultiplied (color·coverage, coverage) output; accumulate it
+        // directly. A shape layer rasterizes its vector content; any other
+        // pixel-drawing layer (a solid) rasterizes its quad.
+        if layer.has_shape() {
+            composite_shape(&mut scratch, geom, world, layer, st);
+        } else {
+            composite_layer(&mut scratch, geom, world, layer, st);
+        }
         for (dst, src) in out.iter_mut().zip(scratch.iter()) {
             dst.r += src.r;
             dst.g += src.g;
@@ -214,7 +280,11 @@ pub(super) fn apply_track_matte(
     let mut matte = vec![Lin::CLEAR; (geom.w * geom.h) as usize];
     let src_world = comp.world_matrix(src_idx, t);
     if let Some(src_layer) = comp.layers.get(src_idx) {
-        composite_layer(&mut matte, geom, src_world, src_layer, t);
+        if src_layer.has_shape() {
+            composite_shape(&mut matte, geom, src_world, src_layer, t);
+        } else {
+            composite_layer(&mut matte, geom, src_world, src_layer, t);
+        }
     }
     for (px, m) in matte.iter().enumerate() {
         let f = mode.factor([m.r, m.g, m.b, m.a]);
