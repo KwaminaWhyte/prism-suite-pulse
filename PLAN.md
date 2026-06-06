@@ -164,7 +164,7 @@ Phase 0 is **done** (see §1); the rest is the road to parity.
 Build effects on a unified **`prism-fx`** OpenFX-style GPU pass registry (suite-shared) so each is
 authored once and stacks non-destructively per layer.
 - [ ] **Effect engine** (M): per-layer ordered effect stack; effect params are full `Property<T>` (keyframable/expressable); effect masks
-- [ ] **Color correction** (M, reuse `prism-core::adjust`): Levels, Curves, Hue/Sat, Exposure, Brightness/Contrast, Color Balance, Channel Mixer, Tint, Tritone, **Lumetri-style** grade, **gradient map**
+- [~] **Color correction** (M, reuse `prism-core::adjust`): **done** — Tint, Brightness/Contrast, Exposure, Levels, **Hue/Saturation** (HSL rotate/saturate/lighten), **Curves** (5-point Catmull-Rom master curve), **Color Balance** (per-range shadow/midtone/highlight pushes), all pure straight-RGBA linear-light passes in the per-layer stack, unit-tested; still TODO: Channel Mixer, Tritone, **Lumetri-style** grade, **gradient map**
 - [~] **Blur & sharpen** (M): **Gaussian blur** done (separable, per-axis sigma, repeat-edge, premultiplied so soft edges don't bleed — unit-tested; runs as a whole-buffer pass after color-correction/masks/matte, composes with motion blur); Box/**Camera Lens** blur, Directional/Radial, Smart Sharpen, **CC**-style still TODO
 - [ ] **Distort** (M): Transform, Warp, Mesh/Bezier warp, Displacement map, Turbulent/Wave, Optics-comp, Corner Pin, Mirror, Polar
 - [ ] **Generate** (M): **Fractal/Turbulent Noise** (the motion-design workhorse), Gradient/Ramp, Cell Pattern, 4-Color/Grid, Checkerboard, Lightning/Beam, Lens Flare, Audio-Spectrum/Waveform
@@ -229,7 +229,7 @@ authored once and stacks non-destructively per layer.
 | Masks / roto | Bézier masks, modes, feather, roto brush | **Partial** (Bézier masks: add/subtract/intersect/difference, feather, expansion, opacity, invert — done; animated shapes / on-canvas editing / roto brush **Planned**) | 2,7 |
 | Track mattes | alpha/luma | **Planned** | 2 |
 | Precomps / parenting | nesting, collapse, pick-whip | **Planned** | 2 |
-| Effects | ~hundreds; color/blur/distort/generate/keying/stylize/time | **Partial** (color-correction stack + spatial **Gaussian Blur / Drop Shadow / Glow**; the rest **Planned** via `prism-fx`) | 3 |
+| Effects | ~hundreds; color/blur/distort/generate/keying/stylize/time | **Partial** (color-correction stack — Tint/Bright-Contrast/Exposure/Levels/**Hue-Sat**/**Curves**/**Color Balance** — + spatial **Gaussian Blur / Drop Shadow / Glow**; the rest **Planned** via `prism-fx`) | 3 |
 | Motion blur / frame blend | full | **Planned** | 4 |
 | Time remap / stretch | full | **Planned** | 4 |
 | Expressions | full JS expression language | **Planned** (`rhai`/`rune`) | 4 |

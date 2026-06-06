@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Three new color-correction effects** — **Hue / Saturation**, **Curves**, and
+  **Color Balance** (Phase-3 *Color correction* surface) — joining Tint /
+  Brightness & Contrast / Exposure / Levels in every layer's effect stack, so
+  the per-layer grade now covers the After-Effects color staples (the "Add"
+  menu in Properties now lists seven effects).
+  - **Hue / Saturation** (`Effect::HueSaturation`) — rotate **hue** (degrees),
+    scale **saturation** (`-1` grayscale … `+1`), and lift/crush **lightness**
+    (`-1` black … `+1` white). The pixel round-trips through HSL (new pure
+    `rgb_to_hsl` / `hsl_to_rgb`); alpha is untouched. Zeroed params are an exact
+    no-op.
+  - **Curves** (`Effect::Curves`) — a master tone curve set by five control
+    points at inputs `0, ¼, ½, ¾, 1` (the AE Curves grid), evaluated as a
+    Catmull-Rom spline (`curve_eval`) through the points and applied to every
+    RGB channel. The straight identity ramp (`Effect::CURVE_IDENTITY`) is a
+    no-op; the editor exposes the five output sliders plus a **Reset** button
+    (a draggable curve canvas lands with the typed-`Property` graph-editor
+    rebuild).
+  - **Color Balance** (`Effect::ColorBalance`) — independent red/green/blue
+    pushes for **shadows**, **midtones**, and **highlights**, each weighted by a
+    smooth function of the pixel's luma (`smoothstep` ramps for darks/brights,
+    a bell for midtones) so the three ranges blend — matching AE's three-range
+    color balance.
+  - **Pure + tested** — all three are straight-`[f32;4]` linear-light passes
+    that preserve alpha, slot into the existing ordered effect stack, and are
+    unit-tested (HSL round-trip, `hue+120°` cycling red→green, full desaturate
+    to gray, curve hitting its control points + staying identity on the ramp +
+    lifting midtones, `smoothstep` endpoints/midpoint, color-balance no-op +
+    range-targeted push, and alpha preservation across every default effect).
+
 - **Window-menu panel show/hide** (After-Effects *Window* / Affinity *View ▸
   Studio* parity) — the shell's dockable panels can now be **hidden and shown**
   from a new **Window** menu, so the user can reclaim screen for the panels they

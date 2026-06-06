@@ -817,6 +817,72 @@ fn effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut Effect) 
             slider(ui, "Out black", out_black, 0.0, 1.0);
             slider(ui, "Out white", out_white, 0.0, 1.0);
         }
+        Effect::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Hue");
+                ui.add(egui::Slider::new(hue, -180.0..=180.0).suffix("°"));
+            });
+            slider(ui, "Saturation", saturation, -1.0, 1.0);
+            slider(ui, "Lightness", lightness, -1.0, 1.0);
+        }
+        Effect::Curves { points } => {
+            // Five draggable control sliders at inputs 0, ¼, ½, ¾, 1, plus a
+            // reset-to-identity button. (A full draggable curve canvas lands
+            // with the typed-Property graph-editor rebuild.)
+            const LABELS: [&str; 5] = ["0.00", "0.25", "0.50", "0.75", "1.00"];
+            for (i, label) in LABELS.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(*label);
+                    ui.add(egui::Slider::new(&mut points[i], 0.0..=1.0).text("out"));
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if ui.button("Reset").clicked() {
+                    *points = Effect::CURVE_IDENTITY;
+                }
+            });
+        }
+        Effect::ColorBalance {
+            shadows,
+            midtones,
+            highlights,
+        } => {
+            color_balance_range(ui, idx, ei, 0, "Shadows", shadows);
+            color_balance_range(ui, idx, ei, 1, "Midtones", midtones);
+            color_balance_range(ui, idx, ei, 2, "Highlights", highlights);
+        }
+    }
+}
+
+/// One tonal-range row of [`Effect::ColorBalance`]: a label and three
+/// red/green/blue sliders (`-1..=1`). `range` salts the slider ids per range.
+fn color_balance_range(
+    ui: &mut egui::Ui,
+    idx: usize,
+    ei: usize,
+    range: usize,
+    label: &str,
+    rgb: &mut [f32; 3],
+) {
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(label).strong());
+    });
+    for (ch, name) in ["R", "G", "B"].iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(*name);
+            ui.push_id(("colorbalance", idx, ei, range, ch), |ui| {
+                ui.add(egui::Slider::new(&mut rgb[ch], -1.0..=1.0));
+            });
+        });
     }
 }
 

@@ -1,3 +1,4 @@
+use super::effect::{curve_eval, hsl_to_rgb, rgb_to_hsl, smoothstep};
 use super::keyframe::{cubic_bezier, solve_bezier_x};
 use super::mask::{dist_to_polygon, point_in_polygon};
 use super::spatial::{gaussian_blur, gaussian_kernel};
@@ -584,6 +585,152 @@ fn apply_effects_chains_in_order() {
     // Empty stack is a passthrough.
     let same = apply_effects(&[], [0.1, 0.2, 0.3, 0.4]);
     assert_eq!(same, [0.1, 0.2, 0.3, 0.4]);
+}
+
+// --- Hue / Saturation, Curves, Color Balance ----------------------------
+
+#[test]
+fn hsl_round_trips() {
+    // RGB -> HSL -> RGB recovers the original across a spread of colors.
+    for c in [
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        [0.5, 0.5, 0.5],
+        [0.8, 0.2, 0.4],
+        [0.1, 0.7, 0.3],
+        [0.25, 0.4, 0.95],
+    ] {
+        let (h, s, l) = rgb_to_hsl(c[0], c[1], c[2]);
+        let back = hsl_to_rgb(h, s, l);
+        assert!(
+            approx_rgb([back[0], back[1], back[2], 1.0], c),
+            "round-trip failed for {c:?} -> ({h},{s},{l}) -> {back:?}"
+        );
+    }
+}
+
+#[test]
+fn hue_saturation_identity_and_desaturate() {
+    // Zeroed params are a no-op.
+    let id = Effect::HueSaturation {
+        hue: 0.0,
+        saturation: 0.0,
+        lightness: 0.0,
+    };
+    assert!(approx_rgb(id.apply([0.8, 0.2, 0.4, 1.0]), [0.8, 0.2, 0.4]));
+    // Full desaturate (-1) collapses to gray (R==G==B at the pixel's luma-ish L).
+    let gray = Effect::HueSaturation {
+        hue: 0.0,
+        saturation: -1.0,
+        lightness: 0.0,
+    };
+    let out = gray.apply([0.8, 0.2, 0.4, 1.0]);
+    assert!((out[0] - out[1]).abs() < 1e-4 && (out[1] - out[2]).abs() < 1e-4);
+    // Alpha untouched.
+    assert_eq!(gray.apply([0.8, 0.2, 0.4, 0.5])[3], 0.5);
+}
+
+#[test]
+fn hue_rotation_120_cycles_channels() {
+    // A pure-red pixel rotated +120° in hue becomes pure green (HSL hue wheel).
+    let e = Effect::HueSaturation {
+        hue: 120.0,
+        saturation: 0.0,
+        lightness: 0.0,
+    };
+    let out = e.apply([1.0, 0.0, 0.0, 1.0]);
+    assert!(approx_rgb(out, [0.0, 1.0, 0.0]), "red+120 -> {out:?}");
+}
+
+#[test]
+fn curves_identity_is_passthrough() {
+    let id = Effect::Curves {
+        points: Effect::CURVE_IDENTITY,
+    };
+    for v in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+        assert!(
+            (id.apply([v, v, v, 1.0])[0] - v).abs() < 1e-4,
+            "identity curve changed {v}"
+        );
+    }
+}
+
+#[test]
+fn curve_eval_hits_control_points() {
+    // The spline passes exactly through the five control points at 0,¼,½,¾,1.
+    let pts = [0.1, 0.3, 0.4, 0.85, 0.95];
+    for (i, &expect) in pts.iter().enumerate() {
+        let x = i as f32 * 0.25;
+        assert!(
+            (curve_eval(&pts, x) - expect).abs() < 1e-4,
+            "curve at {x} = {} want {expect}",
+            curve_eval(&pts, x)
+        );
+    }
+    // Out-of-range inputs clamp to the end points.
+    assert!((curve_eval(&pts, -1.0) - 0.1).abs() < 1e-4);
+    assert!((curve_eval(&pts, 2.0) - 0.95).abs() < 1e-4);
+}
+
+#[test]
+fn curves_lift_brightens_midtones() {
+    // Raise the midpoint output: a mid-gray input lands brighter, ends pinned.
+    let lift = Effect::Curves {
+        points: [0.0, 0.4, 0.7, 0.9, 1.0],
+    };
+    assert!(lift.apply([0.5, 0.5, 0.5, 1.0])[0] > 0.5);
+    assert!((lift.apply([0.0, 0.0, 0.0, 1.0])[0]).abs() < 1e-4);
+    assert!((lift.apply([1.0, 1.0, 1.0, 1.0])[0] - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn smoothstep_endpoints_and_midpoint() {
+    assert_eq!(smoothstep(0.0, 1.0, -0.5), 0.0);
+    assert_eq!(smoothstep(0.0, 1.0, 1.5), 1.0);
+    assert!((smoothstep(0.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
+    // Degenerate edges (e0 == e1) act as a hard step.
+    assert_eq!(smoothstep(0.5, 0.5, 0.4), 0.0);
+    assert_eq!(smoothstep(0.5, 0.5, 0.6), 1.0);
+}
+
+#[test]
+fn color_balance_zero_is_passthrough() {
+    let id = Effect::ColorBalance {
+        shadows: [0.0; 3],
+        midtones: [0.0; 3],
+        highlights: [0.0; 3],
+    };
+    assert!(approx_rgb(id.apply([0.2, 0.5, 0.8, 1.0]), [0.2, 0.5, 0.8]));
+    assert_eq!(id.apply([0.2, 0.5, 0.8, 0.6])[3], 0.6);
+}
+
+#[test]
+fn color_balance_pushes_target_range() {
+    // A highlight red push reddens a bright pixel far more than a dark one.
+    let e = Effect::ColorBalance {
+        shadows: [0.0; 3],
+        midtones: [0.0; 3],
+        highlights: [1.0, 0.0, 0.0],
+    };
+    let bright = e.apply([0.9, 0.9, 0.9, 1.0]);
+    let dark = e.apply([0.1, 0.1, 0.1, 1.0]);
+    let bright_gain = bright[0] - 0.9;
+    let dark_gain = dark[0] - 0.1;
+    assert!(
+        bright_gain > dark_gain,
+        "highlight push should weight brights: bright +{bright_gain}, dark +{dark_gain}"
+    );
+    // The push only moves red here; green/blue at the bright pixel are ~unchanged.
+    assert!((bright[1] - 0.9).abs() < 1e-3 && (bright[2] - 0.9).abs() < 1e-3);
+}
+
+#[test]
+fn new_effects_preserve_alpha() {
+    // Every default effect (including the three new ones) leaves alpha intact.
+    let px = [0.4, 0.55, 0.7, 0.42];
+    for e in Effect::defaults() {
+        assert_eq!(e.apply(px)[3], 0.42, "{} changed alpha", e.label());
+    }
 }
 
 // --- Track mattes -------------------------------------------------------
