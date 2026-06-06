@@ -2,7 +2,7 @@
 
 Cited findings backing [PLAN.md](./PLAN.md). Verify all crate versions against crates.io at build time
 — third-party version metadata is sometimes stale. Pulse is **app #3 of the Prism suite**; shared
-infrastructure decisions live in [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) and reuse [Pigment's engine research](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md)
+infrastructure decisions live in [SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) and reuse [Pigment's engine research](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md)
 (compositor, blend math, color, AI runtime).
 
 ---
@@ -12,7 +12,7 @@ infrastructure decisions live in [../SUITE.md](https://github.com/KwaminaWhyte/p
 After Effects is, structurally, **a keyframed layer compositor with an effect stack**. The compositor —
 a DAG of layer/blend/effect/group nodes, evaluated per output **tile**, caching intermediate results and
 recomputing only what's dirty — is exactly what `prism-core`/`prism-gpu` already implement for Pigment
-(see [../pigment/RESEARCH.md §2](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md)). Pulse's addition is a **time axis**: every node
+(see [Pigment RESEARCH.md §2](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md)). Pulse's addition is a **time axis**: every node
 is sampled at a frame time `t`, and the cache key becomes (node, **frame**, tile). The **18 blend modes**,
 linear-light premultiplied math, and float (Rgba16Float) working buffers transfer unchanged. The
 adjustment shaders (`prism-core::adjust`: levels/curves/hue-sat/exposure…) become color-correction
@@ -134,7 +134,7 @@ Sources: github.com/rayon-rs/rayon · helpx.adobe.com/after-effects (multi-frame
 
 Pulse closes the suite loop: its comps drop **live** into a Reel timeline (Dynamic Link), and it **consumes**
 Contour artboards and Pigment documents as layers that re-render on source change — all via the suite's
-shared render-graph node model and the `prism-doc` interchange container (see [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md)).
+shared render-graph node model and the `prism-doc` interchange container (see [SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md)).
 A precomp, a placed `.contour`, and a placed `.pigment` are the *same* mechanism: a graph node that
 evaluates a linked document at the requested time/resolution and caches its tiles. Build the node model
 suite-aware from the start; define the container with the suite, not unilaterally.

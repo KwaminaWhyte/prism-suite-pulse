@@ -6,7 +6,7 @@ Effects' real-world capability** — features, reliability, and ease-of-use — 
 suite's shared engine: `prism-core` (layers, blend math, render graph), `prism-color` (linear/OCIO),
 and a shared `prism-fx` (OpenFX-style effects) and `prism-media` (FFmpeg) layer.
 
-> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (four-app vision + interop). The repo README (when added) tracks what runs *today*; this PLAN is the parity roadmap.
+> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (four-app vision + interop). The repo README (when added) tracks what runs *today*; this PLAN is the parity roadmap.
 
 ---
 
