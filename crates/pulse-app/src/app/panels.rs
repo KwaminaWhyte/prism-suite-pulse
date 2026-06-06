@@ -1,8 +1,9 @@
 //! The bottom timeline / graph editor panel (with its property chips) and the
 //! central preview panel.
 
-use super::{EditorMode, PulseApp};
+use super::{EditorMode, GizmoDrag, PulseApp};
 use crate::comp::Prop;
+use crate::gizmo::{self, GizmoGeom, Handle};
 use crate::{graph, icons, preview, timeline};
 use egui::Sense;
 
@@ -127,14 +128,104 @@ impl PulseApp {
 
     pub(super) fn preview_panel(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(root, |ui| {
-            let (_resp, painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
-            preview::paint_comp(
-                &painter,
-                painter.clip_rect(),
-                &self.comp,
-                self.time,
-                self.selected,
-            );
+            // The preview surface is click-and-drag so the transform gizmo can be
+            // grabbed directly on the canvas.
+            let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+            let avail = painter.clip_rect();
+            preview::paint_comp(&painter, avail, &self.comp, self.time, self.selected);
+            self.handle_gizmo(ui, &resp, &painter, avail);
         });
+    }
+
+    /// Drive the on-canvas transform gizmo for the selected layer: hit-test the
+    /// handles, start/continue/end a drag, key the edited transform at the
+    /// playhead, and paint the gizmo (highlighting the hot/held handle).
+    fn handle_gizmo(
+        &mut self,
+        ui: &egui::Ui,
+        resp: &egui::Response,
+        painter: &egui::Painter,
+        avail: egui::Rect,
+    ) {
+        let Some(idx) = self.selected else { return };
+        if idx >= self.comp.layers.len() {
+            return;
+        }
+        let (center, scale) = preview::comp_fit(avail, self.comp.width, self.comp.height);
+        let Some(geom) = GizmoGeom::build(&self.comp, idx, self.time) else {
+            return;
+        };
+
+        // Pointer → comp space, the space the gizmo geometry lives in.
+        let pointer_comp = resp
+            .hover_pos()
+            .or(resp.interact_pointer_pos())
+            .map(|p| gizmo::screen_to_comp(p.x, p.y, center.x, center.y, scale));
+        // Hit tolerance in comp px: ~8 screen px back-projected through the fit.
+        let tol = 8.0 / scale.max(1e-6);
+
+        // Begin a drag: on press, grab whichever handle is under the pointer.
+        if resp.drag_started() {
+            if let Some(pc) = pointer_comp {
+                if let Some(handle) = gizmo::hit_test(&geom, pc, tol) {
+                    self.gizmo_drag = Some(GizmoDrag {
+                        layer: idx,
+                        handle,
+                        time: self.time,
+                        start_tf: self.comp.layers[idx].transform(self.time),
+                        parent: gizmo::parent_matrix(&self.comp, idx, self.time),
+                        start_comp: pc,
+                    });
+                }
+            }
+        }
+
+        // Continue an active drag: recompute the result against the live pointer
+        // and key the changed properties at the grab time.
+        if let Some(drag) = self.gizmo_drag {
+            if drag.layer == idx && resp.dragged() {
+                if let Some(cur) = resp.interact_pointer_pos() {
+                    let cur_comp = gizmo::screen_to_comp(cur.x, cur.y, center.x, center.y, scale);
+                    let result = gizmo::drag(
+                        drag.handle,
+                        drag.start_tf,
+                        drag.parent,
+                        drag.start_comp,
+                        cur_comp,
+                    );
+                    let layer = &mut self.comp.layers[idx];
+                    for (prop, value) in result.keys() {
+                        layer.track_mut(prop).set_key(drag.time, value);
+                    }
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            self.gizmo_drag = None;
+        }
+
+        // Determine the "hot" handle for the highlight: the held one while
+        // dragging, else whatever the pointer hovers.
+        let hot = if let Some(drag) = self.gizmo_drag.filter(|d| d.layer == idx) {
+            Some(drag.handle)
+        } else {
+            pointer_comp.and_then(|pc| gizmo::hit_test(&geom, pc, tol))
+        };
+
+        // Re-derive the geometry after any edit so the painted gizmo tracks the
+        // layer this frame (the transform may have just changed).
+        let painted = GizmoGeom::build(&self.comp, idx, self.time).unwrap_or(geom);
+        preview::paint_gizmo(painter, &painted, center, scale, hot);
+
+        // A resize-style cursor hint over an active handle.
+        if hot.is_some() {
+            let cursor = match hot {
+                Some(Handle::Move) => egui::CursorIcon::Move,
+                Some(Handle::Rotate) => egui::CursorIcon::Grab,
+                Some(Handle::Anchor) => egui::CursorIcon::Crosshair,
+                _ => egui::CursorIcon::ResizeNwSe,
+            };
+            ui.ctx().set_cursor_icon(cursor);
+        }
     }
 }

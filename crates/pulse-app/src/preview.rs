@@ -9,6 +9,7 @@
 //! them to screen via a single fitted scale factor.
 
 use crate::comp::{apply_effects, Comp, LayerKind, MaskMode, PulseLayer};
+use crate::gizmo::{GizmoGeom, Handle};
 use crate::theme;
 use egui::{epaint::PathShape, Color32, Painter, Pos2, Rect, Stroke, Vec2};
 
@@ -65,6 +66,93 @@ fn fit(avail: Rect, width: u32, height: u32) -> (Rect, f32) {
     let size = Vec2::new(cw * scale, ch * scale);
     let rect = Rect::from_center_size(avail.center(), size);
     (rect, scale)
+}
+
+/// The comp's on-screen center and comp-pixels→screen scale for `avail` — the
+/// mapping the preview uses to place layers. Exposed so the panel can convert
+/// pointer positions (screen) into comp space for the transform gizmo, using
+/// exactly the same fit as the paint pass.
+pub fn comp_fit(avail: Rect, width: u32, height: u32) -> (Pos2, f32) {
+    let (frame, scale) = fit(avail, width, height);
+    (frame.center(), scale)
+}
+
+/// Paint the on-canvas transform gizmo for the selected layer: the bounding
+/// box, corner scale handles, the rotation knob (with its connector), and the
+/// anchor-point cross. `hot` highlights the handle the pointer is over (or is
+/// dragging). Drawn on top of the preview so the layer stays visible.
+pub fn paint_gizmo(
+    painter: &Painter,
+    geom: &GizmoGeom,
+    center: Pos2,
+    scale: f32,
+    hot: Option<Handle>,
+) {
+    let to_screen = |(cx, cy): (f32, f32)| center + Vec2::new(cx * scale, cy * scale);
+    let corners: Vec<Pos2> = geom.corners.iter().map(|&c| to_screen(c)).collect();
+    let knob = to_screen(geom.rotate_knob);
+    let anchor = to_screen(geom.anchor);
+    let accent = theme::accent();
+
+    // Bounding box outline.
+    let mut box_pts = corners.clone();
+    box_pts.push(corners[0]);
+    painter.add(egui::Shape::line(box_pts, Stroke::new(1.5, accent)));
+
+    // Connector from the top-edge midpoint to the rotation knob.
+    let top_mid = corners[0].lerp(corners[1], 0.5);
+    painter.line_segment(
+        [top_mid, knob],
+        Stroke::new(1.0, accent.gamma_multiply(0.8)),
+    );
+
+    // Rotation knob (hollow circle, filled when hot).
+    let knob_hot = hot == Some(Handle::Rotate);
+    painter.circle(
+        knob,
+        5.0,
+        if knob_hot {
+            accent
+        } else {
+            Color32::from_rgb(0x16, 0x18, 0x1c)
+        },
+        Stroke::new(1.5, accent),
+    );
+
+    // Corner scale handles (small squares).
+    for (i, &c) in corners.iter().enumerate() {
+        let h = hot == Some(Handle::Scale(i as u8));
+        let r = Rect::from_center_size(c, Vec2::splat(7.0));
+        painter.rect(
+            r,
+            1.0,
+            if h {
+                accent
+            } else {
+                Color32::from_rgb(0x16, 0x18, 0x1c)
+            },
+            Stroke::new(1.5, accent),
+            egui::StrokeKind::Middle,
+        );
+    }
+
+    // Anchor cross (the scale/rotation pivot).
+    let anchor_hot = hot == Some(Handle::Anchor);
+    let ac = if anchor_hot {
+        accent
+    } else {
+        accent.gamma_multiply(0.9)
+    };
+    let s = 7.0;
+    painter.line_segment(
+        [anchor - Vec2::new(s, 0.0), anchor + Vec2::new(s, 0.0)],
+        Stroke::new(1.5, ac),
+    );
+    painter.line_segment(
+        [anchor - Vec2::new(0.0, s), anchor + Vec2::new(0.0, s)],
+        Stroke::new(1.5, ac),
+    );
+    painter.circle_stroke(anchor, 4.0, Stroke::new(1.5, ac));
 }
 
 /// Paint the whole composition (frame + visible layers) at time `t`.

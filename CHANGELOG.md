@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **On-canvas transform gizmo** (After-Effects / Affinity selection-handle
+  parity) — the selected layer can now be **moved, scaled, rotated, and
+  re-anchored directly in the preview**, instead of only nudging the Properties
+  sliders.
+  - **Handles** — a bounding box around the layer's base quad with four **corner
+    scale handles**, a **rotation knob** on a connector above the top edge, an
+    **anchor-point cross** at the scale/rotation pivot, and the box **body** for
+    move. Each handle highlights on hover and while held, with a matching cursor
+    (move / grab / crosshair / resize).
+  - **Drag → keyframe** — a drag edits the layer's local transform properties
+    (`X`/`Y`, uniform `Scale`, `Rotation`, `Anchor X`/`Anchor Y`) and **keys the
+    new value at the playhead** via the same `set_key` re-key convention the
+    sliders use, so direct manipulation and animation stay consistent. Dragging
+    the anchor moves the pivot while compensating position so the layer doesn't
+    visually jump (matching AE).
+  - **Parent-aware math** (`gizmo.rs`) — because position/scale/rotation are
+    applied in the layer's **parent space** (`world = parent_world · local`),
+    every drag maps the pointer screen → comp → **parent-local** before taking
+    the delta, so a parented layer's handles drag correctly under the parent's
+    rotation/scale. Scale is the distance ratio about the anchor; rotation is the
+    signed angle swept about the anchor (normalized across the `atan2` branch cut
+    so a small drag never jumps ~360°).
+  - **Pure logic** — `GizmoGeom::build` (the box/anchor/knob geometry from the
+    resolved world matrix), `screen_to_comp`, `parent_matrix`, `hit_test`
+    (knob → corners → anchor → body precedence, even-odd box interior), and
+    `drag` (handle + grab transform + pointer delta → the property values to key)
+    are all unit-tested: screen↔comp round-trip, move adding the parent-local
+    delta (incl. under a rotated parent), scale distance ratio + non-negative
+    clamp + degenerate grab-on-pivot, rotation sweep + branch-cut normalization,
+    anchor move + position compensation + scale-undo, the key-list skipping
+    untouched props, handle-precedence hit-testing, and the demo-layer geometry
+    overlay.
+
 - **Per-layer blend modes** (After-Effects blending-mode parity) — every layer
   now carries a **blend mode** that decides how its pixels combine with the
   composite beneath it, the same 18-mode set the suite already shares.

@@ -32,8 +32,28 @@ pub struct PulseApp {
     mode: EditorMode,
     /// Graph-editor state (shown properties + active drag).
     graph: GraphState,
+    /// Active on-canvas transform-gizmo drag (preview), if any.
+    gizmo_drag: Option<GizmoDrag>,
     /// Last save/export status, surfaced briefly in the menu bar.
     status: Option<String>,
+}
+
+/// An in-progress drag of the preview's transform gizmo: which handle is held,
+/// the layer + the time and transform captured when the grab started, and the
+/// pointer position (comp space) at grab time. The drag math is recomputed each
+/// frame against the live pointer, so the result is always relative to the grab.
+#[derive(Clone, Copy, Debug)]
+struct GizmoDrag {
+    layer: usize,
+    handle: crate::gizmo::Handle,
+    /// Playhead time when the grab started (where the edits are keyed).
+    time: f32,
+    /// The layer's sampled transform at grab time.
+    start_tf: crate::comp::Transform,
+    /// The layer's parent matrix at grab time (local-space conversion).
+    parent: crate::comp::Affine2,
+    /// Pointer position (comp space) when the grab started.
+    start_comp: (f32, f32),
 }
 
 impl PulseApp {
@@ -48,6 +68,7 @@ impl PulseApp {
             rng: 0x1234_5678,
             mode: EditorMode::default(),
             graph: GraphState::default(),
+            gizmo_drag: None,
             status: None,
         }
     }

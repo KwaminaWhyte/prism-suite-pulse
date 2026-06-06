@@ -6,6 +6,7 @@
 
 mod app;
 mod comp;
+mod gizmo;
 mod graph;
 mod icons;
 mod preview;
