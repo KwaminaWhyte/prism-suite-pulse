@@ -15,7 +15,7 @@ env_logger = "0.11"
 anyhow = "1"
 
 # Shared foundation crate from the sibling Pigment app (the suite's common core).
-prism-core = { path = "../crates/prism-core" }
+prism-core = { path = "../prism-suite-prism/crates/prism-core" }
 
 # `prism-core` declares `[lints] workspace = true`, which resolves against
 # whichever workspace builds it. Mirror Pigment's lint config so building from
