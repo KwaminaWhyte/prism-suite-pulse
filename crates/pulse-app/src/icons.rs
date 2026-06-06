@@ -66,6 +66,8 @@ pub const ADD_KEY: &str = ph::PLUS;
 pub const COMP: &str = ph::FILM_STRIP;
 /// Export / render to disk.
 pub const EXPORT: &str = ph::EXPORT;
+/// A layer consumed as a track-matte source (used to define another's alpha).
+pub const MATTE: &str = ph::MASK_HAPPY;
 
 // --- Keyframe interpolation -------------------------------------------------
 

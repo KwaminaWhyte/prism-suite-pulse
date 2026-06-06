@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Track mattes** (After-Effects compositing parity) — a layer can now borrow
+  the layer **directly above it** in the stack to define its own per-pixel
+  transparency, instead of every layer compositing in isolation.
+  - **`MatteMode`** — a per-layer matte selector with the After-Effects modes:
+    **Alpha** (visible where the source is opaque), **Alpha inverted** (visible
+    where it's transparent), **Luma** (visible where the source is bright,
+    weighted by Rec.709 luma in linear light), and **Luma inverted**. The pure
+    `MatteMode::factor` (straight-linear RGBA → a clamped `[0,1]` multiplier) and
+    the stack-relationship helpers `Comp::matte_source` / `Comp::is_matte_source`
+    are all unit-tested. `serde`-defaulted to `None` so pre-matte `.pulse` files
+    still load.
+  - When a layer's matte is active, the layer above becomes its **matte source**:
+    that source is removed from normal compositing (matching AE) and instead
+    multiplies the matted layer's alpha — color is never touched, only coverage.
+    The software compositor (`render.rs`) renders the matted layer and its source
+    into isolated linear-light buffers, applies the matte factor per pixel, then
+    composites the result source-over; the egui preview honors mattes coarsely
+    (the matte source is hidden and the matted layer's opacity is scaled by the
+    source's flat-color factor — the preview's constant quads can't do per-pixel
+    mattes). A new **Track matte** picker in the Properties panel (disabled, with
+    a hint, when no layer sits above) drives it, and the Layers panel marks a
+    layer that is being consumed as a matte source. New compositor tests cover
+    matte-source suppression, alpha clipping, inversion as the complement, luma
+    alpha-scaling, and base-color preservation.
 - **Layer types + effect stack** (After-Effects layer-kind & color-correction
   parity) — layers are no longer all solids: each carries a **kind** and an
   ordered, non-destructive **effect stack**.

@@ -2,7 +2,7 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{Comp, Ease, Effect, Interp, LayerKind, Prop, PulseLayer};
+use crate::comp::{Comp, Ease, Effect, Interp, LayerKind, MatteMode, Prop, PulseLayer};
 use crate::graph::GraphState;
 use crate::{graph, icons, preview, render, theme, timeline};
 use egui::{Color32, Sense};
@@ -330,6 +330,12 @@ impl PulseApp {
                             {
                                 self.selected = Some(idx);
                             }
+                            // Mark a layer that is being used as the track-matte
+                            // source for the layer directly below it.
+                            if self.comp.is_matte_source(idx) {
+                                ui.weak(icons::MATTE)
+                                    .on_hover_text("Used as a track matte for the layer below");
+                            }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -429,6 +435,9 @@ impl PulseApp {
 
                 // Parent pick-whip: a child inherits this layer's transform.
                 self.parent_row(ui, idx);
+
+                // Track matte: borrow the layer above as this layer's alpha/luma.
+                self.matte_row(ui, idx);
 
                 ui.separator();
 
@@ -552,6 +561,54 @@ impl PulseApp {
                 Some(p) if self.comp.can_parent(idx, p) => Some(p),
                 Some(_) => current,
                 None => None,
+            };
+        }
+    }
+
+    /// The **track-matte** selector for layer `idx`. When active, the layer
+    /// directly above (`idx + 1`) becomes this layer's matte source (and stops
+    /// compositing on its own). The picker is disabled — and shows a hint — when
+    /// no layer sits above this one to borrow.
+    fn matte_row(&mut self, ui: &mut egui::Ui, idx: usize) {
+        // Matte applies to layers that draw their own pixels; a null/adjustment
+        // has no coverage to mask, so hide the row for them.
+        if !self.comp.layers[idx].kind.draws_own_pixels() {
+            return;
+        }
+        let above = idx + 1; // the layer drawn directly above this one
+        let source_name =
+            (above < self.comp.layers.len()).then(|| self.comp.layers[above].name.clone());
+        let current = self.comp.layers[idx].matte;
+        let mut chosen: Option<MatteMode> = None;
+        ui.horizontal(|ui| {
+            ui.label("Track matte");
+            ui.add_enabled_ui(source_name.is_some(), |ui| {
+                egui::ComboBox::from_id_salt(("matte", idx))
+                    .selected_text(current.label())
+                    .show_ui(ui, |ui| {
+                        for mode in MatteMode::ALL {
+                            if ui.selectable_label(current == mode, mode.label()).clicked() {
+                                chosen = Some(mode);
+                            }
+                        }
+                    });
+            });
+        });
+        match &source_name {
+            Some(name) if current.is_active() => {
+                ui.weak(format!("Matte from “{name}” (the layer above)"));
+            }
+            None => {
+                ui.weak("Needs a layer above to use as its matte.");
+            }
+            _ => {}
+        }
+        if let Some(next) = chosen {
+            // Only honor a matte when a source actually exists above.
+            self.comp.layers[idx].matte = if source_name.is_some() {
+                next
+            } else {
+                MatteMode::None
             };
         }
     }

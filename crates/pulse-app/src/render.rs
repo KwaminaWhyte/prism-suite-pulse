@@ -20,7 +20,7 @@
 //! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
 
-use crate::comp::{apply_effects, Affine2, Comp, LayerKind, PulseLayer};
+use crate::comp::{apply_effects, Affine2, Comp, LayerKind, MatteMode, PulseLayer};
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
 use std::path::{Path, PathBuf};
 
@@ -62,6 +62,28 @@ struct Lin {
     a: f32,
 }
 
+impl Lin {
+    /// A fully transparent black pixel (the empty accumulator value).
+    const CLEAR: Lin = Lin {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+}
+
+/// Source-over `src` onto `dst` in straight linear-light RGBA: `out = src +
+/// dst·(1 - src.a)`. Both are straight (non-premultiplied) with `a` as coverage.
+fn over(src: Lin, dst: Lin) -> Lin {
+    let ia = 1.0 - src.a;
+    Lin {
+        r: src.r * src.a + dst.r * ia,
+        g: src.g * src.a + dst.g * ia,
+        b: src.b * src.a + dst.b * ia,
+        a: src.a + dst.a * ia,
+    }
+}
+
 /// Render the composition at time `t` to a native-resolution [`Frame`].
 ///
 /// The comp backdrop is fully transparent black; visible layers are composited
@@ -84,9 +106,22 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
     let cy = h as f32 * 0.5;
     let half_w = w as f32 * LAYER_HALF_FRAC;
     let half_h = h as f32 * LAYER_HALF_FRAC;
+    let geom = Geom {
+        w,
+        h,
+        cx,
+        cy,
+        half_w,
+        half_h,
+    };
 
     for (i, layer) in comp.layers.iter().enumerate() {
         if !layer.visible {
+            continue;
+        }
+        // A layer used as a track-matte source is pulled in by the layer below
+        // it and must not composite on its own (it only contributes alpha/luma).
+        if comp.is_matte_source(i) {
             continue;
         }
         // World matrix composes this layer under its parent chain; it maps
@@ -98,12 +133,24 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
             LayerKind::Null => {}
             // A solid draws its own colored quad, processed by its effect stack.
             LayerKind::Solid => {
-                composite_layer(&mut acc, w, h, cx, cy, half_w, half_h, world, layer, t);
+                if let Some(src_idx) = comp.matte_source(i) {
+                    // Track matte: render this layer into an isolated buffer,
+                    // modulate its alpha by the matte source, then composite the
+                    // matted result over the running accumulator.
+                    let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                    composite_layer(&mut layer_buf, &geom, world, layer, t);
+                    apply_track_matte(&mut layer_buf, &geom, comp, src_idx, layer.matte, t);
+                    for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
+                        *dst = over(*src, *dst);
+                    }
+                } else {
+                    composite_layer(&mut acc, &geom, world, layer, t);
+                }
             }
             // An adjustment re-processes the composite beneath it, within its
             // own transformed quad bounds.
             LayerKind::Adjustment => {
-                apply_adjustment(&mut acc, w, h, cx, cy, half_w, half_h, world, layer, t);
+                apply_adjustment(&mut acc, &geom, world, layer, t);
             }
         }
     }
@@ -125,6 +172,47 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
     }
 }
 
+/// The fixed comp-space geometry shared by every rasterization pass in a frame:
+/// the pixel dimensions, the comp center (origin), and the base layer quad's
+/// half-extents. Bundled so the rasterizers take one argument instead of six.
+#[derive(Clone, Copy)]
+struct Geom {
+    w: u32,
+    h: u32,
+    cx: f32,
+    cy: f32,
+    half_w: f32,
+    half_h: f32,
+}
+
+impl Geom {
+    /// The conservative comp-space pixel AABB covered by a quad transformed by
+    /// `world`, clamped to the frame. Returns `None` when the quad falls entirely
+    /// outside the frame.
+    fn quad_bounds(&self, world: Affine2) -> Option<(i32, i32, i32, i32)> {
+        let corners = [
+            (-self.half_w, -self.half_h),
+            (self.half_w, -self.half_h),
+            (self.half_w, self.half_h),
+            (-self.half_w, self.half_h),
+        ];
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for (lx, ly) in corners {
+            let (wx, wy) = world.apply(lx, ly);
+            min_x = min_x.min(wx);
+            min_y = min_y.min(wy);
+            max_x = max_x.max(wx);
+            max_y = max_y.max(wy);
+        }
+        let x0 = ((self.cx + min_x).floor() as i32).max(0);
+        let x1 = ((self.cx + max_x).ceil() as i32).min(self.w as i32 - 1);
+        let y0 = ((self.cy + min_y).floor() as i32).max(0);
+        let y1 = ((self.cy + max_y).ceil() as i32).min(self.h as i32 - 1);
+        (x0 <= x1 && y0 <= y1).then_some((x0, x1, y0, y1))
+    }
+}
+
 /// Composite one layer's solid quad into the linear accumulator.
 ///
 /// `world` is the layer's resolved comp-space matrix (own transform + parent
@@ -132,19 +220,15 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
 /// into comp space whose origin is the comp center. Coverage is tested by
 /// inverse-mapping each candidate pixel back into local space and box-testing
 /// against the `±half_w/±half_h` quad.
-#[allow(clippy::too_many_arguments)]
-fn composite_layer(
-    acc: &mut [Lin],
-    w: u32,
-    h: u32,
-    cx: f32,
-    cy: f32,
-    half_w: f32,
-    half_h: f32,
-    world: Affine2,
-    layer: &PulseLayer,
-    t: f32,
-) {
+fn composite_layer(acc: &mut [Lin], geom: &Geom, world: Affine2, layer: &PulseLayer, t: f32) {
+    let &Geom {
+        w,
+        cx,
+        cy,
+        half_w,
+        half_h,
+        ..
+    } = geom;
     let tf = layer.transform(t);
     if tf.opacity <= 0.0 {
         return;
@@ -170,31 +254,10 @@ fn composite_layer(
         return;
     };
 
-    // Conservative comp-space AABB of the quad: transform its four local corners
-    // through the world matrix and bound them. Comp space has the origin at the
-    // comp center, so add (cx, cy) to land in pixel coordinates.
-    let corners = [
-        (-half_w, -half_h),
-        (half_w, -half_h),
-        (half_w, half_h),
-        (-half_w, half_h),
-    ];
-    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for (lx, ly) in corners {
-        let (wx, wy) = world.apply(lx, ly);
-        min_x = min_x.min(wx);
-        min_y = min_y.min(wy);
-        max_x = max_x.max(wx);
-        max_y = max_y.max(wy);
-    }
-    let x0 = ((cx + min_x).floor() as i32).max(0);
-    let x1 = ((cx + max_x).ceil() as i32).min(w as i32 - 1);
-    let y0 = ((cy + min_y).floor() as i32).max(0);
-    let y1 = ((cy + max_y).ceil() as i32).min(h as i32 - 1);
-    if x0 > x1 || y0 > y1 {
+    // Conservative comp-space AABB of the quad, clamped to the frame.
+    let Some((x0, x1, y0, y1)) = geom.quad_bounds(world) else {
         return;
-    }
+    };
 
     for py in y0..=y1 {
         // Pixel center, expressed in comp space (origin at comp center).
@@ -206,16 +269,17 @@ fn composite_layer(
             if lx.abs() > half_w || ly.abs() > half_h {
                 continue;
             }
-            // Source-over in linear light: out = src + dst*(1-src_a).
+            // Source-over in linear light.
             let idx = (py as u32 * w + px as u32) as usize;
-            let dst = acc[idx];
-            let ia = 1.0 - src_a;
-            acc[idx] = Lin {
-                r: lr * src_a + dst.r * ia,
-                g: lg * src_a + dst.g * ia,
-                b: lb * src_a + dst.b * ia,
-                a: src_a + dst.a * ia,
-            };
+            acc[idx] = over(
+                Lin {
+                    r: lr,
+                    g: lg,
+                    b: lb,
+                    a: src_a,
+                },
+                acc[idx],
+            );
         }
     }
 }
@@ -229,19 +293,15 @@ fn composite_layer(
 /// the same inverse-mapped quad test the solid path uses; the layer's `opacity`
 /// blends the regraded result against the original so a partly-opaque adjustment
 /// is a partial grade. An empty effect stack is a no-op.
-#[allow(clippy::too_many_arguments)]
-fn apply_adjustment(
-    acc: &mut [Lin],
-    w: u32,
-    h: u32,
-    cx: f32,
-    cy: f32,
-    half_w: f32,
-    half_h: f32,
-    world: Affine2,
-    layer: &PulseLayer,
-    t: f32,
-) {
+fn apply_adjustment(acc: &mut [Lin], geom: &Geom, world: Affine2, layer: &PulseLayer, t: f32) {
+    let &Geom {
+        w,
+        cx,
+        cy,
+        half_w,
+        half_h,
+        ..
+    } = geom;
     if layer.effects.is_empty() {
         return;
     }
@@ -253,29 +313,9 @@ fn apply_adjustment(
     let Some(inv) = world.inverse() else {
         return;
     };
-
-    let corners = [
-        (-half_w, -half_h),
-        (half_w, -half_h),
-        (half_w, half_h),
-        (-half_w, half_h),
-    ];
-    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for (lx, ly) in corners {
-        let (wx, wy) = world.apply(lx, ly);
-        min_x = min_x.min(wx);
-        min_y = min_y.min(wy);
-        max_x = max_x.max(wx);
-        max_y = max_y.max(wy);
-    }
-    let x0 = ((cx + min_x).floor() as i32).max(0);
-    let x1 = ((cx + max_x).ceil() as i32).min(w as i32 - 1);
-    let y0 = ((cy + min_y).floor() as i32).max(0);
-    let y1 = ((cy + max_y).ceil() as i32).min(h as i32 - 1);
-    if x0 > x1 || y0 > y1 {
+    let Some((x0, x1, y0, y1)) = geom.quad_bounds(world) else {
         return;
-    }
+    };
 
     for py in y0..=y1 {
         let comp_y = py as f32 + 0.5 - cy;
@@ -301,6 +341,35 @@ fn apply_adjustment(
                 a: src.a, // alpha is untouched by color grading
             };
         }
+    }
+}
+
+/// Modulate an already-rendered layer buffer's alpha by a **track matte**.
+///
+/// `layer_buf` holds the matted layer's isolated straight-linear RGBA. The matte
+/// source (`src_idx`) is rasterized per-pixel into the same comp space; each
+/// matte pixel yields a factor in `[0, 1]` (alpha/luma, optionally inverted) that
+/// multiplies the corresponding `layer_buf` pixel's alpha. Color is untouched —
+/// only coverage changes — so the subsequent source-over honors the matte. The
+/// matte source's own transform / parent chain / effects are respected.
+fn apply_track_matte(
+    layer_buf: &mut [Lin],
+    geom: &Geom,
+    comp: &Comp,
+    src_idx: usize,
+    mode: MatteMode,
+    t: f32,
+) {
+    // Render the matte source into its own isolated buffer (so its alpha/luma is
+    // measured in isolation, not on top of anything below it).
+    let mut matte = vec![Lin::CLEAR; (geom.w * geom.h) as usize];
+    let src_world = comp.world_matrix(src_idx, t);
+    if let Some(src_layer) = comp.layers.get(src_idx) {
+        composite_layer(&mut matte, geom, src_world, src_layer, t);
+    }
+    for (px, m) in matte.iter().enumerate() {
+        let f = mode.factor([m.r, m.g, m.b, m.a]);
+        layer_buf[px].a *= f;
     }
 }
 
@@ -724,6 +793,105 @@ mod tests {
         assert!(
             center > corner,
             "center {center} should exceed corner {corner}"
+        );
+    }
+
+    // --- Track mattes -------------------------------------------------------
+
+    /// A 64x64 comp: a full-frame opaque solid (`base`) with a smaller solid on
+    /// top to serve as the matte source. Index 0 = matted base, index 1 = source.
+    fn matte_pair(base: [f32; 4], source: [f32; 4], src_scale: f32) -> Comp {
+        let mut c = Comp {
+            width: 64,
+            height: 64,
+            duration: 1.0,
+            fps: 30.0,
+            layers: Vec::new(),
+        };
+        let mut b = PulseLayer::new("base", base);
+        b.scale.set_key(0.0, 3.0); // cover the whole frame
+        c.layers.push(b); // index 0
+        let mut s = PulseLayer::new("source", source);
+        s.scale.set_key(0.0, src_scale);
+        c.layers.push(s); // index 1
+        c
+    }
+
+    #[test]
+    fn matte_source_is_not_composited_on_its_own() {
+        // A red base under a green source; with an alpha matte the green source
+        // must NOT appear in the output — it only shapes the base's alpha.
+        let mut c = matte_pair([1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], 1.0);
+        c.layers[0].matte = MatteMode::Alpha;
+        let f = render_frame(&c, 0.0);
+        let [r, g, _b, a] = f.pixel(32, 32);
+        assert_eq!(a, 255);
+        // The center shows the base's red, not the source's green.
+        assert!(r > 250, "expected red base, got r={r}");
+        assert_eq!(g, 0, "matte source leaked into the composite");
+    }
+
+    #[test]
+    fn alpha_matte_clips_to_source_coverage() {
+        // Full-frame base, small (unit-scale) source. With an alpha matte the
+        // base is visible only inside the small source quad: center covered, a
+        // far edge (inside the base but outside the source) is now transparent.
+        let mut c = matte_pair([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], 1.0);
+        c.layers[0].matte = MatteMode::Alpha;
+        let f = render_frame(&c, 0.0);
+        assert_eq!(
+            f.pixel(32, 32)[3],
+            255,
+            "center should pass the alpha matte"
+        );
+        // A pixel far from center is inside the full-frame base but outside the
+        // small source quad -> matted away.
+        assert_eq!(f.pixel(2, 2)[3], 0, "edge should be matted out");
+    }
+
+    #[test]
+    fn inverted_alpha_matte_is_the_complement() {
+        // Inverted alpha: the base shows where the source is *transparent*, so the
+        // center (under the opaque source) is hidden and the surrounding base
+        // (full-frame) stays. Compare against the non-inverted case.
+        let mut c = matte_pair([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], 1.0);
+        c.layers[0].matte = MatteMode::AlphaInverted;
+        let f = render_frame(&c, 0.0);
+        // Center (under the opaque source) is punched out.
+        assert_eq!(f.pixel(32, 32)[3], 0, "center should be inverted-out");
+        // An edge pixel (base present, source absent) survives.
+        assert_eq!(f.pixel(2, 2)[3], 255, "edge should survive inversion");
+    }
+
+    #[test]
+    fn luma_matte_scales_alpha_by_source_brightness() {
+        // White base; the luma of a darker source scales the base's alpha. A gray
+        // (0.5 sRGB) source yields a partial matte: center alpha between 0 and 255.
+        let mut c = matte_pair([1.0, 1.0, 1.0, 1.0], [0.5, 0.5, 0.5, 1.0], 1.0);
+        c.layers[0].matte = MatteMode::Luma;
+        let gray = render_frame(&c, 0.0).pixel(32, 32)[3];
+        assert!((1..255).contains(&gray), "partial luma matte, got a={gray}");
+        // A white source passes the base through fully.
+        c.layers[1].color = [1.0, 1.0, 1.0, 1.0];
+        let white = render_frame(&c, 0.0).pixel(32, 32)[3];
+        assert_eq!(white, 255, "white luma should fully pass");
+        // A black source mattes the base completely away.
+        c.layers[1].color = [0.0, 0.0, 0.0, 1.0];
+        let black = render_frame(&c, 0.0).pixel(32, 32)[3];
+        assert_eq!(black, 0, "black luma should fully matte out");
+    }
+
+    #[test]
+    fn matte_preserves_base_color() {
+        // The matte changes coverage only, never color: a blue base under a
+        // partial luma matte still reads blue (just dimmer in alpha).
+        let mut c = matte_pair([0.0, 0.0, 1.0, 1.0], [0.6, 0.6, 0.6, 1.0], 1.0);
+        c.layers[0].matte = MatteMode::Luma;
+        let [r, g, b, a] = render_frame(&c, 0.0).pixel(32, 32);
+        assert!(a > 0, "some coverage expected");
+        assert!(
+            b > r && b > g,
+            "base color should stay blue, got {r},{g},{b}"
         );
     }
 

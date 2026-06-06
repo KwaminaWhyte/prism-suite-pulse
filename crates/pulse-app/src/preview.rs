@@ -86,8 +86,17 @@ pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected:
         if !layer.visible {
             continue;
         }
+        // A layer used as a matte source is pulled in by the layer below it and
+        // doesn't paint on its own (it only contributes alpha/luma).
+        if comp.is_matte_source(i) {
+            continue;
+        }
         // World matrix folds the layer's own transform under its parent chain.
         let world = comp.world_matrix(i, t);
+        // A track matte coarsely modulates this layer's preview opacity by the
+        // matte source's constant-color factor (the offline render does this
+        // per-pixel; the preview's constant quads can only approximate it).
+        let matte = matte_opacity(comp, i, t);
         paint_layer(
             painter,
             layer,
@@ -96,9 +105,34 @@ pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected:
             world,
             comp,
             t,
+            matte,
             selected == Some(i),
         );
     }
+}
+
+/// The coarse matte multiplier for layer `i` in the preview: the matte source's
+/// constant-color [`MatteMode::factor`] (the preview can't do per-pixel mattes,
+/// so it uses the source's flat color/alpha). `1.0` when the layer has no matte.
+fn matte_opacity(comp: &Comp, i: usize, t: f32) -> f32 {
+    let Some(src_idx) = comp.matte_source(i) else {
+        return 1.0;
+    };
+    let mode = comp.layers[i].matte;
+    let Some(src) = comp.layers.get(src_idx) else {
+        return 1.0;
+    };
+    // The source's effect-processed straight color in linear light, scaled by its
+    // own opacity — the same inputs the offline matte factor sees, flattened.
+    let c = effected_color(src);
+    let src_a = c[3].clamp(0.0, 1.0) * src.transform(t).opacity.clamp(0.0, 1.0);
+    let lin = [
+        srgb_to_linear(c[0].clamp(0.0, 1.0)),
+        srgb_to_linear(c[1].clamp(0.0, 1.0)),
+        srgb_to_linear(c[2].clamp(0.0, 1.0)),
+        src_a,
+    ];
+    mode.factor(lin)
 }
 
 /// Paint a single layer as a rotated/scaled solid quad, transformed by its
@@ -112,10 +146,13 @@ fn paint_layer(
     world: Affine2,
     comp: &Comp,
     t: f32,
+    matte: f32,
     selected: bool,
 ) {
     let tf = layer.transform(t);
-    if tf.opacity <= 0.0 {
+    // The track matte (coarsely) scales effective opacity in the preview.
+    let opacity = tf.opacity * matte.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
         return;
     }
 
@@ -144,7 +181,7 @@ fn paint_layer(
     match layer.kind {
         LayerKind::Solid => {
             // Solids paint their (effect-processed) color, faded by opacity.
-            let fill = to_color32(effected_color(layer), tf.opacity);
+            let fill = to_color32(effected_color(layer), opacity);
             painter.add(egui::Shape::convex_polygon(
                 corners.clone(),
                 fill,

@@ -359,6 +359,79 @@ impl Track {
     }
 }
 
+/// A **track matte**: how a layer borrows the layer directly above it to define
+/// its own transparency (After Effects' track-matte feature).
+///
+/// When a layer's matte is anything other than [`MatteMode::None`], the layer
+/// immediately **above** it in the stack (the next-higher index) becomes its
+/// *matte source*: that source is removed from normal compositing and instead
+/// multiplies this layer's per-pixel alpha. An **alpha** matte uses the source's
+/// alpha; a **luma** matte uses the source's perceptual brightness. Either can be
+/// **inverted** (`1 - factor`) — so a layer shows only where its matte source is
+/// transparent / dark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatteMode {
+    /// No matte: the layer composites normally and the layer above is unaffected.
+    #[default]
+    None,
+    /// Alpha matte: this layer is visible where the matte source is opaque.
+    Alpha,
+    /// Inverted alpha matte: visible where the source is *transparent*.
+    AlphaInverted,
+    /// Luma matte: this layer is visible where the matte source is *bright*.
+    Luma,
+    /// Inverted luma matte: visible where the source is *dark*.
+    LumaInverted,
+}
+
+impl MatteMode {
+    /// All modes, in menu order.
+    pub const ALL: [MatteMode; 5] = [
+        MatteMode::None,
+        MatteMode::Alpha,
+        MatteMode::AlphaInverted,
+        MatteMode::Luma,
+        MatteMode::LumaInverted,
+    ];
+
+    /// Short label for the matte picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            MatteMode::None => "No matte",
+            MatteMode::Alpha => "Alpha",
+            MatteMode::AlphaInverted => "Alpha inverted",
+            MatteMode::Luma => "Luma",
+            MatteMode::LumaInverted => "Luma inverted",
+        }
+    }
+
+    /// Whether this mode actually consumes a matte source (everything but
+    /// [`MatteMode::None`]).
+    pub fn is_active(self) -> bool {
+        !matches!(self, MatteMode::None)
+    }
+
+    /// The matte multiplier in `[0, 1]` for a matte-source pixel given as a
+    /// **straight, linear-light** RGBA. Alpha modes read the source's alpha; luma
+    /// modes read its Rec.709 luma (weighted by alpha, so a transparent bright
+    /// pixel still mattes to ~0); the `*Inverted` variants return `1 - factor`.
+    /// [`MatteMode::None`] is a passthrough (factor `1`).
+    pub fn factor(self, src: [f32; 4]) -> f32 {
+        let [r, g, b, a] = src;
+        let alpha = a.clamp(0.0, 1.0);
+        let f = match self {
+            MatteMode::None => return 1.0,
+            MatteMode::Alpha => alpha,
+            MatteMode::AlphaInverted => 1.0 - alpha,
+            MatteMode::Luma => (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0) * alpha,
+            MatteMode::LumaInverted => {
+                1.0 - (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0) * alpha
+            }
+        };
+        f.clamp(0.0, 1.0)
+    }
+}
+
 /// What a layer *is* — its source/role in the composite, in the After-Effects
 /// sense.
 ///
@@ -648,6 +721,12 @@ pub struct PulseLayer {
     /// `.pulse` files still load as unparented.
     #[serde(default)]
     pub parent: Option<usize>,
+    /// **Track matte** mode. When active, the layer directly *above* this one in
+    /// the stack defines this layer's per-pixel transparency and is itself
+    /// removed from normal compositing (matching After Effects). `serde`-defaulted
+    /// to [`MatteMode::None`] so pre-matte `.pulse` files still load.
+    #[serde(default)]
+    pub matte: MatteMode,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -672,6 +751,7 @@ impl PulseLayer {
             visible: true,
             effects: Vec::new(),
             parent: None,
+            matte: MatteMode::None,
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -955,6 +1035,28 @@ impl Comp {
             }
         }
         m
+    }
+
+    /// The index of layer `idx`'s **matte source** — the layer directly above it
+    /// in the stack (next-higher index) — when `idx` has an active [`MatteMode`]
+    /// and such a layer exists. `None` if the layer has no matte or sits at the
+    /// top of the stack (no layer above to borrow).
+    pub fn matte_source(&self, idx: usize) -> Option<usize> {
+        let layer = self.layers.get(idx)?;
+        if !layer.matte.is_active() {
+            return None;
+        }
+        let src = idx + 1;
+        (src < self.layers.len()).then_some(src)
+    }
+
+    /// Whether layer `idx` is **consumed as a matte source** by the layer
+    /// directly below it (so it must not composite on its own). True iff the
+    /// layer below (`idx - 1`) has an active matte mode.
+    pub fn is_matte_source(&self, idx: usize) -> bool {
+        idx.checked_sub(1)
+            .and_then(|below| self.layers.get(below))
+            .is_some_and(|below| below.matte.is_active())
     }
 
     /// Whether making `child` a parent of `parent` is legal: a layer can't
@@ -1573,6 +1675,88 @@ mod tests {
         // Empty stack is a passthrough.
         let same = apply_effects(&[], [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(same, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    // --- Track mattes -------------------------------------------------------
+
+    #[test]
+    fn matte_none_is_passthrough() {
+        // No matte: factor is always 1 regardless of the source pixel.
+        for px in [[0.0; 4], [1.0; 4], [0.3, 0.6, 0.9, 0.5]] {
+            assert_eq!(MatteMode::None.factor(px), 1.0);
+        }
+        assert!(!MatteMode::None.is_active());
+        assert!(MatteMode::Alpha.is_active());
+    }
+
+    #[test]
+    fn alpha_matte_reads_source_alpha() {
+        // Color is irrelevant to an alpha matte; only the source alpha matters.
+        assert_eq!(MatteMode::Alpha.factor([0.9, 0.1, 0.4, 1.0]), 1.0);
+        assert_eq!(MatteMode::Alpha.factor([0.9, 0.1, 0.4, 0.0]), 0.0);
+        assert!((MatteMode::Alpha.factor([0.0, 0.0, 0.0, 0.25]) - 0.25).abs() < 1e-6);
+        // Inverted alpha is 1 - alpha.
+        assert_eq!(MatteMode::AlphaInverted.factor([1.0, 1.0, 1.0, 1.0]), 0.0);
+        assert_eq!(MatteMode::AlphaInverted.factor([1.0, 1.0, 1.0, 0.0]), 1.0);
+    }
+
+    #[test]
+    fn luma_matte_reads_weighted_brightness() {
+        // Opaque white -> luma ~1; opaque black -> 0.
+        assert!((MatteMode::Luma.factor([1.0, 1.0, 1.0, 1.0]) - 1.0).abs() < 1e-5);
+        assert_eq!(MatteMode::Luma.factor([0.0, 0.0, 0.0, 1.0]), 0.0);
+        // Green carries the most luma weight (Rec.709), blue the least.
+        let g = MatteMode::Luma.factor([0.0, 1.0, 0.0, 1.0]);
+        let b = MatteMode::Luma.factor([0.0, 0.0, 1.0, 1.0]);
+        assert!(g > b, "green luma {g} should exceed blue luma {b}");
+        // A transparent bright pixel mattes to ~0 (luma is weighted by alpha).
+        assert_eq!(MatteMode::Luma.factor([1.0, 1.0, 1.0, 0.0]), 0.0);
+        // Inverted luma flips a bright source to ~0.
+        assert!(MatteMode::LumaInverted.factor([1.0, 1.0, 1.0, 1.0]) < 1e-5);
+        assert!((MatteMode::LumaInverted.factor([0.0, 0.0, 0.0, 1.0]) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn matte_factor_is_clamped() {
+        // Out-of-gamut source values can't push the factor past [0,1].
+        assert_eq!(MatteMode::Luma.factor([5.0, 5.0, 5.0, 2.0]), 1.0);
+        assert_eq!(MatteMode::AlphaInverted.factor([0.0, 0.0, 0.0, -1.0]), 1.0);
+    }
+
+    #[test]
+    fn matte_source_is_layer_above_when_active() {
+        let mut c = parented_comp(); // layers: 0 (parent), 1 (child)
+                                     // Layer 0 with an active matte borrows layer 1 (the one above it).
+        c.layers[0].matte = MatteMode::Alpha;
+        assert_eq!(c.matte_source(0), Some(1));
+        // The top layer has nothing above to borrow -> no source.
+        c.layers[1].matte = MatteMode::Luma;
+        assert_eq!(c.matte_source(1), None);
+        // Without an active matte there is no source even if a layer is above.
+        c.layers[0].matte = MatteMode::None;
+        assert_eq!(c.matte_source(0), None);
+    }
+
+    #[test]
+    fn is_matte_source_tracks_layer_below() {
+        let mut c = parented_comp(); // 0, 1
+                                     // Layer 0 mattes off layer 1 -> layer 1 is a matte source, layer 0 isn't.
+        c.layers[0].matte = MatteMode::Alpha;
+        assert!(c.is_matte_source(1));
+        assert!(!c.is_matte_source(0));
+        // Turning the matte off un-consumes layer 1.
+        c.layers[0].matte = MatteMode::None;
+        assert!(!c.is_matte_source(1));
+    }
+
+    #[test]
+    fn matte_serde_defaults_to_none() {
+        // Pre-matte layers (no `matte` field) load as un-matted.
+        let json = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+            "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+            "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+        let layer: PulseLayer = serde_json::from_str(json).unwrap();
+        assert_eq!(layer.matte, MatteMode::None);
     }
 
     #[test]
