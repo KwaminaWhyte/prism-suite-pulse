@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/pulse-app"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/prism-suite/pulse"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+
+# Shared foundation crate from the sibling Pigment app (the suite's common core).
+prism-core = { path = "../crates/prism-core" }
+
+# `prism-core` declares `[lints] workspace = true`, which resolves against
+# whichever workspace builds it. Mirror Pigment's lint config so building from
+# Pulse's workspace doesn't error on undefined `workspace.lints`.
+[workspace.lints.clippy]
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+field_reassign_with_default = "allow"
+
+[workspace.lints.rust]
+deprecated = "allow"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
