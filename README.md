@@ -1,8 +1,8 @@
 # Pulse
 
 Motion-graphics / compositing app — the After Effects analog and **app #3 of the
-Prism creative suite** (sibling to [Pigment](../pigment), the raster editor, and
-[Contour](../contour), the vector editor).
+Prism creative suite** (sibling to [Pigment](https://github.com/KwaminaWhyte/prism-suite-pigment), the raster editor, and
+[Contour](https://github.com/KwaminaWhyte/prism-suite-contour), the vector editor).
 
 Built in Rust with [`eframe`](https://github.com/emilk/egui)/`egui` 0.34 (glow
 backend). The preview is drawn through egui's `Painter` — no custom GPU pass

@@ -1,12 +1,12 @@
 # Pulse — Open Source After Effects Alternative
 
 Professional motion-graphics, VFX & compositing app in Rust, and **app #3 of the Prism suite** (sibling
-to [Pigment](../pigment) raster, [Contour](../contour) vector). **Goal: reach ≥85% of Adobe After
+to [Pigment](https://github.com/KwaminaWhyte/prism-suite-pigment) raster, [Contour](https://github.com/KwaminaWhyte/prism-suite-contour) vector). **Goal: reach ≥85% of Adobe After
 Effects' real-world capability** — features, reliability, and ease-of-use — in staged milestones, on the
 suite's shared engine: `prism-core` (layers, blend math, render graph), `prism-color` (linear/OCIO),
 and a shared `prism-fx` (OpenFX-style effects) and `prism-media` (FFmpeg) layer.
 
-> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [../SUITE.md](../SUITE.md) (four-app vision + interop). The repo README (when added) tracks what runs *today*; this PLAN is the parity roadmap.
+> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (four-app vision + interop). The repo README (when added) tracks what runs *today*; this PLAN is the parity roadmap.
 
 ---
 
