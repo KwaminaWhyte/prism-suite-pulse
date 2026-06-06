@@ -72,6 +72,12 @@ pub const MATTE: &str = ph::MASK_HAPPY;
 pub const BLEND: &str = ph::INTERSECT;
 /// A dockable panel / window (Window-menu toggles).
 pub const PANEL: &str = ph::SIDEBAR;
+/// Search / filter (the Effects & Presets browser search box).
+pub const SEARCH: &str = ph::MAGNIFYING_GLASS;
+/// Clear the current search query.
+pub const CLEAR: &str = ph::X_CIRCLE;
+/// An effect (the Effects & Presets browser badge).
+pub const EFFECT: &str = ph::SPARKLE;
 
 // --- Keyframe interpolation -------------------------------------------------
 

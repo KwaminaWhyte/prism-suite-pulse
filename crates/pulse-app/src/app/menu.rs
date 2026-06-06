@@ -149,7 +149,7 @@ impl PulseApp {
         ui.separator();
         if ui
             .add_enabled(
-                self.panels.shown_count() < Panel::ALL.len(),
+                !self.panels.all_shown(),
                 egui::Button::new(format!("{}  Show all panels", icons::PANEL)),
             )
             .on_hover_text("Restore the default four-panel workspace")

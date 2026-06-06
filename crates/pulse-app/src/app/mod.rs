@@ -6,6 +6,7 @@ use crate::comp::{Comp, LayerKind, PulseLayer, ShapeItem, ShapePrimitive};
 use crate::graph::GraphState;
 use crate::{icons, render, theme};
 
+mod effects;
 mod layers;
 mod menu;
 mod panels;
@@ -43,6 +44,8 @@ pub struct PulseApp {
     /// Onion-skinning: ghost neighbouring frames behind the playhead for
     /// hand-keyed timing. Driven by the **View** menu; off by default.
     onion: crate::onion::OnionSkin,
+    /// The Effects & Presets browser's live search query (type-to-filter).
+    effect_query: String,
     /// Last save/export status, surfaced briefly in the menu bar.
     status: Option<String>,
 }
@@ -80,6 +83,7 @@ impl PulseApp {
             gizmo_drag: None,
             panels: PanelVisibility::default(),
             onion: crate::onion::OnionSkin::default(),
+            effect_query: String::new(),
             status: None,
         }
     }
@@ -289,6 +293,10 @@ impl eframe::App for PulseApp {
         // side/bottom panels leave).
         if self.panels.is_shown(Panel::Layers) {
             self.layers_panel(root);
+        }
+        // The Effects & Presets browser docks left, beside the Layers panel.
+        if self.panels.is_shown(Panel::Effects) {
+            self.effects_panel(root);
         }
         if self.panels.is_shown(Panel::Properties) {
             self.properties_panel(root);

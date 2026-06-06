@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 mod blend;
 mod effect;
+mod effect_browser;
 mod keyframe;
 mod mask;
 mod matte;
@@ -34,6 +35,7 @@ mod transform;
 
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
 pub use effect::{apply_effects, Effect, LayerKind};
+pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
 pub use keyframe::{Ease, Handle, Interp, Track};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
 pub use matte::MatteMode;

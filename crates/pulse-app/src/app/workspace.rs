@@ -18,30 +18,44 @@
 pub enum Panel {
     Layers,
     Properties,
+    /// The searchable **Effects & Presets** browser (After Effects' panel of the
+    /// same name) — type to filter, categorised, click to add to the selected
+    /// layer. Hidden by default (the classic four-panel workspace shows it off);
+    /// opened from the Window menu when wanted.
+    Effects,
     Timeline,
 }
 
 impl Panel {
     /// Every toggleable panel, in Window-menu order.
-    pub const ALL: [Panel; 3] = [Panel::Layers, Panel::Properties, Panel::Timeline];
+    pub const ALL: [Panel; 4] = [
+        Panel::Layers,
+        Panel::Properties,
+        Panel::Effects,
+        Panel::Timeline,
+    ];
 
     /// The human-readable label shown in the Window menu.
     pub fn label(self) -> &'static str {
         match self {
             Panel::Layers => "Layers",
             Panel::Properties => "Properties",
+            Panel::Effects => "Effects & Presets",
             Panel::Timeline => "Timeline",
         }
     }
 }
 
-/// Which dockable panels are currently shown. Defaults to all visible (the
-/// classic four-panel workspace). Pure state — the app reads each flag to decide
-/// whether to render the matching `SidePanel` / `TopBottomPanel` this frame.
+/// Which dockable panels are currently shown. Defaults to the **classic
+/// workspace**: Layers / Properties / Timeline shown, the Effects & Presets
+/// browser hidden (opened on demand). Pure state — the app reads each flag to
+/// decide whether to render the matching `SidePanel` / `TopBottomPanel` this
+/// frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PanelVisibility {
     layers: bool,
     properties: bool,
+    effects: bool,
     timeline: bool,
 }
 
@@ -50,6 +64,9 @@ impl Default for PanelVisibility {
         Self {
             layers: true,
             properties: true,
+            // The Effects browser is an extra surface, not part of the classic
+            // layout — start it hidden so the default workspace is unchanged.
+            effects: false,
             timeline: true,
         }
     }
@@ -61,6 +78,7 @@ impl PanelVisibility {
         match panel {
             Panel::Layers => self.layers,
             Panel::Properties => self.properties,
+            Panel::Effects => self.effects,
             Panel::Timeline => self.timeline,
         }
     }
@@ -70,6 +88,7 @@ impl PanelVisibility {
         match panel {
             Panel::Layers => self.layers = shown,
             Panel::Properties => self.properties = shown,
+            Panel::Effects => self.effects = shown,
             Panel::Timeline => self.timeline = shown,
         }
     }
@@ -91,17 +110,26 @@ impl PanelVisibility {
         self.shown_count() == 0
     }
 
-    /// Show every dockable panel (Window ▸ *Reset / Show all panels*).
+    /// Whether *every* dockable panel is shown (so a "Show all" action is a
+    /// no-op). Drives the Window-menu *Show all panels* enabled state.
+    pub fn all_shown(self) -> bool {
+        self.shown_count() == Panel::ALL.len()
+    }
+
+    /// Show every dockable panel (Window ▸ *Show all panels*) — including the
+    /// Effects browser, which the classic default leaves hidden.
     pub fn show_all(&mut self) {
-        *self = Self::default();
+        for panel in Panel::ALL {
+            self.set(panel, true);
+        }
     }
 
     /// Hide every dockable panel, leaving only the central Preview viewport
     /// (a quick "maximize the canvas" action).
     pub fn hide_all(&mut self) {
-        self.layers = false;
-        self.properties = false;
-        self.timeline = false;
+        for panel in Panel::ALL {
+            self.set(panel, false);
+        }
     }
 }
 
@@ -110,13 +138,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_shows_every_panel() {
+    fn default_is_the_classic_workspace() {
+        // Layers / Properties / Timeline shown, the Effects browser hidden.
         let v = PanelVisibility::default();
-        for p in Panel::ALL {
-            assert!(v.is_shown(p), "{} should default to shown", p.label());
-        }
+        assert!(v.is_shown(Panel::Layers));
+        assert!(v.is_shown(Panel::Properties));
+        assert!(v.is_shown(Panel::Timeline));
+        assert!(!v.is_shown(Panel::Effects));
         assert_eq!(v.shown_count(), 3);
         assert!(!v.all_hidden());
+        assert!(!v.all_shown());
     }
 
     #[test]
@@ -127,11 +158,22 @@ mod tests {
         // The others are untouched.
         assert!(v.is_shown(Panel::Layers));
         assert!(v.is_shown(Panel::Timeline));
+        assert!(!v.is_shown(Panel::Effects));
         assert_eq!(v.shown_count(), 2);
         // Toggling back restores it.
         v.toggle(Panel::Properties);
         assert!(v.is_shown(Panel::Properties));
         assert_eq!(v.shown_count(), 3);
+    }
+
+    #[test]
+    fn toggle_opens_the_effects_browser() {
+        let mut v = PanelVisibility::default();
+        assert!(!v.is_shown(Panel::Effects));
+        v.toggle(Panel::Effects);
+        assert!(v.is_shown(Panel::Effects));
+        assert_eq!(v.shown_count(), 4);
+        assert!(v.all_shown());
     }
 
     #[test]
@@ -155,14 +197,21 @@ mod tests {
     }
 
     #[test]
-    fn show_all_restores_default() {
+    fn show_all_shows_every_panel() {
         let mut v = PanelVisibility::default();
         v.toggle(Panel::Layers);
         v.toggle(Panel::Timeline);
         assert_eq!(v.shown_count(), 1);
         v.show_all();
-        assert_eq!(v, PanelVisibility::default());
-        assert_eq!(v.shown_count(), 3);
+        assert!(v.all_shown());
+        assert_eq!(v.shown_count(), Panel::ALL.len());
+        for p in Panel::ALL {
+            assert!(
+                v.is_shown(p),
+                "{} should be shown after show_all",
+                p.label()
+            );
+        }
     }
 
     #[test]
@@ -174,6 +223,6 @@ mod tests {
             assert!(!seen.contains(&p), "duplicate panel in ALL");
             seen.push(p);
         }
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 4);
     }
 }

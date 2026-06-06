@@ -10,6 +10,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Effects & Presets browser** (After-Effects *Effects & Presets* panel parity,
+  previously a noted UI/UX gap) — a **searchable, categorised** effect panel that
+  replaces the two flat "Add" menus with a type-to-filter surface: type part of
+  an effect's name (or a synonym), pick from the matching, folder-grouped list,
+  and it lands on the selected layer's matching stack.
+  - **`effect_browser`** (`comp/effect_browser.rs`) — the pure registry + matcher
+    behind the panel. A single [`REGISTRY`] of every addable effect across **both**
+    stacks (the seven per-pixel colour effects and the three whole-buffer spatial
+    effects), each [`BrowserEntry`] tagged with a display **name**, a [`Category`]
+    folder (Color Correction / Blur & Sharpen / Perspective / Stylize), the
+    [`Stack`] it appends to, and a set of search **keywords** (synonyms / AE names
+    that aren't in the display name — e.g. *bloom* finds Glow, *hsl* finds
+    Hue/Saturation). [`BrowserEntry::instantiate`] builds a fresh,
+    sensibly-defaulted instance (a tagged [`NewEffect`]) by indexing the stack's
+    existing `defaults()` array, so the browser and the per-stack editors never
+    drift.
+  - **Ranked, token-AND search** — `filter` / `filter_grouped` score each entry
+    against a case-insensitive, whitespace-split query: every query token must
+    match *somewhere* (name or a keyword) for an entry to appear (typing more
+    narrows), and per token a whole-name exact match outranks a name prefix,
+    which outranks a mid-string substring, which outranks any keyword hit. Results
+    sort best-score-first (ties alphabetical for a stable order); an empty query
+    lists the whole registry. `filter_grouped` buckets the ranked hits into the
+    category folders the panel renders, dropping empty folders.
+  - **Browser panel** (`app/effects.rs`) — a new left-docked **Effects & Presets**
+    panel: a magnifying-glass search box (with a **Clear** button and a "→ <layer>"
+    hint of where a click lands), then the filtered effects as collapsible
+    **category folders** (auto-opened while searching, tidy/collapsed when idle).
+    Clicking an effect appends it to the selected layer's `effects` (colour) or
+    `spatial_effects` (spatial) stack and surfaces an "Added <name>" status; with
+    no layer selected the panel prompts to select one. The flat per-stack "Add"
+    menus in Properties stay as a quick inline alternative.
+  - **A fourth dockable panel** — the browser joins the Window-menu show/hide set
+    (`app/workspace.rs`) as `Panel::Effects`, **hidden by default** so the classic
+    four-panel workspace is unchanged; *Window ▸ Effects & Presets* (or *Show all
+    panels*) opens it. `PanelVisibility` gained an `all_shown` query, and
+    `show_all` now shows **every** panel (including the browser) rather than
+    resetting to the classic default.
+  - **Pure + tested** — all the registry/search/grouping logic is unit-tested:
+    the registry stays in lock-step with both `defaults()` arrays (indices map to
+    real slots, names equal the effects' labels, every effect is reachable), the
+    empty/whitespace query lists everything alphabetically, name-substring +
+    case-insensitive + keyword-only matching, exact-name-beats-substring and
+    prefix-beats-mid-substring ranking, multi-token AND (an unmatched token drops
+    the entry), the no-match-is-empty case, descending-score order, and grouping
+    that preserves category order + per-group ranking and drops empty folders —
+    plus the new `Panel::Effects` default-hidden / toggle-to-open / show-all
+    workspace behaviour.
+
 - **Onion skinning** (a motion-tooling staple, previously a noted parity gap) —
   faint **ghost copies of the comp at the neighbouring frames** are drawn behind
   the live frame so hand-keyed timing reads at a glance: where the motion *came
