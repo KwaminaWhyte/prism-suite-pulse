@@ -40,6 +40,9 @@ pub struct PulseApp {
     /// Which dockable panels (Layers / Properties / Timeline) are shown — driven
     /// by the **Window** menu. The central Preview viewport is always present.
     panels: PanelVisibility,
+    /// Onion-skinning: ghost neighbouring frames behind the playhead for
+    /// hand-keyed timing. Driven by the **View** menu; off by default.
+    onion: crate::onion::OnionSkin,
     /// Last save/export status, surfaced briefly in the menu bar.
     status: Option<String>,
 }
@@ -76,6 +79,7 @@ impl PulseApp {
             graph: GraphState::default(),
             gizmo_drag: None,
             panels: PanelVisibility::default(),
+            onion: crate::onion::OnionSkin::default(),
             status: None,
         }
     }

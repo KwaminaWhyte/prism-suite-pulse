@@ -132,6 +132,8 @@ impl PulseApp {
             // grabbed directly on the canvas.
             let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
             let avail = painter.clip_rect();
+            // Onion-skin ghosts paint *behind* the live frame (timing aid).
+            preview::paint_onion(&painter, avail, &self.comp, &self.onion, self.time);
             preview::paint_comp(&painter, avail, &self.comp, self.time, self.selected);
             self.handle_gizmo(ui, &resp, &painter, avail);
         });

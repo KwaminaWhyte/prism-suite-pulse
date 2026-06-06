@@ -52,6 +52,9 @@ impl PulseApp {
                 ui.menu_button("Comp", |ui| {
                     self.motion_blur_menu(ui);
                 });
+                ui.menu_button("View", |ui| {
+                    self.onion_menu(ui);
+                });
                 ui.menu_button("Window", |ui| {
                     self.window_menu(ui);
                 });
@@ -97,6 +100,33 @@ impl PulseApp {
             );
             ui.add(egui::Slider::new(&mut mb.samples, 1..=64).text("Samples"))
                 .on_hover_text("Sub-frame snapshots integrated across the shutter");
+        });
+    }
+
+    /// The **View ▸ Onion Skinning** controls: a master enable plus how many
+    /// ghost frames to show before / after the playhead, the frame step between
+    /// ghosts, and the nearest ghost's opacity (farther ghosts fade off). Ghosts
+    /// the comp at neighbouring frames behind the live frame so hand-keyed timing
+    /// reads at a glance (cool = past, warm = future). The sliders are disabled
+    /// while onion skinning is off.
+    fn onion_menu(&mut self, ui: &mut egui::Ui) {
+        let o = &mut self.onion;
+        ui.checkbox(&mut o.enabled, "Onion skinning")
+            .on_hover_text("Ghost neighbouring frames behind the playhead (timing aid)");
+        ui.add_enabled_ui(o.enabled, |ui| {
+            let max = crate::onion::OnionSkin::MAX_PER_SIDE;
+            ui.add(egui::Slider::new(&mut o.before, 0..=max).text("Before"))
+                .on_hover_text("Ghost frames shown before the playhead (cool tint)");
+            ui.add(egui::Slider::new(&mut o.after, 0..=max).text("After"))
+                .on_hover_text("Ghost frames shown after the playhead (warm tint)");
+            ui.add(egui::Slider::new(&mut o.step, 1..=10).text("Frame step"))
+                .on_hover_text("Frames between successive ghosts (1 = every frame)");
+            ui.add(
+                egui::Slider::new(&mut o.opacity, 0.05..=1.0)
+                    .text("Opacity")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text("Opacity of the ghost nearest the playhead; farther ghosts fade");
         });
     }
 

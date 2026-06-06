@@ -9,6 +9,7 @@ mod comp;
 mod gizmo;
 mod graph;
 mod icons;
+mod onion;
 mod preview;
 mod render;
 mod theme;

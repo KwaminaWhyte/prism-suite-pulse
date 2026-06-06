@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Onion skinning** (a motion-tooling staple, previously a noted parity gap) —
+  faint **ghost copies of the comp at the neighbouring frames** are drawn behind
+  the live frame so hand-keyed timing reads at a glance: where the motion *came
+  from* and where it's *going*. Toggled (with controls) from a new **View** menu;
+  off by default.
+  - **`OnionSkin`** (`onion.rs`) — the pure model behind the menu: a master
+    `enabled`, how many ghost frames to show **before** / **after** the playhead
+    (0…8 each side), the **frame step** between ghosts (1 = every frame), and the
+    **opacity** of the nearest ghost. `OnionSkin::ghosts(time, fps, duration)`
+    turns those into the ordered list of ghost frames to paint — each a comp
+    `time`, a `Dir` (Before/After), a tint, and an opacity.
+  - **Directional tint + distance falloff** — past ghosts get a cool blue tint,
+    future ghosts a warm orange, so the two directions read apart; opacity falls
+    off linearly from the nearest ghost (full `opacity`) to a 25%-of-base floor
+    at the farthest, so the trail fades but stays visible. Ghosts whose frame
+    falls off either end of the timeline (`< 0` or `> duration`) are dropped, and
+    the list is ordered farthest → nearest so nearer (more opaque) ghosts paint
+    last (on top).
+  - **Preview integration** (`preview.rs`) — `paint_onion` draws each ghost
+    frame *behind* the live comp as flat, tinted, faded quads of every visible
+    pixel-drawing layer at the ghost's sampled world transform (no effects /
+    masks / mattes — onion skinning is a *timing* aid, not a render preview),
+    cheap enough to run every frame.
+  - **View menu** (`app/menu.rs`) — an **Onion skinning** enable plus
+    **Before** / **After** / **Frame step** / **Opacity** sliders (disabled while
+    off), mirroring the way the **Comp ▸ Motion Blur** controls read.
+  - **Pure + tested** — all the ghost-frame timing / falloff / range-clipping
+    logic is unit-tested: disabled ⇒ no ghosts, count = before + after when in
+    range, step-spaced times, out-of-range ghosts dropped at the timeline ends,
+    nearest ghost most opaque and painted last, single-ghost full opacity, the
+    far-ghost opacity floor, distinct before/after tints, `step`/count clamping,
+    and non-positive `fps`/`duration` ⇒ empty.
+
 - **Three new color-correction effects** — **Hue / Saturation**, **Curves**, and
   **Color Balance** (Phase-3 *Color correction* surface) — joining Tint /
   Brightness & Contrast / Exposure / Levels in every layer's effect stack, so

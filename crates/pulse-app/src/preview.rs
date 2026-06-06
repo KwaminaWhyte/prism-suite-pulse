@@ -10,6 +10,7 @@
 
 use crate::comp::{apply_effects, Comp, LayerKind, MaskMode, PulseLayer};
 use crate::gizmo::{GizmoGeom, Handle};
+use crate::onion::{Ghost, OnionSkin};
 use crate::theme;
 use egui::{epaint::PathShape, Color32, Painter, Pos2, Rect, Stroke, Vec2};
 
@@ -203,6 +204,72 @@ pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected:
             matte,
             selected == Some(i),
         );
+    }
+}
+
+/// Paint **onion-skin ghost frames** behind the live comp: for each [`Ghost`]
+/// (the comp sampled at a neighbouring frame), draw every visible layer as a
+/// flat, tinted, faded quad/shape — a legible silhouette of where the motion was
+/// (cool tint) or is going (warm tint). Drawn *before* the live frame in
+/// [`paint_comp`], so the real frame composites on top.
+///
+/// Ghosts are intentionally cheap: each layer is a single tinted quad (or shape
+/// outline) at the ghost's sampled world transform, with no effects / masks /
+/// mattes — onion skinning is a *timing* aid, not a render preview. The list is
+/// pre-ordered farthest → nearest, so nearer (more opaque) ghosts paint last.
+pub fn paint_onion(painter: &Painter, avail: Rect, comp: &Comp, onion: &OnionSkin, t: f32) {
+    let ghosts = onion.ghosts(t, comp.fps, comp.duration);
+    if ghosts.is_empty() {
+        return;
+    }
+    let (frame, scale) = fit(avail, comp.width, comp.height);
+    let center = frame.center();
+    for ghost in ghosts {
+        paint_ghost_frame(painter, comp, &ghost, center, scale);
+    }
+}
+
+/// Paint one ghost frame: every visible, pixel-drawing layer of `comp` sampled at
+/// `ghost.time`, as a flat quad/outline tinted toward `ghost.tint` and faded by
+/// `ghost.opacity`.
+fn paint_ghost_frame(painter: &Painter, comp: &Comp, ghost: &Ghost, center: Pos2, scale: f32) {
+    let half_w = comp.width as f32 * 0.22;
+    let half_h = comp.height as f32 * 0.22;
+    let local = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
+    ];
+    for (i, layer) in comp.layers.iter().enumerate() {
+        if !layer.visible || comp.is_matte_source(i) {
+            continue;
+        }
+        // Nulls / adjustments draw nothing of their own — skip them in ghosts
+        // (their effect on the frame is render-only and not part of a timing aid).
+        if !layer.kind.draws_own_pixels() {
+            continue;
+        }
+        let world = comp.world_matrix(i, ghost.time);
+        let tf = layer.transform(ghost.time);
+        let op = (tf.opacity.clamp(0.0, 1.0) * ghost.opacity).clamp(0.0, 1.0);
+        if op <= 0.0 {
+            continue;
+        }
+        let corners: Vec<Pos2> = local
+            .iter()
+            .map(|&(lx, ly)| {
+                let (wx, wy) = world.apply(lx, ly);
+                center + Vec2::new(wx * scale, wy * scale)
+            })
+            .collect();
+        let fill = Color32::from_rgba_unmultiplied(
+            (ghost.tint[0] * 255.0).round() as u8,
+            (ghost.tint[1] * 255.0).round() as u8,
+            (ghost.tint[2] * 255.0).round() as u8,
+            (op * 255.0).round() as u8,
+        );
+        painter.add(egui::Shape::convex_polygon(corners, fill, Stroke::NONE));
     }
 }
 
