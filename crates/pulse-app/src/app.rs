@@ -4,7 +4,7 @@
 
 use crate::comp::{Comp, Ease, Interp, Prop, PulseLayer};
 use crate::graph::GraphState;
-use crate::{graph, icons, preview, theme, timeline};
+use crate::{graph, icons, preview, render, theme, timeline};
 use egui::{Color32, Sense};
 
 /// Which editor occupies the bottom panel: the lane timeline or the value-curve
@@ -28,6 +28,8 @@ pub struct PulseApp {
     mode: EditorMode,
     /// Graph-editor state (shown properties + active drag).
     graph: GraphState,
+    /// Last save/export status, surfaced briefly in the menu bar.
+    status: Option<String>,
 }
 
 impl PulseApp {
@@ -42,6 +44,7 @@ impl PulseApp {
             rng: 0x1234_5678,
             mode: EditorMode::default(),
             graph: GraphState::default(),
+            status: None,
         }
     }
 
@@ -133,6 +136,39 @@ impl PulseApp {
             }
         }
     }
+
+    /// Render the whole comp to a PNG image sequence in a chosen folder.
+    ///
+    /// Pauses playback (a render is a discrete action), pops a folder picker,
+    /// then writes `<stem>_0000.png`, … one file per frame across the comp's
+    /// `[0, duration]` timeline at its fps. Status (frames written / errors) is
+    /// logged and shown in the menu bar.
+    fn export_dialog(&mut self) {
+        self.playing = false;
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Export PNG sequence to folder…")
+            .pick_folder()
+        else {
+            return;
+        };
+        let stem = "comp";
+        match render::export_sequence(&self.comp, &dir, stem) {
+            Ok(summary) => {
+                let msg = format!(
+                    "Exported {} frames → {}",
+                    summary.frames,
+                    summary.dir.display()
+                );
+                log::info!("{msg}");
+                self.status = Some(msg);
+            }
+            Err(e) => {
+                let msg = format!("Export failed: {e}");
+                log::error!("{msg}");
+                self.status = Some(msg);
+            }
+        }
+    }
 }
 
 impl eframe::App for PulseApp {
@@ -176,9 +212,14 @@ impl PulseApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    ui.add_enabled_ui(false, |ui| {
-                        let _ = ui.button("Export… (stub)");
-                    });
+                    if ui
+                        .button(format!("{}  Export PNG sequence…", icons::EXPORT))
+                        .on_hover_text("Render every frame to a PNG image sequence")
+                        .clicked()
+                    {
+                        self.export_dialog();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Layer", |ui| {
                     if ui
@@ -209,6 +250,10 @@ impl PulseApp {
                         "{}×{}  ·  {:.0} fps  ·  {:.1}s",
                         self.comp.width, self.comp.height, self.comp.fps, self.comp.duration
                     ));
+                    if let Some(status) = &self.status {
+                        ui.separator();
+                        ui.weak(status).on_hover_text(status);
+                    }
                 });
             });
         });

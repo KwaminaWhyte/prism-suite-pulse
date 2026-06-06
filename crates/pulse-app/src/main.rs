@@ -9,6 +9,7 @@ mod comp;
 mod graph;
 mod icons;
 mod preview;
+mod render;
 mod theme;
 mod timeline;
 

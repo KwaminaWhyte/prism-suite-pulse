@@ -1,0 +1,475 @@
+//! A small CPU **software compositor** that rasterizes a [`Comp`] to an 8-bit
+//! sRGB RGBA frame buffer, plus a PNG **image-sequence** exporter built on top.
+//!
+//! This is the headless twin of [`preview`](crate::preview): where the preview
+//! paints layers through egui's `Painter` at screen resolution, [`render_frame`]
+//! produces a *real* pixel buffer at the comp's native resolution, using the
+//! exact same transform model (a layer is a centered solid quad sized to a
+//! fraction of the comp, offset by `(x, y)`, uniformly scaled, rotated about its
+//! own center, and faded by `opacity`). Exported frames therefore match what the
+//! preview shows.
+//!
+//! Compositing is **source-over in linear light**: each layer's straight sRGB
+//! color is converted to linear (through `prism-core`'s shared color boundary),
+//! alpha-composited back-to-front over the accumulating frame, then encoded back
+//! to sRGB bytes only at the very end — the suite's "never bake until output"
+//! principle, in miniature.
+//!
+//! The rasterizer is deliberately pure (no egui, no IO) so the transform and
+//! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
+//! that drives it across a comp's frames and writes `name_0001.png`, ….
+
+use crate::comp::{Comp, PulseLayer};
+use prism_core::color::{linear_to_srgb, srgb_to_linear};
+use std::path::{Path, PathBuf};
+
+/// The half-extent of a layer's base quad as a fraction of the comp size. Must
+/// match [`preview`](crate::preview)'s `half_w`/`half_h` so the offline render
+/// and the on-screen preview agree.
+pub const LAYER_HALF_FRAC: f32 = 0.22;
+
+/// An in-memory rendered frame: tightly packed 8-bit sRGB RGBA, row-major,
+/// `width * height * 4` bytes, top-left origin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+impl Frame {
+    /// Read the RGBA bytes of pixel `(x, y)`; panics if out of bounds.
+    /// (A pixel accessor for callers/tests inspecting a rendered frame.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * self.width + x) * 4) as usize;
+        [
+            self.pixels[i],
+            self.pixels[i + 1],
+            self.pixels[i + 2],
+            self.pixels[i + 3],
+        ]
+    }
+}
+
+/// A linear-light premultiplied-free RGBA accumulator pixel.
+#[derive(Clone, Copy)]
+struct Lin {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+/// Render the composition at time `t` to a native-resolution [`Frame`].
+///
+/// The comp backdrop is fully transparent black; visible layers are composited
+/// back-to-front (index 0 first / behind). Coordinates follow the preview:
+/// the comp origin is its center, `+y` is downward (screen space).
+pub fn render_frame(comp: &Comp, t: f32) -> Frame {
+    let w = comp.width.max(1);
+    let h = comp.height.max(1);
+    let mut acc = vec![
+        Lin {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0
+        };
+        (w * h) as usize
+    ];
+
+    let cx = w as f32 * 0.5;
+    let cy = h as f32 * 0.5;
+    let half_w = w as f32 * LAYER_HALF_FRAC;
+    let half_h = h as f32 * LAYER_HALF_FRAC;
+
+    for layer in &comp.layers {
+        if !layer.visible {
+            continue;
+        }
+        composite_layer(&mut acc, w, h, cx, cy, half_w, half_h, layer, t);
+    }
+
+    // Encode linear accumulator -> straight sRGB 8-bit RGBA.
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for (px, lin) in acc.iter().enumerate() {
+        let o = px * 4;
+        pixels[o] = enc(lin.r);
+        pixels[o + 1] = enc(lin.g);
+        pixels[o + 2] = enc(lin.b);
+        pixels[o + 3] = (lin.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+
+    Frame {
+        width: w,
+        height: h,
+        pixels,
+    }
+}
+
+/// Composite one layer's solid quad into the linear accumulator.
+#[allow(clippy::too_many_arguments)]
+fn composite_layer(
+    acc: &mut [Lin],
+    w: u32,
+    h: u32,
+    cx: f32,
+    cy: f32,
+    half_w: f32,
+    half_h: f32,
+    layer: &PulseLayer,
+    t: f32,
+) {
+    let tf = layer.transform(t);
+    if tf.opacity <= 0.0 {
+        return;
+    }
+    let s = tf.scale.max(0.0);
+    if s <= 0.0 {
+        return;
+    }
+
+    // Layer center in comp pixels (origin at comp center, +y down).
+    let lcx = cx + tf.x;
+    let lcy = cy + tf.y;
+
+    // Inverse rotation: rotate a comp-space delta back into layer-local space.
+    let theta = tf.rotation_deg.to_radians();
+    let (sin, cos) = theta.sin_cos();
+
+    // Layer straight sRGB color -> linear; premultiply happens implicitly via
+    // the source-over math below (we carry straight color + coverage alpha).
+    let lr = srgb_to_linear(layer.color[0].clamp(0.0, 1.0));
+    let lg = srgb_to_linear(layer.color[1].clamp(0.0, 1.0));
+    let lb = srgb_to_linear(layer.color[2].clamp(0.0, 1.0));
+    let src_a = (layer.color[3].clamp(0.0, 1.0)) * tf.opacity;
+    if src_a <= 0.0 {
+        return;
+    }
+
+    // Conservative bounding box of the rotated/scaled quad to avoid scanning the
+    // whole frame for small layers. Half-extent after scale, then the rotation
+    // can grow the AABB by |cos|+|sin| in each axis.
+    let ext_w = half_w * s;
+    let ext_h = half_h * s;
+    let aabb_w = ext_w * cos.abs() + ext_h * sin.abs();
+    let aabb_h = ext_w * sin.abs() + ext_h * cos.abs();
+    let x0 = ((lcx - aabb_w).floor() as i32).max(0);
+    let x1 = ((lcx + aabb_w).ceil() as i32).min(w as i32 - 1);
+    let y0 = ((lcy - aabb_h).floor() as i32).max(0);
+    let y1 = ((lcy + aabb_h).ceil() as i32).min(h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+
+    let inv_s = 1.0 / s;
+    for py in y0..=y1 {
+        // Pixel center sampling.
+        let dy = py as f32 + 0.5 - lcy;
+        for px in x0..=x1 {
+            let dx = px as f32 + 0.5 - lcx;
+            // Inverse-rotate the comp-space delta into the layer's local frame.
+            let lx = (dx * cos + dy * sin) * inv_s;
+            let ly = (-dx * sin + dy * cos) * inv_s;
+            if lx.abs() > half_w || ly.abs() > half_h {
+                continue;
+            }
+            // Source-over in linear light: out = src + dst*(1-src_a).
+            let idx = (py as u32 * w + px as u32) as usize;
+            let dst = acc[idx];
+            let ia = 1.0 - src_a;
+            acc[idx] = Lin {
+                r: lr * src_a + dst.r * ia,
+                g: lg * src_a + dst.g * ia,
+                b: lb * src_a + dst.b * ia,
+                a: src_a + dst.a * ia,
+            };
+        }
+    }
+}
+
+/// Encode a linear-light component to an 8-bit sRGB byte.
+fn enc(v: f32) -> u8 {
+    (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8
+}
+
+/// The frame count of a render: every frame on the comp's `[0, duration]`
+/// timeline at its fps, inclusive of frame 0. A 5 s comp at 30 fps yields 150
+/// frames (0..149), matching After Effects' frame-inclusive duration.
+pub fn frame_count(comp: &Comp) -> u32 {
+    let fps = comp.fps.max(1.0);
+    (comp.duration.max(0.0) * fps).round().max(1.0) as u32
+}
+
+/// The presentation time (seconds) of frame `i`.
+pub fn frame_time(comp: &Comp, i: u32) -> f32 {
+    let fps = comp.fps.max(1.0);
+    i as f32 / fps
+}
+
+/// Build the output path for frame `i`: `<dir>/<stem>_<0000>.png`, zero-padded
+/// to at least 4 digits (more if the sequence needs them).
+pub fn frame_path(dir: &Path, stem: &str, i: u32, total: u32) -> PathBuf {
+    let pad = total.saturating_sub(1).to_string().len().max(4);
+    dir.join(format!("{stem}_{i:0pad$}.png", pad = pad))
+}
+
+/// Summary of an [`export_sequence`] run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportSummary {
+    pub frames: u32,
+    pub dir: PathBuf,
+}
+
+/// Render every frame of `comp` and write the PNG image sequence to `dir`,
+/// naming files `<stem>_0000.png`, `<stem>_0001.png`, …. Creates `dir` if it
+/// does not exist. Returns a summary, or the first IO/encode error.
+pub fn export_sequence(comp: &Comp, dir: &Path, stem: &str) -> std::io::Result<ExportSummary> {
+    std::fs::create_dir_all(dir)?;
+    let total = frame_count(comp);
+    for i in 0..total {
+        let t = frame_time(comp, i);
+        let frame = render_frame(comp, t);
+        let path = frame_path(dir, stem, i, total);
+        write_png(&path, &frame)?;
+    }
+    Ok(ExportSummary {
+        frames: total,
+        dir: dir.to_path_buf(),
+    })
+}
+
+/// Encode a [`Frame`] to a PNG file via the `image` crate, mapping any encode
+/// failure into an `io::Error` so callers have a single error type.
+fn write_png(path: &Path, frame: &Frame) -> std::io::Result<()> {
+    let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels.clone())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frame buffer size mismatch",
+            )
+        })?;
+    img.save_with_format(path, image::ImageFormat::Png)
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::comp::{Interp, Prop};
+
+    fn solid(color: [f32; 4]) -> Comp {
+        let mut c = Comp {
+            width: 64,
+            height: 64,
+            duration: 1.0,
+            fps: 30.0,
+            layers: Vec::new(),
+        };
+        c.layers.push(PulseLayer::new("L", color));
+        c
+    }
+
+    #[test]
+    fn frame_has_correct_size() {
+        let c = solid([1.0, 0.0, 0.0, 1.0]);
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.width, 64);
+        assert_eq!(f.height, 64);
+        assert_eq!(f.pixels.len(), 64 * 64 * 4);
+    }
+
+    #[test]
+    fn empty_comp_is_transparent() {
+        let c = Comp {
+            width: 8,
+            height: 8,
+            duration: 1.0,
+            fps: 30.0,
+            layers: Vec::new(),
+        };
+        let f = render_frame(&c, 0.0);
+        assert!(f.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn center_pixel_is_opaque_layer_color() {
+        // A centered, unrotated, unit-scale opaque red layer covers the center.
+        let c = solid([1.0, 0.0, 0.0, 1.0]);
+        let f = render_frame(&c, 0.0);
+        let [r, g, b, a] = f.pixel(32, 32);
+        assert_eq!(a, 255);
+        assert!(r > 250, "red channel high, got {r}");
+        assert_eq!(g, 0);
+        assert_eq!(b, 0);
+    }
+
+    #[test]
+    fn corner_pixel_outside_quad_is_transparent() {
+        // Half-extent is 0.22*64 ≈ 14 px, so a far corner is uncovered.
+        let c = solid([1.0, 1.0, 1.0, 1.0]);
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(0, 0)[3], 0);
+        assert_eq!(f.pixel(63, 63)[3], 0);
+    }
+
+    #[test]
+    fn invisible_layer_does_not_render() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].visible = false;
+        let f = render_frame(&c, 0.0);
+        assert!(f.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn zero_opacity_is_transparent() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].opacity.set_key(0.0, 0.0);
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(32, 32)[3], 0);
+    }
+
+    #[test]
+    fn opacity_animates_over_time() {
+        // Opacity ramps 0 -> 1 across the comp; center alpha grows with time.
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].opacity.set_key(0.0, 0.0);
+        c.layers[0].opacity.set_key(1.0, 1.0);
+        let a0 = render_frame(&c, 0.0).pixel(32, 32)[3];
+        let amid = render_frame(&c, 0.5).pixel(32, 32)[3];
+        let a1 = render_frame(&c, 1.0).pixel(32, 32)[3];
+        assert!(a0 < amid && amid < a1, "{a0} < {amid} < {a1}");
+        assert_eq!(a1, 255);
+    }
+
+    #[test]
+    fn position_offset_moves_coverage() {
+        // Shift the layer far right: center is now uncovered, the right edge covered.
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].x.set_key(0.0, 20.0);
+        let f = render_frame(&c, 0.0);
+        // Original center (32,32) sits at the layer's left edge region; the
+        // covered band shifts right. Sample a pixel that should now be covered.
+        assert_eq!(f.pixel(50, 32)[3], 255);
+        // A pixel far left of the shifted quad is uncovered.
+        assert_eq!(f.pixel(10, 32)[3], 0);
+    }
+
+    #[test]
+    fn source_over_blends_two_layers_in_linear() {
+        // Opaque black behind, 50% white on top -> mid gray, fully opaque.
+        let mut c = solid([0.0, 0.0, 0.0, 1.0]);
+        let mut top = PulseLayer::new("top", [1.0, 1.0, 1.0, 1.0]);
+        top.opacity.set_key(0.0, 0.5);
+        c.layers.push(top);
+        let f = render_frame(&c, 0.0);
+        let [r, _g, _b, a] = f.pixel(32, 32);
+        assert_eq!(a, 255);
+        // 0.5 linear-light coverage of white over black, sRGB-encoded, is well
+        // above naive 0.5*255=128 (gamma), so just bound it sensibly.
+        assert!((150..=200).contains(&r), "mid gray r={r}");
+    }
+
+    #[test]
+    fn scale_zero_renders_nothing() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.layers[0].scale.set_key(0.0, 0.0);
+        let f = render_frame(&c, 0.0);
+        assert!(f.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn larger_scale_covers_more_pixels() {
+        let count_covered = |scale: f32| {
+            let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+            c.layers[0].scale.set_key(0.0, scale);
+            let f = render_frame(&c, 0.0);
+            f.pixels.chunks(4).filter(|p| p[3] > 0).count()
+        };
+        assert!(count_covered(2.0) > count_covered(1.0));
+    }
+
+    #[test]
+    fn rotation_keeps_center_covered() {
+        // Rotating about the layer center leaves the center pixel covered.
+        let mut c = solid([0.0, 1.0, 0.0, 1.0]);
+        c.layers[0].rotation.set_key(0.0, 45.0);
+        let f = render_frame(&c, 0.0);
+        assert_eq!(f.pixel(32, 32)[3], 255);
+    }
+
+    #[test]
+    fn rotation_uses_outgoing_interp() {
+        // Sanity: a rotation track sampled mid-segment differs from endpoints,
+        // confirming render_frame consults the animated transform.
+        let mut c = solid([1.0, 0.0, 0.0, 1.0]);
+        c.layers[0].rotation.set_key(0.0, 0.0);
+        c.layers[0].rotation.set_key(1.0, 90.0);
+        c.layers[0].rotation.set_interp(0.0, Interp::Linear);
+        // Just assert it renders without panic at a few times.
+        for &t in &[0.0, 0.25, 0.5, 1.0] {
+            let _ = render_frame(&c, t);
+        }
+        // And the transform actually animates.
+        assert!((c.layers[0].value(Prop::Rotation, 0.5) - 45.0).abs() < 1e-3);
+    }
+
+    // --- Sequence math ------------------------------------------------------
+
+    #[test]
+    fn frame_count_is_duration_times_fps() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.duration = 5.0;
+        c.fps = 30.0;
+        assert_eq!(frame_count(&c), 150);
+        c.duration = 2.0;
+        c.fps = 24.0;
+        assert_eq!(frame_count(&c), 48);
+    }
+
+    #[test]
+    fn frame_count_floors_at_one() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.duration = 0.0;
+        assert_eq!(frame_count(&c), 1);
+    }
+
+    #[test]
+    fn frame_time_steps_by_fps() {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        c.fps = 25.0;
+        assert!((frame_time(&c, 0) - 0.0).abs() < 1e-6);
+        assert!((frame_time(&c, 25) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frame_path_zero_pads() {
+        let dir = Path::new("/tmp/out");
+        // <100 frames -> 4-digit padding (the minimum).
+        assert_eq!(frame_path(dir, "comp", 7, 90), dir.join("comp_0007.png"));
+        // 12000 frames -> highest index 11999 needs 5 digits.
+        assert_eq!(
+            frame_path(dir, "comp", 42, 12000),
+            dir.join("comp_00042.png")
+        );
+    }
+
+    #[test]
+    fn export_sequence_writes_all_frames() {
+        let mut c = solid([0.2, 0.6, 0.9, 1.0]);
+        c.width = 16;
+        c.height = 16;
+        c.duration = 0.1; // 0.1s * 30fps = 3 frames
+        c.fps = 30.0;
+        let dir = std::env::temp_dir().join(format!("pulse_export_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let summary = export_sequence(&c, &dir, "seq").expect("export");
+        assert_eq!(summary.frames, 3);
+        for i in 0..3 {
+            let p = frame_path(&dir, "seq", i, 3);
+            assert!(p.exists(), "missing frame {}", p.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

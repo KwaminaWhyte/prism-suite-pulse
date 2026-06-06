@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PNG image-sequence export** — File ▸ *Export PNG sequence…* renders the whole
+  composition to a folder of numbered PNGs (`comp_0000.png`, `comp_0001.png`, …),
+  one file per frame across the comp's `[0, duration]` timeline at its fps
+  (replacing the old export stub). Frame count / errors are surfaced in the menu
+  bar and logged; the folder is picked via a native dialog (`rfd`).
+- **Software compositor** (`render.rs`) — a pure, headless CPU rasterizer that is
+  the offline twin of the egui preview: `render_frame(comp, t)` produces a
+  native-resolution 8-bit sRGB RGBA `Frame` by inverse-transform sampling each
+  visible layer's solid quad (position, uniform scale, rotation about center,
+  opacity — the same transform model the preview uses) and compositing
+  **source-over in linear light** through `prism-core`'s color boundary
+  (`srgb_to_linear`/`linear_to_srgb`), so exported frames match the preview. Ships
+  with `frame_count` / `frame_time` / `frame_path` sequence math (frame-inclusive
+  duration, zero-padded names) and `export_sequence` to drive it — all
+  unit-tested (rasterization, source-over blend, opacity/position/scale/rotation
+  coverage, sequence counts, and a round-trip that writes real PNGs).
 - **Graph editor** — an After-Effects-style value-curve view in the bottom panel,
   toggled against the lane timeline via a Timeline / Graph switch. Plots each
   animated property of the selected layer as a curve of value over time on a

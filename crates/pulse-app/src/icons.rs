@@ -64,6 +64,8 @@ pub const ADD_KEY: &str = ph::PLUS;
 /// Composition / film badge in the title.
 #[allow(dead_code)]
 pub const COMP: &str = ph::FILM_STRIP;
+/// Export / render to disk.
+pub const EXPORT: &str = ph::EXPORT;
 
 // --- Keyframe interpolation -------------------------------------------------
 
