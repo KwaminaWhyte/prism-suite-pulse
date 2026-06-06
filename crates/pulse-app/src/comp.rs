@@ -89,6 +89,17 @@ impl Ease {
         in_y: 1.0,
     };
 
+    /// A "custom" linear-looking ease (the straight diagonal). Used as the seed
+    /// when the graph editor converts a Linear/Hold segment into an editable
+    /// eased one: the curve starts as `y = x` so converting is value-neutral,
+    /// then the handles can be dragged away from the diagonal.
+    pub const LINEAR: Ease = Ease {
+        out_x: 1.0 / 3.0,
+        out_y: 1.0 / 3.0,
+        in_x: 2.0 / 3.0,
+        in_y: 2.0 / 3.0,
+    };
+
     /// Evaluate the eased `y` for an elapsed-time fraction `x ∈ [0,1]`.
     ///
     /// Solves `bezier_x(s) = x` for the curve parameter `s` (Newton's method
@@ -107,6 +118,35 @@ impl Ease {
         let s = solve_bezier_x(x, x1, x2);
         cubic_bezier(s, self.out_y, self.in_y)
     }
+
+    /// Replace the *outgoing* handle (the control leaving the earlier key),
+    /// keeping `x` inside `[0,1]` (CSS rule — the curve must stay a function of
+    /// `x`). `y` is free to over/undershoot for anticipation. Used by the graph
+    /// editor when a handle is dragged.
+    #[must_use]
+    pub fn with_out(mut self, x: f32, y: f32) -> Self {
+        self.out_x = x.clamp(0.0, 1.0);
+        self.out_y = y;
+        self
+    }
+
+    /// Replace the *incoming* handle (the control arriving at the later key),
+    /// keeping `x` inside `[0,1]`. See [`Ease::with_out`].
+    #[must_use]
+    pub fn with_in(mut self, x: f32, y: f32) -> Self {
+        self.in_x = x.clamp(0.0, 1.0);
+        self.in_y = y;
+        self
+    }
+}
+
+/// Which Bézier handle of an eased segment a drag targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handle {
+    /// The control leaving the earlier (outgoing) key.
+    Out,
+    /// The control arriving at the later (incoming) key.
+    In,
 }
 
 /// A cubic Bézier with endpoints fixed at 0 and 1 and interior controls
@@ -258,6 +298,61 @@ impl Track {
         } else {
             false
         }
+    }
+
+    /// The min/max sampled value across the track's keyframes, used by the graph
+    /// editor to frame the value axis. Returns `None` for an empty track. Because
+    /// eased segments can over/undershoot, this samples the curve densely rather
+    /// than just taking the keyframe extremes.
+    pub fn value_bounds(&self) -> Option<(f32, f32)> {
+        let first = self.keys.first()?;
+        let last = self.keys.last()?;
+        let mut lo = first.value;
+        let mut hi = first.value;
+        let mut consider = |v: f32| {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        };
+        for k in &self.keys {
+            consider(k.value);
+        }
+        // Sample interior of each segment to catch ease overshoot.
+        let span = last.t - first.t;
+        if span > f32::EPSILON {
+            let steps = 64;
+            for i in 1..steps {
+                let t = first.t + span * (i as f32 / steps as f32);
+                consider(self.sample(t, first.value));
+            }
+        }
+        Some((lo, hi))
+    }
+
+    /// Move the keyframe at index `i` to a new time and value, re-sorting if the
+    /// move crosses a neighbour. Returns the index the key ended up at (so a
+    /// drag can keep tracking it). Out-of-range `i` is a no-op returning `i`.
+    pub fn move_key(&mut self, i: usize, new_t: f32, new_value: f32) -> usize {
+        if i >= self.keys.len() {
+            return i;
+        }
+        self.keys[i].t = new_t;
+        self.keys[i].value = new_value;
+        // Bubble the key into sorted position, carrying its identity.
+        let mut j = i;
+        while j > 0 && self.keys[j - 1].t > self.keys[j].t {
+            self.keys.swap(j - 1, j);
+            j -= 1;
+        }
+        while j + 1 < self.keys.len() && self.keys[j + 1].t < self.keys[j].t {
+            self.keys.swap(j + 1, j);
+            j += 1;
+        }
+        j
+    }
+
+    /// Mutably borrow the keyframe at index `i`, if in range.
+    pub fn key_mut(&mut self, i: usize) -> Option<&mut Keyframe> {
+        self.keys.get_mut(i)
     }
 }
 
@@ -578,6 +673,92 @@ mod tests {
         t.set_interp(2.0, Interp::Ease(Ease::EASY));
         t.set_key(2.0, 60.0);
         assert_eq!(t.interp_at(2.0), Some(Interp::Ease(Ease::EASY)));
+    }
+
+    // --- Graph-editor support ----------------------------------------------
+
+    #[test]
+    fn ease_linear_const_is_identity() {
+        // Ease::LINEAR is the straight diagonal: converting a linear segment to
+        // this eased curve must be value-neutral.
+        for i in 0..=10 {
+            let x = i as f32 / 10.0;
+            assert!((Ease::LINEAR.eval(x) - x).abs() < 1e-4, "x={x}");
+        }
+    }
+
+    #[test]
+    fn with_handles_clamp_x_keep_y_free() {
+        let e = Ease::EASY.with_out(1.7, -0.4).with_in(-0.3, 1.9);
+        assert_eq!(e.out_x, 1.0); // x clamped into [0,1]
+        assert_eq!(e.in_x, 0.0);
+        assert_eq!(e.out_y, -0.4); // y free (anticipation/overshoot)
+        assert_eq!(e.in_y, 1.9);
+    }
+
+    #[test]
+    fn value_bounds_none_when_empty() {
+        assert_eq!(Track::default().value_bounds(), None);
+    }
+
+    #[test]
+    fn value_bounds_spans_keyframe_values() {
+        let mut t = Track::default();
+        t.set_key(0.0, -5.0);
+        t.set_key(1.0, 10.0);
+        t.set_key(2.0, 3.0);
+        let (lo, hi) = t.value_bounds().unwrap();
+        assert!(lo <= -5.0 + 1e-4);
+        assert!(hi >= 10.0 - 1e-4);
+    }
+
+    #[test]
+    fn value_bounds_captures_ease_overshoot() {
+        // An overshooting ease (out_y/in_y beyond [0,1]) pushes the sampled value
+        // past the keyframe endpoints; bounds must include the overshoot.
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0);
+        t.set_key(1.0, 100.0);
+        // Big overshoot on the incoming handle.
+        t.set_interp(0.0, Interp::Ease(Ease::EASY.with_in(0.67, 1.6)));
+        let (_lo, hi) = t.value_bounds().unwrap();
+        assert!(hi > 100.0, "expected overshoot above 100, got {hi}");
+    }
+
+    #[test]
+    fn move_key_reorders_when_crossing_neighbour() {
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0); // idx 0
+        t.set_key(1.0, 10.0); // idx 1
+        t.set_key(2.0, 20.0); // idx 2
+                              // Drag the middle key past the last one in time.
+        let landed = t.move_key(1, 3.0, 99.0);
+        assert_eq!(landed, 2);
+        // Times stay sorted ascending.
+        assert!(t.keys.windows(2).all(|w| w[0].t <= w[1].t));
+        // The moved key kept its (new) value at its new slot.
+        assert_eq!(t.keys[2].value, 99.0);
+        assert_eq!(t.keys[2].t, 3.0);
+    }
+
+    #[test]
+    fn move_key_without_crossing_keeps_index() {
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0);
+        t.set_key(2.0, 10.0);
+        let landed = t.move_key(0, 0.5, 5.0);
+        assert_eq!(landed, 0);
+        assert_eq!(t.keys[0].t, 0.5);
+        assert_eq!(t.keys[0].value, 5.0);
+    }
+
+    #[test]
+    fn move_key_out_of_range_is_noop() {
+        let mut t = Track::default();
+        t.set_key(0.0, 0.0);
+        assert_eq!(t.move_key(9, 5.0, 5.0), 9);
+        assert_eq!(t.keys.len(), 1);
+        assert_eq!(t.keys[0].t, 0.0);
     }
 
     #[test]

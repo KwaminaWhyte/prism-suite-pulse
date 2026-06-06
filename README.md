@@ -41,15 +41,22 @@ update live.
   (Linear / Hold / Easy Ease / Ease In / Ease Out) sets that key's outgoing
   easing. Timeline markers reflect the mode (diamond = linear, square = hold,
   circle = ease).
+- **Graph editor** (bottom panel, toggled against the timeline): an
+  After-Effects-style **value-curve** view of the selected layer. Plots each
+  animated property as a value-over-time curve on a shared, auto-framed value
+  axis, with **draggable keyframes** (retime + revalue, with live re-sorting) and
+  **draggable Bézier ease handles** (drag a handle to shape a segment's easing;
+  dragging on a Linear/Hold segment promotes it to an editable ease). Per-property
+  show/hide chips choose which curves are plotted.
 - **Layers** (left panel): add (random vivid color), select, delete, reorder
   (up/down), and per-layer visibility toggle.
 - **Menus**: File (New, Save `.pulse` → JSON via `serde` + `rfd` save dialog,
   Export stub), Layer (add / delete).
 
-**Out of scope for v0** (noted): undo/redo, a full graph editor with draggable
-per-key Bézier handles (easing is preset-driven for now), per-layer source media
-(layers are solids), masks, effects, real frame rendering/export, and
-multi-select.
+**Out of scope for v0** (noted): undo/redo, per-layer source media (layers are
+solids), masks, effects, real frame rendering/export, and multi-select. The graph
+editor covers draggable keyframes and per-key Bézier ease handles; auto-Bézier and
+separate value/speed-graph modes are still to come.
 
 ## Shared foundation
 
@@ -89,6 +96,7 @@ pulse/
         ├── comp.rs             # Keyframe/Track/PulseLayer/Comp model + sampling
         ├── preview.rs          # composition + layer painting via egui Painter
         ├── timeline.rs         # ruler, lanes, keyframe diamonds, playhead, scrub
+        ├── graph.rs            # value-curve graph editor: drag keys + ease handles
         ├── theme.rs            # Prism dark theme
         └── icons.rs            # egui-phosphor install + action glyphs
 ```

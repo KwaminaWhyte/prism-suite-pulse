@@ -73,3 +73,10 @@ pub const INTERP_LINEAR: &str = ph::LINE_SEGMENT;
 pub const INTERP_HOLD: &str = ph::STAIRS;
 /// Bézier ease (smooth in/out).
 pub const INTERP_EASE: &str = ph::CHART_LINE;
+
+// --- Editor mode toggle -----------------------------------------------------
+
+/// Timeline (lane) editor mode.
+pub const TIMELINE: &str = ph::ROWS;
+/// Graph (value-curve) editor mode.
+pub const GRAPH: &str = ph::CHART_LINE_UP;

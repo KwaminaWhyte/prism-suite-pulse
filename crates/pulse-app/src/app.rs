@@ -3,8 +3,18 @@
 //! timeline.
 
 use crate::comp::{Comp, Ease, Interp, Prop, PulseLayer};
-use crate::{icons, preview, theme, timeline};
+use crate::graph::GraphState;
+use crate::{graph, icons, preview, theme, timeline};
 use egui::{Color32, Sense};
+
+/// Which editor occupies the bottom panel: the lane timeline or the value-curve
+/// graph editor (After Effects' two timeline modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum EditorMode {
+    #[default]
+    Timeline,
+    Graph,
+}
 
 pub struct PulseApp {
     comp: Comp,
@@ -14,6 +24,10 @@ pub struct PulseApp {
     selected: Option<usize>,
     /// Tiny LCG state for picking fresh layer colors.
     rng: u32,
+    /// Bottom-panel editor mode (timeline vs graph).
+    mode: EditorMode,
+    /// Graph-editor state (shown properties + active drag).
+    graph: GraphState,
 }
 
 impl PulseApp {
@@ -26,6 +40,8 @@ impl PulseApp {
             playing: false,
             selected: Some(0),
             rng: 0x1234_5678,
+            mode: EditorMode::default(),
+            graph: GraphState::default(),
         }
     }
 
@@ -36,6 +52,7 @@ impl PulseApp {
         self.time = 0.0;
         self.playing = false;
         self.selected = Some(0);
+        self.graph = GraphState::default();
     }
 
     /// A pseudo-random vivid color for a new layer.
@@ -387,10 +404,10 @@ impl PulseApp {
     fn timeline_panel(&mut self, root: &mut egui::Ui) {
         egui::TopBottomPanel::bottom("timeline")
             .resizable(true)
-            .default_height(220.0)
+            .default_height(240.0)
             .show_inside(root, |ui| {
                 ui.add_space(4.0);
-                // Transport row.
+                // Transport + editor-mode row.
                 ui.horizontal(|ui| {
                     if ui
                         .button(icons::TO_START)
@@ -422,22 +439,82 @@ impl PulseApp {
                     ui.separator();
                     let frame = (self.time * self.comp.fps).round() as i32;
                     ui.monospace(format!("{:>6.2}s   frame {:>4}", self.time, frame));
+
+                    // Right-aligned editor-mode toggle (timeline vs graph).
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak("scrub: click/drag the ruler");
+                        if ui
+                            .selectable_label(
+                                self.mode == EditorMode::Graph,
+                                format!("{}  Graph", icons::GRAPH),
+                            )
+                            .on_hover_text("Graph editor — drag keyframes & ease handles")
+                            .clicked()
+                        {
+                            self.mode = EditorMode::Graph;
+                        }
+                        if ui
+                            .selectable_label(
+                                self.mode == EditorMode::Timeline,
+                                format!("{}  Timeline", icons::TIMELINE),
+                            )
+                            .on_hover_text("Timeline — keyframe lanes")
+                            .clicked()
+                        {
+                            self.mode = EditorMode::Timeline;
+                        }
                     });
                 });
                 ui.add_space(2.0);
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let resp = timeline::show(ui, &self.comp, self.time, self.selected);
-                    if let Some(t) = resp.scrub_time {
-                        self.time = t.clamp(0.0, self.comp.duration);
+                match self.mode {
+                    EditorMode::Timeline => {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let resp = timeline::show(ui, &self.comp, self.time, self.selected);
+                            if let Some(t) = resp.scrub_time {
+                                self.time = t.clamp(0.0, self.comp.duration);
+                            }
+                            if let Some(i) = resp.clicked_layer {
+                                self.selected = Some(i);
+                            }
+                        });
                     }
-                    if let Some(i) = resp.clicked_layer {
-                        self.selected = Some(i);
+                    EditorMode::Graph => {
+                        self.graph_property_chips(ui);
+                        let resp = graph::show(
+                            ui,
+                            &mut self.comp,
+                            self.selected,
+                            self.time,
+                            &mut self.graph,
+                        );
+                        if let Some(t) = resp.scrub_time {
+                            self.time = t.clamp(0.0, self.comp.duration);
+                        }
                     }
-                });
+                }
             });
+    }
+
+    /// A row of toggle chips choosing which properties the graph editor plots.
+    /// With none selected the graph shows every keyframed property.
+    fn graph_property_chips(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.weak("Show:");
+            for prop in Prop::ALL {
+                let on = self.graph.is_shown(prop);
+                if ui
+                    .selectable_label(on, prop.label())
+                    .on_hover_text("Toggle in graph (none selected = all keyed)")
+                    .clicked()
+                {
+                    self.graph.toggle(prop);
+                }
+            }
+            if !self.graph.shown.is_empty() && ui.small_button("all").clicked() {
+                self.graph.shown.clear();
+            }
+        });
+        ui.add_space(2.0);
     }
 
     fn preview_panel(&mut self, root: &mut egui::Ui) {

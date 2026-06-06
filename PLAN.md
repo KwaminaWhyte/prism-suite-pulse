@@ -145,7 +145,7 @@ Phase 0 is **done** (see §1); the rest is the road to parity.
 ### Phase 1 — Real property system + GPU compositor  *(the foundation rebuild)*
 - [ ] **Typed `Property<T>`** (L): scalar/2D/3D/color/path; generalize `Track`; **anchor point** + **separable XYZ position**
 - [~] **Keyframe interpolation** (M): linear / **hold** / **Bézier ease** + **Easy Ease**/In/Out **done** (per-key `Interp` on the segment, Newton-solved CSS-`cubic-bezier`, unit-tested; UI picker + timeline markers); auto-Bézier and draggable per-key in/out handles pending (land with the Graph Editor)
-- [ ] **Graph Editor** (M): edit value & speed curves with Bézier handles; roving keyframes
+- [~] **Graph Editor** (M): value-curve editor **done** (per-layer value-over-time curves on a shared auto-framed axis, draggable keyframes with live re-sort, draggable per-key Bézier in/out ease handles incl. promoting Linear/Hold segments, per-property show/hide, scrub); still TODO: a dedicated **speed graph**, **roving keyframes**, and **auto-Bézier**
 - [ ] **GPU compositor** (L, shared `prism-core`): move preview onto the suite's wgpu render graph; **18 blend modes**; float (16/32-bit) buffers; linear-light
 - [ ] **Layer types v1** (M): Solid, **Adjustment**, **Null**; precomp stub
 - [ ] Tests: interpolation parity, blend-mode pixels, time-sampling determinism
@@ -223,7 +223,7 @@ authored once and stacks non-destructively per layer.
 |---|---|---|---|
 | Comp / timeline / transport | comps, timeline, play/scrub | **Done** basic; precomp/markers/work-area **Planned** | 0,2,4 |
 | Properties / transform | anchor + 2D/3D position/scale/rot/opacity | **Partial** (5 linear tracks) → typed `Property<T>` **Planned** | 1 |
-| Keyframe interpolation / graph editor | linear/hold/Bézier/auto, graph editor | **Partial** (linear only) → **Planned** | 1 |
+| Keyframe interpolation / graph editor | linear/hold/Bézier/auto, graph editor | **Partial** (linear/hold/Bézier ease + value-curve graph editor w/ draggable keys & handles; auto-Bézier/speed-graph/roving **Planned**) | 1 |
 | Compositor / blend modes | GPU, 18+ modes, 32-bpc, linear | **Planned** (reuse `prism-core`) | 1 |
 | Layer types | solid/text/shape/footage/adj/null/cam/light/precomp | **Partial** (solid) → **Planned** | 1,2,5 |
 | Masks / roto | Bézier masks, modes, feather, roto brush | **Planned** | 2,7 |
@@ -281,7 +281,7 @@ breadth. Then footage/masks/precomps (Ph2), then effects + expressions (Ph3–4)
 
 1. [~] **Phase 1 foundation** — **Bézier easing** + hold landed (self-contained Newton-solved cubic, no `kurbo` dep yet); still TODO: generalize `Track`→ typed `Property<T>`; auto-Bézier; anchor-point + separable position.
 2. [ ] **GPU compositor** on the shared `prism-core` render graph; 18 blend modes; float buffers; linear-light. Retire the CPU solid-rect preview.
-3. [ ] **Graph Editor** for value/speed curves; **Easy Ease**.
+3. [~] **Graph Editor** — value-curve editor with draggable keys + per-key Bézier ease handles landed; **speed graph**, **roving keys**, and **auto-Bézier** still TODO.
 4. [ ] **Layer types**: Adjustment + Null, then **footage** (`prism-media`) and **precomps** (Ph2).
 5. [ ] Coordinate **`prism-fx`** (effects host), **`prism-media`** (FFmpeg, shared w/ Reel), and **`prism-vector`** (masks/shape layers, shared w/ Contour) promotions with the suite before building on them.
 
