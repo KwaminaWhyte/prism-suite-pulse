@@ -462,8 +462,8 @@ const T: &[Seg] = &[
 ];
 #[rustfmt::skip]
 const U: &[Seg] = &[
-    ((L0, TOP), (L0, 0.7)), ((L0, 0.7), (MX, BOT)), ((MX, BOT), (R0, 0.7)),
-    ((R0, 0.7), (R0, TOP)),
+    ((L0, TOP), (L0, 0.72)), ((L0, 0.72), (0.16, BOT)), ((0.16, BOT), (0.34, BOT)),
+    ((0.34, BOT), (R0, 0.72)), ((R0, 0.72), (R0, TOP)),
 ];
 #[rustfmt::skip]
 const V: &[Seg] = &[

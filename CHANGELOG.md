@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Built-in font drew "U" as "V"** — the stroke-font `U` glyph converged both
+  sides to a single centre-bottom point, giving a pointed bottom that read as a
+  `V` (so "PULSE" rendered "PVLSE"). The glyph now has a **flat bottom** (the
+  verticals drop to ~0.72 then meet a short bottom segment between 0.16–0.34),
+  clearly distinct from `V`.
+
 - **Playback no longer locks up the UI** — pressing **Play** (or scrubbing) made
   the whole app laggy: the preview composited the comp on the **UI thread** every
   repaint (a ~1 MP CPU render per frame), and playback's per-frame repaint ran it
