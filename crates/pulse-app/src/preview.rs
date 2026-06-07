@@ -20,8 +20,11 @@
 use crate::comp::{Comp, LayerKind, MaskMode, PulseLayer};
 use crate::gizmo::{GizmoGeom, Handle};
 use crate::onion::{Ghost, OnionSkin};
+use crate::render::Frame;
 use crate::theme;
 use egui::{Color32, ColorImage, Painter, Pos2, Rect, Stroke, TextureHandle, Vec2};
+use std::sync::mpsc::{Receiver, Sender};
+use std::thread::JoinHandle;
 
 use crate::comp::Affine2;
 
@@ -30,25 +33,73 @@ use crate::comp::Affine2;
 /// avoids re-rendering an unchanged frame.
 const PREVIEW_CAP: u32 = 1280;
 
-/// Holds the cached rendered preview texture plus the fingerprint it was rendered
-/// for and a **persistent** footage cache.
+/// Drives the interactive preview by rendering the comp **off the UI thread**.
 ///
-/// [`PreviewRenderer::texture`] re-renders the comp (through the real offline
-/// compositor) only when the fingerprint changes — the playhead time, the comp /
-/// layer state, or the target preview size — and otherwise returns the cached
-/// [`TextureHandle`]. The persistent [`FrameCache`](crate::comp::FrameCache)
-/// means a footage source decodes once and is reused across preview renders
-/// (the offline-export path keeps its own per-export cache, unchanged).
+/// The expensive part — compositing the comp through the real offline renderer at
+/// a capped resolution — runs on a background [`worker_loop`] thread that owns a
+/// persistent [`FrameCache`](crate::comp::FrameCache). The UI thread only ever
+/// *uploads* the latest finished frame and *requests* a new render when the shown
+/// frame is stale; it never composites, so playback and scrubbing never block
+/// input. When renders can't keep up with playback the worker **coalesces** its
+/// queue to the most recent request (drop-frame), so the preview shows the newest
+/// frame it can produce instead of building an unbounded backlog.
 #[derive(Default)]
 pub struct PreviewRenderer {
-    /// Persistent footage decode cache, reused across preview renders so a still
-    /// / sequence frame is decoded at most once while it stays referenced.
-    cache: crate::comp::FrameCache,
-    /// The uploaded preview texture (comp rendered to capped-res sRGB pixels).
+    /// The uploaded preview texture (the last finished comp render — capped-res,
+    /// sRGB pixels).
     tex: Option<TextureHandle>,
-    /// The fingerprint the cached [`tex`](Self::tex) was rendered for; a mismatch
-    /// triggers a re-render.
-    key: Option<PreviewKey>,
+    /// The [`PreviewKey`] of the frame currently uploaded to [`tex`](Self::tex).
+    shown_key: Option<PreviewKey>,
+    /// The most recent key handed to the worker, so the same frame isn't queued
+    /// twice while it's still rendering (avoids flooding the request channel).
+    last_sent: Option<PreviewKey>,
+    /// Request channel to the background render worker (spawned on first use).
+    req_tx: Option<Sender<RenderRequest>>,
+    /// Result channel from the worker (finished, key-tagged frames).
+    res_rx: Option<Receiver<RenderResult>>,
+    /// The worker thread handle, kept alive for the app's lifetime. Dropping the
+    /// renderer closes [`req_tx`](Self::req_tx), which ends the worker loop.
+    #[allow(dead_code)]
+    worker: Option<JoinHandle<()>>,
+}
+
+/// A render job handed to the background worker: the project comps to render,
+/// which comp + time to render, the preview resolution cap, and the
+/// [`PreviewKey`] the result is tagged with (so the UI knows which frame returned).
+struct RenderRequest {
+    comps: Vec<Comp>,
+    id: u64,
+    t: f32,
+    cap: u32,
+    key: PreviewKey,
+}
+
+/// A finished render from the worker: the tagged [`PreviewKey`] plus the rendered
+/// (capped-resolution sRGB) [`Frame`].
+struct RenderResult {
+    key: PreviewKey,
+    frame: Frame,
+}
+
+/// The background preview-render loop. Owns a persistent [`FrameCache`] (so a
+/// footage source decodes once and is reused across renders) and composites
+/// requests off the UI thread. Before each render it **coalesces** any queued
+/// requests down to the most recent (dropping stale frames), so a slow render
+/// never builds an unbounded backlog. Exits when the request channel closes (the
+/// owning [`PreviewRenderer`] is dropped).
+fn worker_loop(req_rx: Receiver<RenderRequest>, res_tx: Sender<RenderResult>) {
+    let mut cache = crate::comp::FrameCache::new();
+    while let Ok(mut req) = req_rx.recv() {
+        // Coalesce: skip ahead to the newest pending request (drop stale frames).
+        while let Ok(newer) = req_rx.try_recv() {
+            req = newer;
+        }
+        let frame =
+            crate::render::render_preview_frame(&req.comps, req.id, req.t, req.cap, &mut cache);
+        if res_tx.send(RenderResult { key: req.key, frame }).is_err() {
+            break; // UI gone — stop.
+        }
+    }
 }
 
 /// A cache key fingerprinting everything the rendered preview frame depends on:
@@ -88,54 +139,102 @@ impl PreviewKey {
 }
 
 impl PreviewRenderer {
-    /// Render comp `id` of `comps` at time `t` to a capped-resolution texture and
-    /// return its [`TextureHandle`], re-using the cached texture when nothing the
-    /// frame depends on has changed (the fingerprint is stable).
+    /// Spawn the background render worker on first use (idempotent). The worker
+    /// owns the persistent [`FrameCache`](crate::comp::FrameCache) and renders
+    /// off the UI thread.
+    fn ensure_worker(&mut self) {
+        if self.req_tx.is_some() {
+            return;
+        }
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<RenderRequest>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<RenderResult>();
+        let worker = std::thread::Builder::new()
+            .name("pulse-preview".into())
+            .spawn(move || worker_loop(req_rx, res_tx))
+            .ok();
+        self.req_tx = Some(req_tx);
+        self.res_rx = Some(res_rx);
+        self.worker = worker;
+    }
+
+    /// Return the latest rendered preview texture for comp `id` of `comps` at time
+    /// `t`, rendering **off the UI thread**.
     ///
-    /// The target render size is the comp's aspect capped to [`PREVIEW_CAP`] px on
-    /// the long edge (so a large comp scrubs cheaply); a viewport resize only
-    /// changes how the texture is *drawn* (the fitted rect), not what is rendered,
-    /// so resizing the panel does not force a re-render. The footage decode
-    /// [`cache`](Self::cache) persists across calls.
+    /// Finished frames from the worker are picked up and uploaded here; a fresh
+    /// render is requested (at most once per distinct frame) whenever the displayed
+    /// frame is stale. The render size is the comp's aspect capped to
+    /// [`PREVIEW_CAP`] px on the long edge, so a viewport resize only changes how
+    /// the texture is *drawn*, not what is rendered. Because the UI thread never
+    /// composites, playback and interaction stay responsive even when a frame is
+    /// expensive — the preview simply drops frames it can't keep up with (the
+    /// worker coalesces a backlog to its most recent request).
+    ///
+    /// `comps` is taken by value: it is moved into the render request when one is
+    /// issued (no extra clone), and dropped otherwise.
     pub fn texture(
         &mut self,
         ctx: &egui::Context,
-        comps: &[Comp],
+        comps: Vec<Comp>,
         id: u64,
         t: f32,
     ) -> Option<TextureHandle> {
+        self.ensure_worker();
+
+        // 1. Drain finished renders and upload the newest (older ones are stale).
+        let mut newest: Option<RenderResult> = None;
+        if let Some(rx) = &self.res_rx {
+            while let Ok(r) = rx.try_recv() {
+                newest = Some(r);
+            }
+        }
+        if let Some(r) = newest {
+            let image = ColorImage::from_rgba_unmultiplied(
+                [r.frame.width as usize, r.frame.height as usize],
+                &r.frame.pixels,
+            );
+            match &mut self.tex {
+                // Re-use the existing GPU texture slot, just swap its pixels.
+                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.tex =
+                        Some(ctx.load_texture("pulse_preview", image, egui::TextureOptions::LINEAR));
+                }
+            }
+            self.shown_key = Some(r.key);
+        }
+
+        // 2. Request a render when the displayed frame is stale and this exact
+        //    frame isn't already queued (avoid flooding the worker's channel).
         let dims = comps
             .iter()
             .find(|c| c.id == id)
             .map(|c| crate::render::preview_dims(c.width, c.height, PREVIEW_CAP))
             .unwrap_or((1, 1));
-        let key = PreviewKey::new(comps, id, t, dims);
-        if self.key == Some(key) {
-            if let Some(tex) = &self.tex {
-                return Some(tex.clone());
+        let desired = PreviewKey::new(&comps, id, t, dims);
+        let up_to_date = self.shown_key == Some(desired);
+        let already_queued = self.last_sent == Some(desired);
+        if !up_to_date && !already_queued {
+            if let Some(tx) = &self.req_tx {
+                let req = RenderRequest {
+                    comps,
+                    id,
+                    t,
+                    cap: PREVIEW_CAP,
+                    key: desired,
+                };
+                if tx.send(req).is_ok() {
+                    self.last_sent = Some(desired);
+                }
             }
         }
-        // Render through the real offline compositor (capped res), reusing the
-        // persistent footage cache so an unchanged source isn't re-decoded.
-        let frame = crate::render::render_preview_frame(comps, id, t, PREVIEW_CAP, &mut self.cache);
-        let image = ColorImage::from_rgba_unmultiplied(
-            [frame.width as usize, frame.height as usize],
-            &frame.pixels,
-        );
-        let tex = match &mut self.tex {
-            // Re-use the existing GPU texture slot, just swap its pixels.
-            Some(tex) => {
-                tex.set(image, egui::TextureOptions::LINEAR);
-                tex.clone()
-            }
-            None => {
-                let tex = ctx.load_texture("pulse_preview", image, egui::TextureOptions::LINEAR);
-                self.tex = Some(tex.clone());
-                tex
-            }
-        };
-        self.key = Some(key);
-        Some(tex)
+
+        // 3. Keep repainting until the shown frame matches the request, so the
+        //    finished render is picked up promptly (playback already repaints).
+        if !up_to_date {
+            ctx.request_repaint();
+        }
+
+        self.tex.clone()
     }
 }
 
@@ -592,6 +691,40 @@ mod tests {
         // Portrait long edge is the height.
         let (w, h) = crate::render::preview_dims(1080, 1920, 1280);
         assert_eq!((w, h), (720, 1280));
+    }
+
+    // --- off-thread render worker -----------------------------------------
+
+    #[test]
+    fn worker_renders_and_returns_tagged_frame() {
+        // The background worker composites a request off the UI thread and sends
+        // back a frame tagged with the request's key — the property the preview
+        // relies on to match a finished render to the frame it asked for.
+        let comps = vec![comp_of(
+            1,
+            64,
+            36,
+            vec![PulseLayer::new("Solid", [1.0, 0.0, 0.0, 1.0])],
+        )];
+        let key = PreviewKey::new(&comps, 1, 0.0, (64, 36));
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        let (res_tx, res_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || worker_loop(req_rx, res_tx));
+        req_tx
+            .send(RenderRequest {
+                comps,
+                id: 1,
+                t: 0.0,
+                cap: 1280,
+                key,
+            })
+            .unwrap();
+        let result = res_rx.recv().expect("worker returns a rendered frame");
+        assert_eq!(result.key, key, "the worker tags the frame with the request key");
+        assert!(result.frame.width >= 1 && result.frame.height >= 1);
+        // Closing the request channel ends the worker loop cleanly.
+        drop(req_tx);
+        handle.join().expect("worker thread exits when its channel closes");
     }
 
     // --- persistent FrameCache reuse (no re-decode for the same frame) -----

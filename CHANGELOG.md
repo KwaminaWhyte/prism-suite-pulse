@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Playback no longer locks up the UI** — pressing **Play** (or scrubbing) made
+  the whole app laggy: the preview composited the comp on the **UI thread** every
+  repaint (a ~1 MP CPU render per frame), and playback's per-frame repaint ran it
+  continuously, so input couldn't be serviced and the lag compounded the longer
+  playback ran. The preview render now runs on a **background worker thread**
+  (`preview::worker_loop`) that owns the persistent `FrameCache`; the UI thread
+  only uploads the latest finished frame and requests a render when the shown
+  frame is stale. When renders can't keep up with real-time playback the worker
+  **coalesces** its queue to the most recent request (drop-frame), so the preview
+  shows the newest frame it can produce while the UI stays fully responsive —
+  standard non-realtime-preview behaviour. `PreviewRenderer::texture` now takes
+  the comps by value (moved into the render request — no extra clone).
+
 ### Added
 
 - **Preview fidelity — render preview** (After Effects' *Composition viewer*) —
@@ -25,13 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     edge**, preserving the comp's aspect (small comps render native, never
     upscaled). `render_frame_in_project` is promoted to a normal `pub` entry (no
     longer dead-code-gated) as the shared project-aware renderer.
-  - **Caching** (`preview.rs`, new `PreviewRenderer` + `PreviewKey`) — the
-    rendered texture is cached and only re-rendered when a **fingerprint** of
-    `(playhead time, comp/layer state, target size)` changes: time is quantized to
-    1e-4 s so float noise doesn't churn the cache, and the comp state is hashed
-    from its serialized JSON so **any** layer/keyframe/property edit invalidates
-    it while a static frame renders once. During playback the playhead moves each
-    frame, so the preview advances; parked on a frame, it's a cache hit.
+  - **Caching + off-thread render** (`preview.rs`, `PreviewRenderer` +
+    `PreviewKey`) — the comp is composited on a **background worker thread**, never
+    the UI thread, so playback and scrubbing never block input (see *Fixed* below).
+    The displayed texture is gated by a **fingerprint** of `(playhead time,
+    comp/layer state, target size)`: time is quantized to 1e-4 s so float noise
+    doesn't churn it, and the comp state is hashed from its serialized JSON so
+    **any** layer/keyframe/property edit invalidates it while a static frame renders
+    once. During playback the playhead moves each frame, so the preview advances;
+    parked on a frame, it's a cache hit.
   - **Persistent footage cache** — `PreviewRenderer` holds a persistent
     `FrameCache` threaded into every preview render, so a still / sequence frame is
     decoded **once** and reused across renders (scrubbing doesn't re-decode). The

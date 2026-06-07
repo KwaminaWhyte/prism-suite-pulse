@@ -141,7 +141,9 @@ impl PulseApp {
             // composited pixels.
             let comps = self.project_comps();
             let id = self.comp.id;
-            let tex = self.preview.texture(&ctx, &comps, id, self.time);
+            // Hand the comps to the off-thread preview renderer (moved in; it
+            // composites on a worker thread so playback never blocks the UI).
+            let tex = self.preview.texture(&ctx, comps, id, self.time);
 
             let (center, scale) = if let Some(tex) = &tex {
                 preview::paint_image(&painter, avail, &self.comp, tex)
