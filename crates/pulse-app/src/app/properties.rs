@@ -4,10 +4,10 @@
 
 use super::PulseApp;
 use crate::comp::{
-    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, Ease, Effect, ExprCtx,
-    Fill, FootageSource, FractalType, GenerateEffect, Interp, LayerBlend, LayerKind, Mask, MaskMode,
-    MatteMode, Overflow, Prop, RampShape, ShapeItem, ShapePrimitive, SpatialEffect, Stroke,
-    TextAlign, Track,
+    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, DistortEffect, Ease,
+    Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, LayerBlend, LayerKind,
+    Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RampShape, ShapeItem, ShapePrimitive,
+    SpatialEffect, Stroke, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -191,6 +191,15 @@ impl PulseApp {
                         if self.comp.layers[idx].kind.draws_own_pixels() {
                             section(ui, ("sec_spatial", idx), "Spatial effects", |ui| {
                                 self.spatial_effects_section(ui, idx);
+                            });
+                        }
+
+                        // Distort effects (Corner Pin / Transform / Mirror / Polar) warp
+                        // the layer's whole rendered buffer. Only meaningful for layers
+                        // that draw their own pixels.
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            section(ui, ("sec_distort", idx), "Distort effects", |ui| {
+                                self.distort_effects_section(ui, idx);
                             });
                         }
 
@@ -1074,6 +1083,74 @@ impl PulseApp {
         }
     }
 
+    /// The layer's **distort effect stack** editor: an "Add" menu (Corner Pin /
+    /// Transform / Mirror / Polar Coordinates), then each effect with reorder /
+    /// remove controls and per-parameter sliders. Distort effects re-map the
+    /// layer's whole rendered buffer's coordinates, after its color-correction
+    /// stack, masks, track matte, and spatial passes.
+    fn distort_effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    for eff in DistortEffect::defaults() {
+                        if ui.button(eff.label()).clicked() {
+                            self.comp.layers[idx].distort_effects.push(eff);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].distort_effects.is_empty() {
+            ui.weak("No distort effects. Add corner-pin, transform, mirror, or polar.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].distort_effects.len();
+        for ei in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(self.comp.layers[idx].distort_effects[ei].label()).strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(ei);
+                    }
+                    if ui
+                        .add_enabled(ei > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((ei, true));
+                    }
+                    if ui
+                        .add_enabled(ei + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((ei, false));
+                    }
+                });
+            });
+            distort_effect_params(ui, idx, ei, &mut self.comp.layers[idx].distort_effects[ei]);
+        }
+
+        if let Some(ei) = to_remove {
+            self.comp.layers[idx].distort_effects.remove(ei);
+        }
+        if let Some((ei, up)) = to_move {
+            let effects = &mut self.comp.layers[idx].distort_effects;
+            let other = if up { ei.wrapping_sub(1) } else { ei + 1 };
+            if other < effects.len() {
+                effects.swap(ei, other);
+            }
+        }
+    }
+
     /// The Parent selector for layer `idx`: a combo of "None" plus every other
     /// layer that can legally be a parent (no self, no cycle). Choosing a parent
     /// makes `idx` inherit that layer's transform.
@@ -1830,6 +1907,82 @@ fn spatial_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut 
             slider(ui, "Threshold", threshold, 0.0, 1.0, "");
             slider(ui, "Radius", radius, 0.0, 100.0, " px");
             slider(ui, "Intensity", intensity, 0.0, 4.0, "");
+        }
+    }
+}
+
+/// Parameter sliders for one [`DistortEffect`], editing it in place. Positions
+/// are in **normalized buffer space** `[0, 1]` (a fraction of the buffer), so a
+/// distort reads the same at preview and export resolutions. `idx`/`ei` salt
+/// widget ids so multiple effects don't collide.
+fn distort_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut DistortEffect) {
+    let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32, suffix: &str| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi).suffix(suffix.to_owned()));
+        });
+    };
+    // A labelled X/Y pair of normalized-position sliders.
+    let point = |ui: &mut egui::Ui, label: &str, p: &mut [f32; 2]| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::DragValue::new(&mut p[0]).speed(0.005).range(-1.0..=2.0));
+            ui.add(egui::DragValue::new(&mut p[1]).speed(0.005).range(-1.0..=2.0));
+        });
+    };
+    match effect {
+        DistortEffect::CornerPin {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        } => {
+            point(ui, "Top left", top_left);
+            point(ui, "Top right", top_right);
+            point(ui, "Bottom right", bottom_right);
+            point(ui, "Bottom left", bottom_left);
+        }
+        DistortEffect::Transform {
+            anchor,
+            position,
+            scale,
+            rotation,
+            skew,
+            opacity,
+        } => {
+            point(ui, "Anchor", anchor);
+            point(ui, "Position", position);
+            slider(ui, "Scale", scale, 0.0, 4.0, "");
+            slider(ui, "Rotation", rotation, -180.0, 180.0, "°");
+            slider(ui, "Skew", skew, -80.0, 80.0, "°");
+            slider(ui, "Opacity", opacity, 0.0, 1.0, "");
+        }
+        DistortEffect::Mirror { center, angle } => {
+            point(ui, "Center", center);
+            slider(ui, "Angle", angle, -180.0, 180.0, "°");
+        }
+        DistortEffect::Polar {
+            center,
+            kind,
+            interp,
+        } => {
+            point(ui, "Center", center);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Type");
+                egui::ComboBox::from_id_salt(("polar_kind", idx, ei))
+                    .selected_text(kind.label())
+                    .show_ui(ui, |ui| {
+                        for k in PolarKind::ALL {
+                            if ui.selectable_label(*kind == k, k.label()).clicked() {
+                                *kind = k;
+                            }
+                        }
+                    });
+            });
+            slider(ui, "Interpolation", interp, 0.0, 1.0, "");
         }
     }
 }

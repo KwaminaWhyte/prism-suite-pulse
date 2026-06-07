@@ -45,6 +45,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Distort effect family — Corner Pin / Transform / Mirror / Polar Coordinates**
+  (After-Effects *Distort ▸ Corner Pin / Transform / Mirror / Polar Coordinates*;
+  PLAN Phase 3 *Distort*) — the first **distort** stack: whole-buffer
+  **coordinate-remap** passes that *warp* a layer's rendered pixels (where the
+  spatial stack convolves/blooms them and the colour stack recolours them). Built
+  to mirror the spatial-effect family exactly — a `DistortEffect` enum + an
+  `apply_distort_effects` pass + an `apply_distort` compositor bridge + a
+  Properties *Distort effects* section + the *Effects & Presets* browser's new
+  *Distort* category. Each is an inverse-warp resampler over the layer's
+  **isolated premultiplied linear-light** buffer (bilinear sampling, off-buffer
+  samples read transparent), run in `finish_layer` **after** the spatial passes
+  (AE's distort-below-blur order) so it composes with opacity / blend / masks /
+  track-mattes / spatial-effects / motion-blur like every other layer effect, in
+  both the offline render and the live render-preview. Positions are in
+  **normalized buffer space** `[0,1]²` so a distort reads the same at preview and
+  export resolutions.
+  - **Corner Pin** (`DistortEffect::CornerPin`) — pin the buffer's four corners to
+    four targets; the interior is filled by **inverse-bilinear** four-point
+    mapping (AE's Corner Pin), the staple screen-replacement / perspective-paste
+    tool. Pixels outside the target quad are transparent.
+  - **Transform** (`DistortEffect::Transform`) — an effect-level extra anchor /
+    position / uniform-scale / rotation / **skew** / opacity applied *inside* the
+    effect stack (AE's *Transform* effect), so a geometric move can sit between
+    other effects rather than only on the layer. A zero scale collapses to empty;
+    opacity fades the whole buffer.
+  - **Mirror** (`DistortEffect::Mirror`) — reflect the buffer across a line
+    (centre + angle); the near half passes through and the far half becomes its
+    reflection.
+  - **Polar Coordinates** (`DistortEffect::Polar`) — remap between rectangular and
+    polar space about a centre (**Rect→Polar** / **Polar→Rect**), the
+    tiny-planet / radial-streak transform, with an **Interpolation** blend back to
+    the unaltered buffer.
+  - Wired through the model (`PulseLayer::distort_effects`, `serde`-defaulted +
+    `has_distort_effects`), the demo comp (a subtle in-stack Transform on the
+    satellite, so the family reads on launch), the render path, the browser
+    registry, and the Properties UI (add / reorder / remove + per-effect params).
+    Pure remap math (corner-pin maps corners to targets, transform composition /
+    translation / scale-collapse / opacity, mirror reflection symmetry, polar
+    round-trip, bilinear sampling, determinism, stacking order) + render-path
+    (composites into the buffer, composes with masks, isolated-buffer routing,
+    determinism) unit-tested. **Open** (Phase 3 *Distort*): Mesh/Bezier warp,
+    Displacement map, Turbulent/Wave, Optics-comp.
+
 - **Generate effect family — Ramp / Checkerboard / 4-Color Gradient / Grid**
   (After-Effects *Generate ▸ Gradient Ramp / Checkerboard / 4-Color Gradient /
   Grid*; PLAN Phase 3 *Generate*) — four more **generate** fills joining Fractal

@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 mod blend;
+mod distort;
 mod effect;
 mod effect_browser;
 mod expr;
@@ -40,6 +41,7 @@ mod time_remap;
 mod transform;
 
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
+pub use distort::{apply_distort_effects, DistortEffect, PolarKind};
 pub use effect::{apply_effects, Effect, LayerKind};
 pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
 pub use expr::{last_error as expr_last_error, ExprCtx};
@@ -98,6 +100,16 @@ pub struct PulseLayer {
     /// files still load.
     #[serde(default)]
     pub spatial_effects: Vec<SpatialEffect>,
+    /// Non-destructive, ordered **distort effect stack** (whole-buffer
+    /// coordinate-remap passes: Corner Pin, Transform, Mirror, Polar
+    /// Coordinates). Applied to the layer's isolated rendered buffer in the same
+    /// finishing step as the spatial stack — *after* its color-correction stack,
+    /// masks, and track matte, and *after* the spatial passes — so a distort
+    /// warps the already-blurred/shadowed/glowed buffer (matching After Effects'
+    /// top-down effect order, distort below blur). `serde`-defaulted to empty so
+    /// pre-distort `.pulse` files still load.
+    #[serde(default)]
+    pub distort_effects: Vec<DistortEffect>,
     /// Optional **generate** (whole-buffer fill) effect — currently **Fractal
     /// Noise**. Unlike the colour/spatial stacks (which read the layer's pixels),
     /// a generate effect *replaces* them: it synthesises the layer's content from
@@ -198,6 +210,7 @@ impl PulseLayer {
             visible: true,
             effects: Vec::new(),
             spatial_effects: Vec::new(),
+            distort_effects: Vec::new(),
             generate: None,
             generate_evolution: Track::default(),
             parent: None,
@@ -315,6 +328,13 @@ impl PulseLayer {
     /// to run the whole-buffer passes.
     pub fn has_spatial_effects(&self) -> bool {
         !self.spatial_effects.is_empty()
+    }
+
+    /// Whether this layer has any **distort effects** (Corner Pin / Transform /
+    /// Mirror / Polar Coordinates), so the renderer must route it through an
+    /// isolated buffer to run the whole-buffer coordinate-remap passes.
+    pub fn has_distort_effects(&self) -> bool {
+        !self.distort_effects.is_empty()
     }
 
     /// The layer's generate fill with its **evolution** resolved at time `t`: if
@@ -462,6 +482,18 @@ impl Comp {
             threshold: 0.5,
             radius: 18.0,
             intensity: 0.9,
+        });
+        // A subtle effect-level **Transform** (a Distort effect) gives the
+        // satellite an extra in-stack scale-up, so the whole-buffer
+        // coordinate-remap distort family reads out of the box (it warps the
+        // already-shadowed/glowed buffer, after the spatial passes).
+        satellite.distort_effects.push(DistortEffect::Transform {
+            anchor: [0.5, 0.5],
+            position: [0.5, 0.5],
+            scale: 1.12,
+            rotation: 0.0,
+            skew: 0.0,
+            opacity: 1.0,
         });
         c.layers.push(satellite); // index 1
 

@@ -15,8 +15,10 @@ use crate::icons;
 impl PulseApp {
     /// Append the effect described by `entry` to the selected layer's matching
     /// stack (per-pixel colour effects → `effects`; whole-buffer spatial effects
-    /// → `spatial_effects`). No-op when no layer is selected. Returns whether an
-    /// effect was added (so the caller can surface a status line).
+    /// → `spatial_effects`; whole-buffer distort effects → `distort_effects`;
+    /// generate fills → the single `generate` slot). No-op when no layer is
+    /// selected. Returns whether an effect was added (so the caller can surface a
+    /// status line).
     pub(super) fn add_browser_effect(&mut self, entry: &BrowserEntry) -> bool {
         let Some(idx) = self.selected else {
             return false;
@@ -27,6 +29,7 @@ impl PulseApp {
         match entry.instantiate() {
             NewEffect::Color(e) => layer.effects.push(e),
             NewEffect::Spatial(e) => layer.spatial_effects.push(e),
+            NewEffect::Distort(e) => layer.distort_effects.push(e),
             // A generate fill replaces the layer's content; a layer carries at
             // most one, so adding sets (overwrites) the slot.
             NewEffect::Generate(e) => layer.generate = Some(e),
@@ -112,6 +115,7 @@ impl PulseApp {
                                             Stack::Color => "color",
                                             Stack::Spatial => "buffer",
                                             Stack::Generate => "generate",
+                                            Stack::Distort => "distort",
                                         };
                                         let resp = ui
                                             .add(egui::Button::new(format!(

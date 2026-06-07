@@ -16,7 +16,7 @@
 //! selected layer. Keeping the registry and the matcher here (not in the UI)
 //! means the search/ranking logic is unit-testable without an egui context.
 
-use super::{Effect, GenerateEffect, SpatialEffect};
+use super::{DistortEffect, Effect, GenerateEffect, SpatialEffect};
 
 /// Which per-layer stack an effect belongs to. The browser adds a
 /// [`Category::Color`] / generic per-pixel effect to the layer's
@@ -32,6 +32,9 @@ pub enum Stack {
     /// A whole-buffer [`GenerateEffect`] fill (Fractal Noise) — replaces the
     /// layer's content rather than reading it.
     Generate,
+    /// A whole-buffer [`DistortEffect`] coordinate-remap (Corner Pin / Transform
+    /// / Mirror / Polar) — warps the layer's pixels rather than recoloring them.
+    Distort,
 }
 
 /// The browser's top-level grouping (AE's *Effects & Presets* category folders).
@@ -48,17 +51,21 @@ pub enum Category {
     Perspective,
     /// Stylize passes (Glow, …).
     Stylize,
+    /// Distort passes (Corner Pin, Transform, Mirror, Polar Coordinates, …) —
+    /// geometric coordinate-remaps.
+    Distort,
     /// Generate passes (Fractal Noise, …) — synthesise content into the layer.
     Generate,
 }
 
 impl Category {
     /// Every category, in the browser's display order.
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 6] = [
         Category::Color,
         Category::Blur,
         Category::Perspective,
         Category::Stylize,
+        Category::Distort,
         Category::Generate,
     ];
 
@@ -69,6 +76,7 @@ impl Category {
             Category::Blur => "Blur & Sharpen",
             Category::Perspective => "Perspective",
             Category::Stylize => "Stylize",
+            Category::Distort => "Distort",
             Category::Generate => "Generate",
         }
     }
@@ -102,6 +110,7 @@ impl BrowserEntry {
             Stack::Color => NewEffect::Color(Effect::defaults()[self.default_index]),
             Stack::Spatial => NewEffect::Spatial(SpatialEffect::defaults()[self.default_index]),
             Stack::Generate => NewEffect::Generate(GenerateEffect::defaults()[self.default_index]),
+            Stack::Distort => NewEffect::Distort(DistortEffect::defaults()[self.default_index]),
         }
     }
 }
@@ -114,6 +123,7 @@ pub enum NewEffect {
     Color(Effect),
     Spatial(SpatialEffect),
     Generate(GenerateEffect),
+    Distort(DistortEffect),
 }
 
 /// The full effect registry — every addable effect across both stacks. The
@@ -259,6 +269,59 @@ pub const REGISTRY: &[BrowserEntry] = &[
         default_index: 4,
         keywords: &["grid", "lines", "graph", "guides", "mesh", "checker"],
     },
+    // --- Distort (DistortEffect::defaults() order) --------------------------
+    BrowserEntry {
+        name: "Corner Pin",
+        category: Category::Distort,
+        stack: Stack::Distort,
+        default_index: 0,
+        keywords: &[
+            "corner",
+            "pin",
+            "perspective",
+            "warp",
+            "quad",
+            "screen",
+            "track",
+        ],
+    },
+    BrowserEntry {
+        name: "Transform",
+        category: Category::Distort,
+        stack: Stack::Distort,
+        default_index: 1,
+        keywords: &[
+            "transform",
+            "position",
+            "scale",
+            "rotate",
+            "anchor",
+            "skew",
+            "move",
+        ],
+    },
+    BrowserEntry {
+        name: "Mirror",
+        category: Category::Distort,
+        stack: Stack::Distort,
+        default_index: 2,
+        keywords: &["mirror", "reflect", "flip", "symmetry", "kaleidoscope"],
+    },
+    BrowserEntry {
+        name: "Polar Coordinates",
+        category: Category::Distort,
+        stack: Stack::Distort,
+        default_index: 3,
+        keywords: &[
+            "polar",
+            "coordinates",
+            "radial",
+            "tiny planet",
+            "rect",
+            "unwrap",
+            "twirl",
+        ],
+    },
 ];
 
 /// A scored search hit: the matched registry entry and a relevance `score`
@@ -363,6 +426,7 @@ mod tests {
         let colors = Effect::defaults();
         let spatials = SpatialEffect::defaults();
         let generates = GenerateEffect::defaults();
+        let distorts = DistortEffect::defaults();
         for entry in REGISTRY {
             match entry.instantiate() {
                 NewEffect::Color(e) => {
@@ -380,6 +444,11 @@ mod tests {
                     assert_eq!(e, generates[entry.default_index]);
                     assert_eq!(entry.stack, Stack::Generate);
                 }
+                NewEffect::Distort(e) => {
+                    assert!(entry.default_index < distorts.len());
+                    assert_eq!(e, distorts[entry.default_index]);
+                    assert_eq!(entry.stack, Stack::Distort);
+                }
             }
         }
     }
@@ -393,6 +462,7 @@ mod tests {
                 NewEffect::Color(e) => e.label(),
                 NewEffect::Spatial(e) => e.label(),
                 NewEffect::Generate(e) => e.label(),
+                NewEffect::Distort(e) => e.label(),
             };
             assert_eq!(entry.name, label, "name/label mismatch for {}", entry.name);
         }
@@ -424,6 +494,14 @@ mod tests {
                     .iter()
                     .any(|e| e.stack == Stack::Generate && e.default_index == i),
                 "generate effect {i} missing from registry"
+            );
+        }
+        for (i, _) in DistortEffect::defaults().iter().enumerate() {
+            assert!(
+                REGISTRY
+                    .iter()
+                    .any(|e| e.stack == Stack::Distort && e.default_index == i),
+                "distort effect {i} missing from registry"
             );
         }
     }
@@ -468,6 +546,33 @@ mod tests {
             .find(|(c, _)| *c == Category::Generate)
             .expect("Generate folder present");
         assert_eq!(gen.1.len(), 5, "five generators in the Generate folder");
+    }
+
+    #[test]
+    fn distort_family_is_findable() {
+        // Each distort effect is reachable by name and a synonym, and groups under
+        // the Distort category.
+        for (name, queries) in [
+            ("Corner Pin", ["corner", "perspective"]),
+            ("Transform", ["transform", "skew"]),
+            ("Mirror", ["mirror", "reflect"]),
+            ("Polar Coordinates", ["polar", "radial"]),
+        ] {
+            for q in queries {
+                let hits = filter(q);
+                assert!(
+                    hits.iter().any(|h| h.entry.name == name),
+                    "querying {q:?} should find {name}"
+                );
+            }
+        }
+        // The Distort folder holds all four distorts on an empty query.
+        let groups = filter_grouped("");
+        let dist = groups
+            .iter()
+            .find(|(c, _)| *c == Category::Distort)
+            .expect("Distort folder present");
+        assert_eq!(dist.1.len(), 4, "four distorts in the Distort folder");
     }
 
     #[test]

@@ -29,9 +29,9 @@ pub use export::{export_sequence_in_project, range_frame_count, RenderRange};
 #[cfg(test)]
 pub use export::export_sequence;
 use passes::{
-    apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_footage,
-    composite_generate, composite_layer, composite_motion_blur, composite_precomp, composite_shape,
-    composite_text,
+    apply_adjustment, apply_distort, apply_masks, apply_spatial, apply_track_matte,
+    composite_footage, composite_generate, composite_layer, composite_motion_blur,
+    composite_precomp, composite_shape, composite_text,
 };
 
 /// Per-render context for resolving **precomps**: the project's comps (so a
@@ -332,6 +332,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         let blurred = comp.layer_motion_blurred(i);
         let masked = layer.has_active_masks();
         let spatial = layer.has_spatial_effects();
+        let distort = layer.has_distort_effects();
         let matte_src = comp.matte_source(i);
         let world = comp.world_matrix(i, t);
         // Expression-aware opacity for this layer at the frame time (the value the
@@ -351,7 +352,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 composite_generate(&mut layer_buf, &geom, world, layer, gen, opacity);
                 finish_layer(
                     &mut acc, &mut layer_buf, &geom, comp, cache, world, layer, masked, spatial,
-                    matte_src, t, ctx,
+                    distort, matte_src, t, ctx,
                 );
                 continue;
             }
@@ -384,6 +385,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     layer,
                     masked,
                     spatial,
+                    distort,
                     matte_src,
                     t,
                     ctx,
@@ -406,6 +408,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     layer,
                     masked,
                     spatial,
+                    distort,
                     matte_src,
                     t,
                     ctx,
@@ -427,6 +430,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     layer,
                     masked,
                     spatial,
+                    distort,
                     matte_src,
                     t,
                     ctx,
@@ -457,6 +461,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     layer,
                     masked,
                     spatial,
+                    distort,
                     matte_src,
                     t,
                     ctx,
@@ -485,6 +490,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     layer,
                     masked,
                     spatial,
+                    distort,
                     matte_src,
                     t,
                     ctx,
@@ -492,13 +498,13 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             }
             // A crisp solid draws its own colored quad (processed by its effect
             // stack) directly into the accumulator — or, when it has masks, a
-            // track matte, spatial effects, or a non-Normal blend mode, into an
-            // isolated buffer whose alpha the masks/matte modulate and whose whole
-            // buffer the spatial passes filter before it is composited with the
-            // layer's blend mode.
+            // track matte, spatial or distort effects, or a non-Normal blend mode,
+            // into an isolated buffer whose alpha the masks/matte modulate and
+            // whose whole buffer the spatial / distort passes filter before it is
+            // composited with the layer's blend mode.
             LayerKind::Solid => {
                 let blended = layer.blend_mode() != BlendMode::Normal;
-                if masked || spatial || matte_src.is_some() || blended {
+                if masked || spatial || distort || matte_src.is_some() || blended {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, opacity);
                     finish_layer(
@@ -511,6 +517,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                         layer,
                         masked,
                         spatial,
+                        distort,
                         matte_src,
                         t,
                         ctx,
@@ -546,9 +553,10 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
 
 /// Finish an isolated layer buffer and composite it over the accumulator: carve
 /// by the layer's masks, clip by its track matte, run its spatial-effect stack,
-/// then source-over the result onto `acc`. Each pass is gated by the
-/// corresponding flag the caller already resolved, so an un-effected layer just
-/// composites. Shared by the solid / shape / text isolated-buffer paths.
+/// run its distort-effect (coordinate-remap) stack, then source-over the result
+/// onto `acc`. Each pass is gated by the corresponding flag the caller already
+/// resolved, so an un-effected layer just composites. Shared by the solid /
+/// shape / text isolated-buffer paths.
 #[allow(clippy::too_many_arguments)]
 fn finish_layer(
     acc: &mut [Lin],
@@ -560,6 +568,7 @@ fn finish_layer(
     layer: &crate::comp::PulseLayer,
     masked: bool,
     spatial: bool,
+    distort: bool,
     matte_src: Option<usize>,
     t: f32,
     ctx: RenderCtx,
@@ -572,6 +581,12 @@ fn finish_layer(
     }
     if spatial {
         apply_spatial(layer_buf, geom, layer);
+    }
+    // Distort (coordinate-remap) runs after the spatial passes, so it warps the
+    // already-blurred/shadowed/glowed buffer (matching AE's distort-below-blur
+    // effect order).
+    if distort {
+        apply_distort(layer_buf, geom, layer);
     }
     // Composite the finished isolated buffer onto the accumulator using the
     // layer's blend mode (Normal reduces exactly to source-over).
