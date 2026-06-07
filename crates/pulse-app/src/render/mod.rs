@@ -192,6 +192,73 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
     render_comp(comp, t, cache, RenderCtx::lone(comps))
 }
 
+/// A capped preview resolution: the comp's aspect, scaled so its longest edge is
+/// at most `cap` pixels (never upscaled past native). Returns `(width, height)`,
+/// each at least 1. Used by the interactive **render preview** so scrubbing a
+/// large comp stays responsive while keeping the comp's aspect ratio.
+pub fn preview_dims(width: u32, height: u32, cap: u32) -> (u32, u32) {
+    let w = width.max(1);
+    let h = height.max(1);
+    let cap = cap.max(1);
+    let long = w.max(h);
+    if long <= cap {
+        return (w, h);
+    }
+    let s = cap as f64 / long as f64;
+    let pw = ((w as f64 * s).round() as u32).max(1);
+    let ph = ((h as f64 * s).round() as u32).max(1);
+    (pw, ph)
+}
+
+/// Render comp `id` (within `comps`) at time `t` for the **interactive preview**,
+/// at a resolution capped to `cap` px on the long edge (the comp's aspect is
+/// preserved). Footage decodes go through the supplied persistent [`FrameCache`]
+/// so scrubbing doesn't re-decode an unchanged source every frame.
+///
+/// The full offline compositor is reused (so footage frames, precomps, effects,
+/// masks, mattes, motion blur, time-remap, and expressions all show real pixels
+/// in the preview); only the working resolution differs. The comp set is cloned
+/// with the target comp scaled to the capped size — layer geometry is a fraction
+/// of the comp, so scaling the dimensions scales the whole frame uniformly and
+/// the preview matches an exported frame, just smaller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn render_preview_frame(
+    comps: &[Comp],
+    id: u64,
+    t: f32,
+    cap: u32,
+    cache: &mut FrameCache,
+) -> Frame {
+    let Some(target) = comps.iter().find(|c| c.id == id) else {
+        return Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+        };
+    };
+    let (pw, ph) = preview_dims(target.width, target.height, cap);
+    // Native size → render straight through (no clone). Otherwise scale only the
+    // target comp's dimensions; precomps resolve their nested comps by id and
+    // sample into a (now smaller) quad, so the preview stays correct.
+    if pw == target.width && ph == target.height {
+        return render_frame_in_project(comps, id, t, cache);
+    }
+    let scaled: Vec<Comp> = comps
+        .iter()
+        .map(|c| {
+            if c.id == id {
+                let mut c = c.clone();
+                c.width = pw;
+                c.height = ph;
+                c
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    render_frame_in_project(&scaled, id, t, cache)
+}
+
 /// Render comp `id` (within `comps`) at time `t`, resolving any **precomp**
 /// layers against its sibling comps and breaking reference cycles.
 ///
@@ -200,7 +267,6 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
 /// its quad, with a visited-set guard so a cycle A → B → A terminates (the cyclic
 /// precomp renders nothing). Returns an empty/transparent frame if `id` is not
 /// found.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_frame_in_project(comps: &[Comp], id: u64, t: f32, cache: &mut FrameCache) -> Frame {
     let Some(comp) = comps.iter().find(|c| c.id == id) else {
         return Frame {

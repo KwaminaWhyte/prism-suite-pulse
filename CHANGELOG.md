@@ -10,6 +10,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Preview fidelity — render preview** (After Effects' *Composition viewer*) —
+  the interactive preview now shows **real composited pixels** instead of flat
+  placeholder quads. It renders the comp at the playhead through the **existing
+  offline CPU compositor** (`render::render_preview_frame` → `render_comp`) at a
+  capped preview resolution, uploads the result as an egui texture, and draws it
+  as the preview image. Because it reuses the real compositor, **footage frames,
+  precomps (recursive render), effects, color-correction, masks, track mattes,
+  motion blur, time-remap, and expressions** all appear in the live preview with
+  full fidelity — matching an exported frame, just smaller.
+  - **Render path** (`render/mod.rs`) — new `render_preview_frame` renders the
+    active comp project-aware (precomps resolve against sibling comps, cycle guard
+    intact) at a resolution capped by new `preview_dims` to **1280 px on the long
+    edge**, preserving the comp's aspect (small comps render native, never
+    upscaled). `render_frame_in_project` is promoted to a normal `pub` entry (no
+    longer dead-code-gated) as the shared project-aware renderer.
+  - **Caching** (`preview.rs`, new `PreviewRenderer` + `PreviewKey`) — the
+    rendered texture is cached and only re-rendered when a **fingerprint** of
+    `(playhead time, comp/layer state, target size)` changes: time is quantized to
+    1e-4 s so float noise doesn't churn the cache, and the comp state is hashed
+    from its serialized JSON so **any** layer/keyframe/property edit invalidates
+    it while a static frame renders once. During playback the playhead moves each
+    frame, so the preview advances; parked on a frame, it's a cache hit.
+  - **Persistent footage cache** — `PreviewRenderer` holds a persistent
+    `FrameCache` threaded into every preview render, so a still / sequence frame is
+    decoded **once** and reused across renders (scrubbing doesn't re-decode). The
+    offline-export path keeps its own per-export cache, unchanged.
+  - **Overlays on top** — the transform gizmo, selection box, mask paths, null
+    pivots, adjustment-layer bounds, and onion-skin ghosts are drawn over the
+    rendered image via the egui painter, pixel-aligned through the **same**
+    aspect-fit `comp px → screen` mapping the image uses (so they track the
+    rendered pixels through letterbox/pillarbox scaling). The placeholder-quad
+    arms for footage / precomp / solid / shape / text — and their preview-only
+    color/matte/motion-blur approximations — are removed (the texture now carries
+    them for real).
+  - **Tests** — preview-cache fingerprint stability/invalidation (time, state,
+    size, quantization), comp-space ↔ display-rect round-trip incl. letterboxing,
+    the resolution cap, and persistent-`FrameCache` decode-once reuse across
+    preview renders.
+
 - **Time remapping** (After-Effects' *Enable Time Remap*, Phase 4 *Time
   remapping*) — a time-based layer (a **footage image-sequence** or a **precomp**)
   can now carry an optional, keyframable **time-remap** curve that drives the

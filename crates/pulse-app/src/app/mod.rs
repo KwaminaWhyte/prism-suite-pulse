@@ -61,6 +61,11 @@ pub struct PulseApp {
     effect_query: String,
     /// Last save/export status, surfaced briefly in the menu bar.
     status: Option<String>,
+    /// The interactive **render preview**: caches the comp rendered (through the
+    /// real offline compositor) to a capped-res egui texture, re-rendering only
+    /// when the frame's fingerprint changes, and holds a persistent footage
+    /// [`FrameCache`](crate::comp::FrameCache) so scrubbing doesn't re-decode.
+    preview: crate::preview::PreviewRenderer,
 }
 
 /// An in-progress drag of the preview's transform gizmo: which handle is held,
@@ -102,6 +107,7 @@ impl PulseApp {
             onion: crate::onion::OnionSkin::default(),
             effect_query: String::new(),
             status: None,
+            preview: crate::preview::PreviewRenderer::default(),
         }
     }
 

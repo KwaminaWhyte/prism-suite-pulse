@@ -1,58 +1,170 @@
-//! The preview surface: paints the composition and its layers for the current
-//! playhead time through egui's [`Painter`].
+//! The preview surface: a **render preview**. The composition is rendered at the
+//! current playhead time through the *real* offline compositor
+//! ([`render`](crate::render)) at a capped preview resolution, uploaded as an
+//! egui texture, and drawn as the preview image — so footage frames, precomps,
+//! effects, masks, mattes, motion blur, time-remap, and expressions all show
+//! **real composited pixels** (the same result an export produces).
 //!
-//! The comp is shown as a centered, aspect-fit rectangle inside the central
-//! panel. Each visible layer is a solid color rect, transformed by its resolved
-//! [`Affine2`] world matrix (position, uniform scale, and rotation about its
-//! anchor point, composed under any parent chain) and faded by opacity. Layer
-//! coordinates are in comp pixels with the origin at the comp center; we map
-//! them to screen via a single fitted scale factor.
+//! The render is **cached**: a fingerprint of `(time, comp state, target size)`
+//! gates re-rendering, so a static frame is rendered once and only re-rendered
+//! when the playhead moves, the comp/layers change, or the viewport resizes. A
+//! **persistent** [`FrameCache`](crate::comp::FrameCache) is threaded through the
+//! preview renders so footage isn't re-decoded every frame.
+//!
+//! Interactive **overlays** (selection box, mask handles, null pivots, the
+//! transform gizmo, onion-skin ghosts) are drawn on top via egui's [`Painter`],
+//! pixel-aligned to the displayed image rect through the same aspect-fit mapping
+//! (`comp px → screen`) the offline renderer uses, so they track the rendered
+//! pixels through letterbox scaling.
 
-use crate::comp::{apply_effects, Comp, LayerKind, MaskMode, PulseLayer};
+use crate::comp::{Comp, LayerKind, MaskMode, PulseLayer};
 use crate::gizmo::{GizmoGeom, Handle};
 use crate::onion::{Ghost, OnionSkin};
 use crate::theme;
-use egui::{epaint::PathShape, Color32, Painter, Pos2, Rect, Stroke, Vec2};
+use egui::{Color32, ColorImage, Painter, Pos2, Rect, Stroke, TextureHandle, Vec2};
 
 use crate::comp::Affine2;
 
-use prism_core::color::{linear_to_srgb, srgb_to_linear};
+/// The capped long-edge resolution (px) of the interactive render preview. Large
+/// comps render downscaled to this so scrubbing stays responsive; the cache then
+/// avoids re-rendering an unchanged frame.
+const PREVIEW_CAP: u32 = 1280;
 
-/// The solid layer's effect-processed display color (straight sRGB `[f32; 4]`).
+/// Holds the cached rendered preview texture plus the fingerprint it was rendered
+/// for and a **persistent** footage cache.
 ///
-/// Mirrors the offline renderer: convert to linear, run the effect stack, encode
-/// back to sRGB — so the preview swatch matches an exported frame's color. Only
-/// the solid's own constant color is processed here (per-pixel adjustment-layer
-/// grading is render-only; the preview shows adjustments as outlines).
-fn effected_color(layer: &PulseLayer) -> [f32; 4] {
-    if layer.effects.is_empty() {
-        return layer.color;
-    }
-    let lin = [
-        srgb_to_linear(layer.color[0].clamp(0.0, 1.0)),
-        srgb_to_linear(layer.color[1].clamp(0.0, 1.0)),
-        srgb_to_linear(layer.color[2].clamp(0.0, 1.0)),
-        layer.color[3],
-    ];
-    let out = apply_effects(&layer.effects, lin);
-    [
-        linear_to_srgb(out[0]),
-        linear_to_srgb(out[1]),
-        linear_to_srgb(out[2]),
-        out[3],
-    ]
+/// [`PreviewRenderer::texture`] re-renders the comp (through the real offline
+/// compositor) only when the fingerprint changes — the playhead time, the comp /
+/// layer state, or the target preview size — and otherwise returns the cached
+/// [`TextureHandle`]. The persistent [`FrameCache`](crate::comp::FrameCache)
+/// means a footage source decodes once and is reused across preview renders
+/// (the offline-export path keeps its own per-export cache, unchanged).
+#[derive(Default)]
+pub struct PreviewRenderer {
+    /// Persistent footage decode cache, reused across preview renders so a still
+    /// / sequence frame is decoded at most once while it stays referenced.
+    cache: crate::comp::FrameCache,
+    /// The uploaded preview texture (comp rendered to capped-res sRGB pixels).
+    tex: Option<TextureHandle>,
+    /// The fingerprint the cached [`tex`](Self::tex) was rendered for; a mismatch
+    /// triggers a re-render.
+    key: Option<PreviewKey>,
 }
 
-/// Convert a straight sRGB `[f32; 4]` (0..=1) into an egui [`Color32`], scaling
-/// alpha by `opacity`.
-///
-/// egui expects sRGB bytes, so the `srgb_to_linear`/`linear_to_srgb` round-trip
-/// is value-neutral but routes color through `prism-core`'s shared boundary
-/// helpers (and keeps the suite's color path consistent at the app edge).
-fn to_color32(c: [f32; 4], opacity: f32) -> Color32 {
-    let enc = |v: f32| (linear_to_srgb(srgb_to_linear(v.clamp(0.0, 1.0))) * 255.0).round() as u8;
-    let a = (c[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Color32::from_rgba_unmultiplied(enc(c[0]), enc(c[1]), enc(c[2]), a)
+/// A cache key fingerprinting everything the rendered preview frame depends on:
+/// the playhead time (quantized to avoid float-noise churn), the target render
+/// dimensions, and a hash of the project comp state at that time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PreviewKey {
+    /// Playhead time quantized to milliticks (1e-4 s) so equal times compare
+    /// equal across frames but a real scrub/playback step changes the key.
+    time_q: i64,
+    /// Target render width/height (px) — a viewport resize re-renders.
+    dims: (u32, u32),
+    /// Hash of the serialized project comps (id, size, layers, keyframes, …); any
+    /// edit to the comp / its layers changes it, a no-op leaves it stable.
+    state: u64,
+}
+
+impl PreviewKey {
+    /// Build the fingerprint for rendering comp `id` of `comps` at time `t` into a
+    /// `dims`-sized target. The state hash serializes the comps to JSON and hashes
+    /// the bytes — robust to any field change without hand-maintaining a hasher.
+    pub fn new(comps: &[Comp], id: u64, t: f32, dims: (u32, u32)) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        // Serialize the comps; serialization failure (never expected for these
+        // plain structs) degrades to hashing nothing — still a valid, stable key.
+        if let Ok(json) = serde_json::to_vec(comps) {
+            json.hash(&mut h);
+        }
+        Self {
+            time_q: (t as f64 * 10_000.0).round() as i64,
+            dims,
+            state: h.finish(),
+        }
+    }
+}
+
+impl PreviewRenderer {
+    /// Render comp `id` of `comps` at time `t` to a capped-resolution texture and
+    /// return its [`TextureHandle`], re-using the cached texture when nothing the
+    /// frame depends on has changed (the fingerprint is stable).
+    ///
+    /// The target render size is the comp's aspect capped to [`PREVIEW_CAP`] px on
+    /// the long edge (so a large comp scrubs cheaply); a viewport resize only
+    /// changes how the texture is *drawn* (the fitted rect), not what is rendered,
+    /// so resizing the panel does not force a re-render. The footage decode
+    /// [`cache`](Self::cache) persists across calls.
+    pub fn texture(
+        &mut self,
+        ctx: &egui::Context,
+        comps: &[Comp],
+        id: u64,
+        t: f32,
+    ) -> Option<TextureHandle> {
+        let dims = comps
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| crate::render::preview_dims(c.width, c.height, PREVIEW_CAP))
+            .unwrap_or((1, 1));
+        let key = PreviewKey::new(comps, id, t, dims);
+        if self.key == Some(key) {
+            if let Some(tex) = &self.tex {
+                return Some(tex.clone());
+            }
+        }
+        // Render through the real offline compositor (capped res), reusing the
+        // persistent footage cache so an unchanged source isn't re-decoded.
+        let frame = crate::render::render_preview_frame(comps, id, t, PREVIEW_CAP, &mut self.cache);
+        let image = ColorImage::from_rgba_unmultiplied(
+            [frame.width as usize, frame.height as usize],
+            &frame.pixels,
+        );
+        let tex = match &mut self.tex {
+            // Re-use the existing GPU texture slot, just swap its pixels.
+            Some(tex) => {
+                tex.set(image, egui::TextureOptions::LINEAR);
+                tex.clone()
+            }
+            None => {
+                let tex = ctx.load_texture("pulse_preview", image, egui::TextureOptions::LINEAR);
+                self.tex = Some(tex.clone());
+                tex
+            }
+        };
+        self.key = Some(key);
+        Some(tex)
+    }
+}
+
+/// Draw the rendered preview `texture` into the comp's aspect-fit rect inside
+/// `avail` (with the comp backdrop + frame outline), and return the `(center,
+/// scale)` mapping so overlays land on the same pixels. The texture fills exactly
+/// the fitted rect, so comp-px → screen is the same affine the overlays use.
+pub fn paint_image(
+    painter: &Painter,
+    avail: Rect,
+    comp: &Comp,
+    texture: &TextureHandle,
+) -> (Pos2, f32) {
+    let (frame, scale) = fit(avail, comp.width, comp.height);
+    // Comp backdrop (shows through transparent areas) + frame outline.
+    painter.rect_filled(frame, 4.0, Color32::from_rgb(0x10, 0x11, 0x13));
+    painter.image(
+        texture.id(),
+        frame,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    painter.rect_stroke(
+        frame,
+        4.0,
+        Stroke::new(1.0, theme::stroke_subtle()),
+        egui::StrokeKind::Outside,
+    );
+    (frame.center(), scale)
 }
 
 /// Compute the centered, aspect-fit rect for a comp of `width`x`height` inside
@@ -156,59 +268,102 @@ pub fn paint_gizmo(
     painter.circle_stroke(anchor, 4.0, Stroke::new(1.5, ac));
 }
 
-/// Paint the whole composition (frame + visible layers) at time `t`.
-pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected: Option<usize>) {
-    let (frame, scale) = fit(avail, comp.width, comp.height);
-
-    // Comp backdrop + frame.
-    painter.rect_filled(frame, 4.0, Color32::from_rgb(0x10, 0x11, 0x13));
-    painter.rect_stroke(
-        frame,
-        4.0,
-        Stroke::new(1.0, theme::stroke_subtle()),
-        egui::StrokeKind::Outside,
-    );
-
-    let center = frame.center();
+/// Paint the interactive **overlays** on top of the rendered preview image: for
+/// each visible layer, locatability markers that aren't in the rendered pixels —
+/// null pivots, adjustment-layer bounds — and, for the selected layer, its
+/// bounding box and editable mask paths. `center`/`scale` are the same comp-px →
+/// screen mapping [`paint_image`] returned, so every overlay lands exactly on the
+/// rendered pixels (through any letterbox scaling).
+///
+/// The rendered texture already shows real composited pixels for solids, shapes,
+/// text, footage, precomps, effects, masks, mattes, and motion blur, so the
+/// overlays only add editor chrome — no placeholder fills.
+pub fn paint_overlays(
+    painter: &Painter,
+    comp: &Comp,
+    t: f32,
+    selected: Option<usize>,
+    center: Pos2,
+    scale: f32,
+) {
+    let half_w = comp.width as f32 * crate::render::LAYER_HALF_FRAC;
+    let half_h = comp.height as f32 * crate::render::LAYER_HALF_FRAC;
+    let local = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
+    ];
 
     for (i, layer) in comp.layers.iter().enumerate() {
-        if !layer.visible {
+        if !layer.visible || comp.is_matte_source(i) {
             continue;
         }
-        // A layer used as a matte source is pulled in by the layer below it and
-        // doesn't paint on its own (it only contributes alpha/luma).
-        if comp.is_matte_source(i) {
-            continue;
-        }
-        // World matrix folds the layer's own transform under its parent chain.
         let world = comp.world_matrix(i, t);
-        // A track matte coarsely modulates this layer's preview opacity by the
-        // matte source's constant-color factor (the offline render does this
-        // per-pixel; the preview's constant quads can only approximate it).
-        let matte = matte_opacity(comp, i, t);
-        // Motion blur: draw faint ghost quads at the shutter's sub-frame sample
-        // times so the on-screen preview hints at the motion the offline render
-        // integrates per-pixel. Only for solids that opt in (and the comp's
-        // master switch is on).
-        if comp.layer_motion_blurred(i) && layer.kind == LayerKind::Solid {
-            paint_motion_blur_ghosts(painter, comp, i, t, center, scale, matte);
+        let is_selected = selected == Some(i);
+
+        match layer.kind {
+            // Nulls are invisible reference handles: draw a small pivot marker at
+            // the layer origin so the rig is locatable (not in the rendered frame).
+            LayerKind::Null => {
+                let (ox, oy) = world.apply(0.0, 0.0);
+                let o = center + Vec2::new(ox * scale, oy * scale);
+                let s = 8.0;
+                painter.line_segment(
+                    [o - Vec2::new(s, 0.0), o + Vec2::new(s, 0.0)],
+                    Stroke::new(1.0, theme::muted()),
+                );
+                painter.line_segment(
+                    [o - Vec2::new(0.0, s), o + Vec2::new(0.0, s)],
+                    Stroke::new(1.0, theme::muted()),
+                );
+            }
+            // Adjustment layers don't draw pixels (the regrade is render-only); a
+            // dashed-ish bounds outline keeps them visible & selectable.
+            LayerKind::Adjustment => {
+                let corners = screen_corners(&local, world, center, scale);
+                let mut outline = corners.clone();
+                outline.push(corners[0]);
+                painter.add(egui::Shape::line(
+                    outline,
+                    Stroke::new(1.0, theme::muted().gamma_multiply(0.8)),
+                ));
+            }
+            _ => {}
         }
-        paint_layer(
-            painter,
-            i,
-            layer,
-            center,
-            scale,
-            world,
-            comp,
-            t,
-            matte,
-            selected == Some(i),
-        );
+
+        if is_selected {
+            let corners = screen_corners(&local, world, center, scale);
+            let mut outline = corners.clone();
+            outline.push(corners[0]);
+            painter.add(egui::Shape::line(
+                outline,
+                Stroke::new(1.5, theme::accent()),
+            ));
+            // Draw the layer's mask paths (layer-local space) so the editable
+            // region is visible while the layer is selected.
+            paint_masks(painter, layer, center, scale, world);
+        }
     }
 }
 
-/// Paint **onion-skin ghost frames** behind the live comp: for each [`Ghost`]
+/// Map a layer-local quad's corners through `world` into screen space.
+fn screen_corners(
+    local: &[(f32, f32); 4],
+    world: Affine2,
+    center: Pos2,
+    scale: f32,
+) -> Vec<Pos2> {
+    local
+        .iter()
+        .map(|&(lx, ly)| {
+            let (wx, wy) = world.apply(lx, ly);
+            center + Vec2::new(wx * scale, wy * scale)
+        })
+        .collect()
+}
+
+/// Paint **onion-skin ghost frames** over the rendered preview: for each [`Ghost`]
 /// (the comp sampled at a neighbouring frame), draw every visible layer as a
 /// flat, tinted, faded quad/shape — a legible silhouette of where the motion was
 /// (cool tint) or is going (warm tint). Drawn *before* the live frame in
@@ -273,157 +428,6 @@ fn paint_ghost_frame(painter: &Painter, comp: &Comp, ghost: &Ghost, center: Pos2
     }
 }
 
-/// The coarse matte multiplier for layer `i` in the preview: the matte source's
-/// constant-color [`MatteMode::factor`] (the preview can't do per-pixel mattes,
-/// so it uses the source's flat color/alpha). `1.0` when the layer has no matte.
-fn matte_opacity(comp: &Comp, i: usize, t: f32) -> f32 {
-    let Some(src_idx) = comp.matte_source(i) else {
-        return 1.0;
-    };
-    let mode = comp.layers[i].matte;
-    let Some(src) = comp.layers.get(src_idx) else {
-        return 1.0;
-    };
-    // The source's effect-processed straight color in linear light, scaled by its
-    // own opacity — the same inputs the offline matte factor sees, flattened.
-    let c = effected_color(src);
-    let src_a = c[3].clamp(0.0, 1.0) * comp.layer_opacity(src_idx, t);
-    let lin = [
-        srgb_to_linear(c[0].clamp(0.0, 1.0)),
-        srgb_to_linear(c[1].clamp(0.0, 1.0)),
-        srgb_to_linear(c[2].clamp(0.0, 1.0)),
-        src_a,
-    ];
-    mode.factor(lin)
-}
-
-/// Paint a single layer as a rotated/scaled solid quad, transformed by its
-/// resolved `world` matrix (own transform + parent chain).
-#[allow(clippy::too_many_arguments)]
-fn paint_layer(
-    painter: &Painter,
-    idx: usize,
-    layer: &PulseLayer,
-    center: Pos2,
-    scale: f32,
-    world: Affine2,
-    comp: &Comp,
-    t: f32,
-    matte: f32,
-    selected: bool,
-) {
-    // Expression-aware opacity; the track matte (coarsely) scales it in the
-    // preview.
-    let opacity = comp.layer_opacity(idx, t) * matte.clamp(0.0, 1.0);
-    if opacity <= 0.0 {
-        return;
-    }
-
-    // Layer base rect: a fraction of the comp, sized in comp pixels.
-    let half_w = comp.width as f32 * 0.22;
-    let half_h = comp.height as f32 * 0.22;
-
-    // Local-space corners (comp px, origin at the layer's geometric center).
-    let local = [
-        (-half_w, -half_h),
-        (half_w, -half_h),
-        (half_w, half_h),
-        (-half_w, half_h),
-    ];
-
-    // Map each local corner through the world matrix into comp space, then to
-    // screen: comp center + comp-space offset scaled to screen.
-    let corners: Vec<Pos2> = local
-        .iter()
-        .map(|&(lx, ly)| {
-            let (wx, wy) = world.apply(lx, ly);
-            center + Vec2::new(wx * scale, wy * scale)
-        })
-        .collect();
-
-    match layer.kind {
-        LayerKind::Solid => {
-            // Solids paint their (effect-processed) color, faded by opacity.
-            let fill = to_color32(effected_color(layer), opacity);
-            painter.add(egui::Shape::convex_polygon(
-                corners.clone(),
-                fill,
-                Stroke::NONE,
-            ));
-        }
-        LayerKind::Shape => {
-            // Shape layers paint each item's flattened polygon (fill, then
-            // stroke) transformed through the world matrix into screen space.
-            paint_shape(painter, layer, center, scale, world, opacity);
-        }
-        LayerKind::Text => {
-            // Text layers paint each glyph stroke as a thick line segment through
-            // the world matrix into screen space (a cheap legible twin of the
-            // offline pen-band rasterizer).
-            paint_text(painter, layer, center, scale, world, opacity);
-        }
-        LayerKind::Footage => {
-            // Footage layers paint a flat placeholder quad in the layer's swatch
-            // (the decoded image shows in the offline render / export, not the
-            // coarse preview), with a thin outline so the source quad reads.
-            let fill = to_color32(layer.color, opacity);
-            painter.add(egui::Shape::convex_polygon(
-                corners.clone(),
-                fill,
-                Stroke::new(1.0, theme::muted().gamma_multiply(0.8)),
-            ));
-        }
-        LayerKind::Precomp => {
-            // Precomp layers paint a flat placeholder quad in the layer's swatch
-            // (the nested comp is rendered recursively only in the offline render /
-            // export, not the coarse preview), with a thin outline so the precomp's
-            // source quad reads and stays selectable.
-            let fill = to_color32(layer.color, opacity);
-            painter.add(egui::Shape::convex_polygon(
-                corners.clone(),
-                fill,
-                Stroke::new(1.0, theme::accent().gamma_multiply(0.7)),
-            ));
-        }
-        LayerKind::Adjustment => {
-            // Adjustment layers don't paint pixels (the regrade is render-only);
-            // show a dashed bounds outline so they stay visible & selectable.
-            let mut outline = corners.clone();
-            outline.push(corners[0]);
-            painter.add(egui::Shape::line(
-                outline,
-                Stroke::new(1.0, theme::muted().gamma_multiply(0.8)),
-            ));
-        }
-        LayerKind::Null => {
-            // Nulls are invisible reference handles: draw a small pivot marker at
-            // the layer origin so the rig is locatable.
-            let (ox, oy) = world.apply(0.0, 0.0);
-            let o = center + Vec2::new(ox * scale, oy * scale);
-            let s = 8.0;
-            painter.line_segment(
-                [o - Vec2::new(s, 0.0), o + Vec2::new(s, 0.0)],
-                Stroke::new(1.0, theme::muted()),
-            );
-            painter.line_segment(
-                [o - Vec2::new(0.0, s), o + Vec2::new(0.0, s)],
-                Stroke::new(1.0, theme::muted()),
-            );
-        }
-    }
-
-    if selected {
-        let mut outline = corners.clone();
-        outline.push(corners[0]);
-        painter.add(egui::Shape::line(
-            outline,
-            Stroke::new(1.5, theme::accent()),
-        ));
-        // Draw the layer's mask paths (in layer-local space) on top, so the
-        // editable mask region is visible while the layer is selected.
-        paint_masks(painter, layer, center, scale, world);
-    }
-}
 
 /// Paint the selected layer's **mask** paths as outlines, transformed through
 /// the layer's `world` matrix into screen space.
@@ -461,168 +465,156 @@ fn paint_masks(painter: &Painter, layer: &PulseLayer, center: Pos2, scale: f32, 
     }
 }
 
-/// Paint a **shape layer**'s items: each item's flattened polygon, mapped from
-/// layer-local space through the `world` matrix to screen, filled and/or
-/// stroked. Items are drawn bottom-up (under to over), faded by `opacity`.
-///
-/// Mirrors the offline shape rasterizer's geometry so the preview matches an
-/// exported frame; egui's tessellator handles the (possibly concave) fill, and
-/// the stroke is drawn as a closed outline of the configured width.
-fn paint_shape(
-    painter: &Painter,
-    layer: &PulseLayer,
-    center: Pos2,
-    scale: f32,
-    world: crate::comp::Affine2,
-    opacity: f32,
-) {
-    for item in &layer.shape.items {
-        let poly = item.polygon();
-        if poly.len() < 3 {
-            continue;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::comp::{FootageSource, FrameCache, LayerKind, PulseLayer};
+    use crate::gizmo::screen_to_comp;
+
+    /// A minimal one-comp project: a comp with `id`, given size, and the supplied
+    /// layers.
+    fn comp_of(id: u64, w: u32, h: u32, layers: Vec<PulseLayer>) -> Comp {
+        let mut c = Comp::new();
+        c.id = id;
+        c.width = w;
+        c.height = h;
+        c.layers = layers;
+        c
+    }
+
+    // --- Preview cache key fingerprint -------------------------------------
+
+    #[test]
+    fn preview_key_stable_when_nothing_changes() {
+        let comps = vec![comp_of(1, 640, 360, vec![])];
+        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
+        let b = PreviewKey::new(&comps, 1, 1.0, (640, 360));
+        assert_eq!(a, b, "same time + state + dims must produce the same key");
+    }
+
+    #[test]
+    fn preview_key_changes_with_time() {
+        let comps = vec![comp_of(1, 640, 360, vec![])];
+        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
+        let b = PreviewKey::new(&comps, 1, 1.5, (640, 360));
+        assert_ne!(a, b, "advancing the playhead must invalidate the cache");
+    }
+
+    #[test]
+    fn preview_key_quantizes_time_noise() {
+        // Sub-quantum jitter (< 1e-4 s) collapses to the same key, so float noise
+        // doesn't churn the cache while parked on a frame.
+        let comps = vec![comp_of(1, 640, 360, vec![])];
+        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
+        let b = PreviewKey::new(&comps, 1, 1.0 + 1e-6, (640, 360));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn preview_key_changes_with_comp_state_edit() {
+        let base = vec![comp_of(1, 640, 360, vec![])];
+        let a = PreviewKey::new(&base, 1, 1.0, (640, 360));
+
+        // Add a layer — the serialized state, hence the key, must change.
+        let edited = vec![comp_of(
+            1,
+            640,
+            360,
+            vec![PulseLayer::new("Solid", [0.5, 0.5, 0.5, 1.0])],
+        )];
+        let b = PreviewKey::new(&edited, 1, 1.0, (640, 360));
+        assert_ne!(a, b, "a layer edit must invalidate the cache");
+
+        // Move a keyframe on that layer — also a state change.
+        let mut moved = edited.clone();
+        moved[0].layers[0].x.set_key(0.0, 123.0);
+        let c = PreviewKey::new(&moved, 1, 1.0, (640, 360));
+        assert_ne!(b, c, "a keyframe edit must invalidate the cache");
+    }
+
+    #[test]
+    fn preview_key_changes_with_target_size() {
+        let comps = vec![comp_of(1, 640, 360, vec![])];
+        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
+        let b = PreviewKey::new(&comps, 1, 1.0, (320, 180));
+        assert_ne!(a, b, "a viewport/resolution change must re-render");
+    }
+
+    // --- comp-space <-> display-rect mapping round-trip --------------------
+
+    /// Round-trip a comp-space point through `comp_fit` (comp → screen) and
+    /// `screen_to_comp` (screen → comp) and assert it returns to the origin, for a
+    /// letterboxed (non-matching aspect) viewport.
+    fn assert_roundtrip(avail: Rect, w: u32, h: u32, cx: f32, cy: f32) {
+        let (center, scale) = comp_fit(avail, w, h);
+        // comp → screen (the exact mapping paint_image / overlays use).
+        let screen = center + Vec2::new(cx * scale, cy * scale);
+        // screen → comp.
+        let (rx, ry) = screen_to_comp(screen.x, screen.y, center.x, center.y, scale);
+        assert!((rx - cx).abs() < 1e-3, "x round-trip {cx} -> {rx}");
+        assert!((ry - cy).abs() < 1e-3, "y round-trip {cy} -> {ry}");
+    }
+
+    #[test]
+    fn mapping_roundtrips_with_letterboxing() {
+        // A wide comp in a tall viewport letterboxes top/bottom; a tall comp in a
+        // wide viewport pillarboxes — both must round-trip.
+        let wide_view = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(800.0, 600.0));
+        // 16:9 comp inside a 4:3 viewport (letterbox), several comp-space points.
+        for (cx, cy) in [(0.0, 0.0), (320.0, -180.0), (-640.0, 360.0)] {
+            assert_roundtrip(wide_view, 1920, 1080, cx, cy);
         }
-        let pts: Vec<Pos2> = poly
-            .iter()
-            .map(|&(lx, ly)| {
-                let (wx, wy) = world.apply(lx, ly);
-                center + Vec2::new(wx * scale, wy * scale)
-            })
-            .collect();
+        // A tall comp inside the same viewport (pillarbox).
+        for (cx, cy) in [(0.0, 0.0), (100.0, 200.0), (-150.0, -300.0)] {
+            assert_roundtrip(wide_view, 720, 1280, cx, cy);
+        }
+    }
 
-        let fill = item
-            .fill
-            .map(|f| {
-                to_color32(
-                    [f.color[0], f.color[1], f.color[2], 1.0],
-                    opacity * f.opacity,
-                )
-            })
-            .unwrap_or(Color32::TRANSPARENT);
-        let stroke = item
-            .stroke
-            .filter(|s| s.width > 0.0)
-            .map(|s| {
-                let c = to_color32(
-                    [s.color[0], s.color[1], s.color[2], 1.0],
-                    opacity * s.opacity,
-                );
-                Stroke::new((s.width * scale).max(1.0), c)
-            })
-            .unwrap_or(Stroke::NONE);
+    #[test]
+    fn comp_center_maps_to_fitted_rect_center() {
+        let avail = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+        let (center, _scale) = comp_fit(avail, 1920, 1080);
+        // The comp origin (0,0) is the center of the fitted rect, which is the
+        // center of a symmetric available area.
+        assert!((center.x - avail.center().x).abs() < 1e-3);
+        assert!((center.y - avail.center().y).abs() < 1e-3);
+    }
 
-        painter.add(egui::Shape::Path(PathShape {
-            points: pts,
-            closed: true,
-            fill,
-            stroke: stroke.into(),
-        }));
+    // --- preview resolution cap -------------------------------------------
+
+    #[test]
+    fn preview_dims_caps_long_edge_keeping_aspect() {
+        // 1920x1080 capped to 1280 -> 1280x720 (16:9 preserved).
+        let (w, h) = crate::render::preview_dims(1920, 1080, 1280);
+        assert_eq!((w, h), (1280, 720));
+        // Small comps are not upscaled.
+        assert_eq!(crate::render::preview_dims(320, 180, 1280), (320, 180));
+        // Portrait long edge is the height.
+        let (w, h) = crate::render::preview_dims(1080, 1920, 1280);
+        assert_eq!((w, h), (720, 1280));
+    }
+
+    // --- persistent FrameCache reuse (no re-decode for the same frame) -----
+
+    #[test]
+    fn persistent_cache_decodes_a_frame_once_across_preview_renders() {
+        // A footage layer pointing at a (missing) still: the decode is attempted
+        // once and the result cached (a missing file caches as a failure), so a
+        // second preview render at the same source frame does NOT re-decode — the
+        // cache still holds exactly one entry. This is the property the persistent
+        // preview cache relies on (the offline export keeps its own per-run cache).
+        let mut footage = PulseLayer::of_kind(LayerKind::Footage, "F", [0.5, 0.5, 0.5, 1.0]);
+        footage.footage.source = Some(FootageSource::still("preview_cache_probe.png"));
+        let comps = vec![comp_of(1, 64, 36, vec![footage])];
+
+        let mut cache = FrameCache::new();
+        let _ = crate::render::render_preview_frame(&comps, 1, 0.0, 1280, &mut cache);
+        assert_eq!(cache.len(), 1, "first render decodes the source once");
+        let before = cache.len();
+        // Re-render the same time: the source frame is already resident, so no new
+        // decode happens and the cache size is unchanged.
+        let _ = crate::render::render_preview_frame(&comps, 1, 0.0, 1280, &mut cache);
+        assert_eq!(cache.len(), before, "second render must reuse the cache");
     }
 }
 
-/// Paint a **text layer**'s glyph strokes: each laid-out segment drawn as a
-/// thick line through the `world` matrix into screen space, faded by `opacity`.
-///
-/// Mirrors the offline text rasterizer's geometry (the same stroke segments,
-/// pen width as the line thickness) so the preview matches an exported frame.
-/// The fill color is the pen body; if the layer has an outline stroke the body
-/// line is drawn slightly thicker in the stroke color underneath, so the glyph
-/// reads as filled-then-outlined.
-fn paint_text(
-    painter: &Painter,
-    layer: &PulseLayer,
-    center: Pos2,
-    scale: f32,
-    world: Affine2,
-    opacity: f32,
-) {
-    let text = &layer.text;
-    let segs = text.segments();
-    if segs.is_empty() {
-        return;
-    }
-    let pen_w = (text.pen_half() * 2.0 * scale).max(1.0);
-    let to_screen = |lx: f32, ly: f32| {
-        let (wx, wy) = world.apply(lx, ly);
-        center + Vec2::new(wx * scale, wy * scale)
-    };
-
-    // Outline stroke underlay (drawn first, thicker), so the body sits over it.
-    if let Some(s) = text.stroke.filter(|s| s.width > 0.0) {
-        let w = ((text.pen_half() * 2.0 + s.width) * scale).max(1.0);
-        let col = to_color32(
-            [s.color[0], s.color[1], s.color[2], 1.0],
-            opacity * s.opacity,
-        );
-        for &((ax, ay), (bx, by)) in &segs {
-            painter.line_segment([to_screen(ax, ay), to_screen(bx, by)], Stroke::new(w, col));
-        }
-    }
-    if let Some(f) = text.fill {
-        let col = to_color32(
-            [f.color[0], f.color[1], f.color[2], 1.0],
-            opacity * f.opacity,
-        );
-        for &((ax, ay), (bx, by)) in &segs {
-            painter.line_segment(
-                [to_screen(ax, ay), to_screen(bx, by)],
-                Stroke::new(pen_w, col),
-            );
-        }
-    }
-}
-
-/// Paint faint **motion-blur ghost** quads for solid layer `i`: one reduced-
-/// opacity copy of the layer at each shutter sub-frame sample time, so the
-/// preview hints at the swept motion the offline renderer integrates per-pixel.
-///
-/// Capped to a handful of evenly-chosen samples (the real render uses the comp's
-/// full count) and each drawn at `1/count` of the layer's opacity, so the stack
-/// of ghosts roughly sums to one solid's worth of coverage — a cheap, legible
-/// approximation, not the true integral.
-fn paint_motion_blur_ghosts(
-    painter: &Painter,
-    comp: &Comp,
-    i: usize,
-    t: f32,
-    center: Pos2,
-    scale: f32,
-    matte: f32,
-) {
-    let layer = &comp.layers[i];
-    let times = comp.motion_blur.sample_times(t, comp.fps);
-    if times.len() <= 1 {
-        return;
-    }
-    // Show at most ~8 ghosts regardless of the render sample count.
-    const MAX_GHOSTS: usize = 8;
-    let step = times.len().div_ceil(MAX_GHOSTS).max(1);
-    let ghosts: Vec<f32> = times.iter().copied().step_by(step).collect();
-    let count = ghosts.len().max(1) as f32;
-
-    let half_w = comp.width as f32 * 0.22;
-    let half_h = comp.height as f32 * 0.22;
-    let local = [
-        (-half_w, -half_h),
-        (half_w, -half_h),
-        (half_w, half_h),
-        (-half_w, half_h),
-    ];
-    let base = effected_color(layer);
-
-    for st in ghosts {
-        let world = comp.world_matrix(i, st);
-        let opacity = comp.layer_opacity(i, st) * matte.clamp(0.0, 1.0) / count;
-        if opacity <= 0.0 {
-            continue;
-        }
-        let corners: Vec<Pos2> = local
-            .iter()
-            .map(|&(lx, ly)| {
-                let (wx, wy) = world.apply(lx, ly);
-                center + Vec2::new(wx * scale, wy * scale)
-            })
-            .collect();
-        let fill = to_color32(base, opacity);
-        painter.add(egui::Shape::convex_polygon(corners, fill, Stroke::NONE));
-    }
-}

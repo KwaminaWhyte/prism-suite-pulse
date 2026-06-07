@@ -132,9 +132,36 @@ impl PulseApp {
             // grabbed directly on the canvas.
             let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
             let avail = painter.clip_rect();
-            // Onion-skin ghosts paint *behind* the live frame (timing aid).
+            let ctx = ui.ctx().clone();
+
+            // Render the comp at the playhead through the *real* offline compositor
+            // (capped res, cached by fingerprint, persistent footage cache) and
+            // draw it as the preview image — footage, precomps, effects, masks,
+            // mattes, motion blur, time-remap, and expressions all show real
+            // composited pixels.
+            let comps = self.project_comps();
+            let id = self.comp.id;
+            let tex = self.preview.texture(&ctx, &comps, id, self.time);
+
+            let (center, scale) = if let Some(tex) = &tex {
+                preview::paint_image(&painter, avail, &self.comp, tex)
+            } else {
+                // No texture (degenerate comp): fall back to the fitted backdrop so
+                // overlays still have a consistent mapping.
+                preview::comp_fit(avail, self.comp.width, self.comp.height)
+            };
+
+            // Onion-skin ghosts (timing aid) and editor overlays paint on top of
+            // the rendered image, pixel-aligned to it via the same mapping.
             preview::paint_onion(&painter, avail, &self.comp, &self.onion, self.time);
-            preview::paint_comp(&painter, avail, &self.comp, self.time, self.selected);
+            preview::paint_overlays(
+                &painter,
+                &self.comp,
+                self.time,
+                self.selected,
+                center,
+                scale,
+            );
             self.handle_gizmo(ui, &resp, &painter, avail);
         });
     }
