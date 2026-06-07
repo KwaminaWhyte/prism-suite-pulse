@@ -50,6 +50,10 @@ pub struct PreviewRenderer {
     tex: Option<TextureHandle>,
     /// The [`PreviewKey`] of the frame currently uploaded to [`tex`](Self::tex).
     shown_key: Option<PreviewKey>,
+    /// The playhead time the currently shown frame was rendered for. Overlays
+    /// align to *this* (not the live playhead) so they don't lead the pixels when
+    /// the off-thread render lags during playback.
+    shown_time: Option<f32>,
     /// The most recent key handed to the worker, so the same frame isn't queued
     /// twice while it's still rendering (avoids flooding the request channel).
     last_sent: Option<PreviewKey>,
@@ -74,10 +78,12 @@ struct RenderRequest {
     key: PreviewKey,
 }
 
-/// A finished render from the worker: the tagged [`PreviewKey`] plus the rendered
-/// (capped-resolution sRGB) [`Frame`].
+/// A finished render from the worker: the tagged [`PreviewKey`], the playhead
+/// time it was rendered for (echoed back so overlays can align to the shown
+/// frame), plus the rendered (capped-resolution sRGB) [`Frame`].
 struct RenderResult {
     key: PreviewKey,
+    t: f32,
     frame: Frame,
 }
 
@@ -96,7 +102,14 @@ fn worker_loop(req_rx: Receiver<RenderRequest>, res_tx: Sender<RenderResult>) {
         }
         let frame =
             crate::render::render_preview_frame(&req.comps, req.id, req.t, req.cap, &mut cache);
-        if res_tx.send(RenderResult { key: req.key, frame }).is_err() {
+        if res_tx
+            .send(RenderResult {
+                key: req.key,
+                t: req.t,
+                frame,
+            })
+            .is_err()
+        {
             break; // UI gone — stop.
         }
     }
@@ -201,6 +214,7 @@ impl PreviewRenderer {
                 }
             }
             self.shown_key = Some(r.key);
+            self.shown_time = Some(r.t);
         }
 
         // 2. Request a render when the displayed frame is stale and this exact
@@ -235,6 +249,17 @@ impl PreviewRenderer {
         }
 
         self.tex.clone()
+    }
+
+    /// The playhead time the currently displayed preview frame was rendered for.
+    ///
+    /// Because the render runs off the UI thread, during playback the shown frame
+    /// **lags** the live playhead. Editor overlays (selection box, motion path,
+    /// mask outlines, the transform gizmo) must be drawn at *this* time so they
+    /// land on the pixels actually on screen rather than leading them. `None`
+    /// until the first frame is uploaded (the caller falls back to the live time).
+    pub fn shown_time(&self) -> Option<f32> {
+        self.shown_time
     }
 }
 
@@ -721,6 +746,7 @@ mod tests {
             .unwrap();
         let result = res_rx.recv().expect("worker returns a rendered frame");
         assert_eq!(result.key, key, "the worker tags the frame with the request key");
+        assert_eq!(result.t, 0.0, "the worker echoes the request's playhead time");
         assert!(result.frame.width >= 1 && result.frame.height >= 1);
         // Closing the request channel ends the worker loop cleanly.
         drop(req_tx);

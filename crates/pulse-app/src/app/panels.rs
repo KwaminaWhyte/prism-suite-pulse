@@ -153,18 +153,25 @@ impl PulseApp {
                 preview::comp_fit(avail, self.comp.width, self.comp.height)
             };
 
+            // Overlays must align to the frame actually on screen. The render runs
+            // off the UI thread, so during playback the shown frame lags the live
+            // playhead — draw the ghosts / outlines / gizmo at the shown frame's
+            // time (falling back to the live time before the first frame arrives)
+            // so they don't lead the pixels.
+            let display_t = self.preview.shown_time().unwrap_or(self.time);
+
             // Onion-skin ghosts (timing aid) and editor overlays paint on top of
             // the rendered image, pixel-aligned to it via the same mapping.
-            preview::paint_onion(&painter, avail, &self.comp, &self.onion, self.time);
+            preview::paint_onion(&painter, avail, &self.comp, &self.onion, display_t);
             preview::paint_overlays(
                 &painter,
                 &self.comp,
-                self.time,
+                display_t,
                 self.selected,
                 center,
                 scale,
             );
-            self.handle_gizmo(ui, &resp, &painter, avail);
+            self.handle_gizmo(ui, &resp, &painter, avail, display_t);
         });
     }
 
@@ -177,13 +184,18 @@ impl PulseApp {
         resp: &egui::Response,
         painter: &egui::Painter,
         avail: egui::Rect,
+        // The time the displayed frame was rendered for: the gizmo is built, hit-
+        // tested, and keyed at this time so it tracks the pixels on screen (which
+        // lag the live playhead during off-thread playback) rather than leading
+        // them.
+        t: f32,
     ) {
         let Some(idx) = self.selected else { return };
         if idx >= self.comp.layers.len() {
             return;
         }
         let (center, scale) = preview::comp_fit(avail, self.comp.width, self.comp.height);
-        let Some(geom) = GizmoGeom::build(&self.comp, idx, self.time) else {
+        let Some(geom) = GizmoGeom::build(&self.comp, idx, t) else {
             return;
         };
 
@@ -202,9 +214,9 @@ impl PulseApp {
                     self.gizmo_drag = Some(GizmoDrag {
                         layer: idx,
                         handle,
-                        time: self.time,
-                        start_tf: self.comp.layers[idx].transform(self.time),
-                        parent: gizmo::parent_matrix(&self.comp, idx, self.time),
+                        time: t,
+                        start_tf: self.comp.layers[idx].transform(t),
+                        parent: gizmo::parent_matrix(&self.comp, idx, t),
                         start_comp: pc,
                     });
                 }
@@ -245,7 +257,7 @@ impl PulseApp {
 
         // Re-derive the geometry after any edit so the painted gizmo tracks the
         // layer this frame (the transform may have just changed).
-        let painted = GizmoGeom::build(&self.comp, idx, self.time).unwrap_or(geom);
+        let painted = GizmoGeom::build(&self.comp, idx, t).unwrap_or(geom);
         preview::paint_gizmo(painter, &painted, center, scale, hot);
 
         // A resize-style cursor hint over an active handle.

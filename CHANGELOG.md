@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Overlays led the pixels during playback** — after moving the preview render
+  off the UI thread, the displayed frame lags the live playhead (drop-frame), but
+  the editor overlays (selection box, motion path, mask outlines, transform
+  gizmo) were still drawn at the *live* time, so the outlines floated **ahead of**
+  the shapes while playing. `PreviewRenderer` now reports the time the shown frame
+  was rendered for (`shown_time`), and the overlays / onion-skin ghosts / gizmo
+  are drawn at that time, so they stay locked to the pixels on screen.
+
 - **Built-in font drew "U" as "V"** — the stroke-font `U` glyph converged both
   sides to a single centre-bottom point, giving a pointed bottom that read as a
   `V` (so "PULSE" rendered "PVLSE"). The glyph now has a **flat bottom** (the
