@@ -5,11 +5,15 @@
 //! effects, masks, mattes, motion blur, time-remap, and expressions all show
 //! **real composited pixels** (the same result an export produces).
 //!
-//! The render is **cached**: a fingerprint of `(time, comp state, target size)`
-//! gates re-rendering, so a static frame is rendered once and only re-rendered
-//! when the playhead moves, the comp/layers change, or the viewport resizes. A
-//! **persistent** [`FrameCache`](crate::comp::FrameCache) is threaded through the
-//! preview renders so footage isn't re-decoded every frame.
+//! The preview is a **RAM-preview cache**: each comp frame is rendered (off the
+//! UI thread, through the real offline compositor at a capped resolution) *once*
+//! and the resulting pixels are cached by frame index, so loop playback runs in
+//! real time straight from RAM after the first pass. A **pool** of worker threads
+//! fills the cache in parallel (frame-level [`rayon`](https://docs.rs/rayon)-style
+//! fan-out, hand-rolled) so the first fill is roughly N× faster than serial. The
+//! cache is invalidated (and re-filled) whenever the comp/layers change or the
+//! preview resolution changes; a byte budget bounds its memory (frames farthest
+//! from the playhead are evicted first).
 //!
 //! Interactive **overlays** (selection box, mask handles, null pivots, the
 //! transform gizmo, onion-skin ghosts) are drawn on top via egui's [`Painter`],
@@ -23,89 +27,132 @@ use crate::onion::{Ghost, OnionSkin};
 use crate::render::Frame;
 use crate::theme;
 use egui::{Color32, ColorImage, Painter, Pos2, Rect, Stroke, TextureHandle, Vec2};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crate::comp::Affine2;
 
 /// The capped long-edge resolution (px) of the interactive render preview. Large
 /// comps render downscaled to this so scrubbing stays responsive; the cache then
-/// avoids re-rendering an unchanged frame.
+/// holds each rendered frame for real-time loop playback.
 const PREVIEW_CAP: u32 = 1280;
 
-/// Drives the interactive preview by rendering the comp **off the UI thread**.
+/// Memory budget for the RAM-preview frame cache (bytes). When exceeded, cached
+/// frames **farthest from the playhead** are evicted first, so the region around
+/// the current time stays resident. ~1 GiB ≈ 290 frames at 1280×720 RGBA (i.e. a
+/// typical short comp fits whole, so its loop plays back in real time; only long
+/// comps evict and keep a window around the playhead cached).
+const CACHE_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// How many *additional* (look-ahead) frames to enqueue for rendering per UI
+/// frame while the cache is filling. Bounds per-call work; repeated repaints fan
+/// the whole work area out to the worker pool over a handful of frames.
+const PREFETCH_PER_CALL: usize = 8;
+
+/// Drives the interactive preview as a **RAM-preview cache** rendered by a pool
+/// of background worker threads.
 ///
-/// The expensive part — compositing the comp through the real offline renderer at
-/// a capped resolution — runs on a background [`worker_loop`] thread that owns a
-/// persistent [`FrameCache`](crate::comp::FrameCache). The UI thread only ever
-/// *uploads* the latest finished frame and *requests* a new render when the shown
-/// frame is stale; it never composites, so playback and scrubbing never block
-/// input. When renders can't keep up with playback the worker **coalesces** its
-/// queue to the most recent request (drop-frame), so the preview shows the newest
-/// frame it can produce instead of building an unbounded backlog.
+/// Each comp frame is composited (off the UI thread, at [`PREVIEW_CAP`]) exactly
+/// once and its pixels are cached by frame index ([`frames`](Self::frames)); a
+/// single reusable [`TextureHandle`] is re-pointed at whichever cached frame the
+/// playhead is on. The worker [pool](Self::job_tx) fills the cache in parallel,
+/// so loop playback runs in real time straight from RAM after the first pass. A
+/// [`sig`](Self::sig) (comp-state hash + render size) gates the whole cache: any
+/// edit or resize bumps the [`epoch`](Self::epoch), clears the cache, and lets
+/// the pool re-fill — in-flight jobs tagged with the old epoch are skipped, so a
+/// rapid scrub/edit never wastes full renders on superseded frames.
 #[derive(Default)]
 pub struct PreviewRenderer {
-    /// The uploaded preview texture (the last finished comp render — capped-res,
-    /// sRGB pixels).
+    /// The single reusable preview texture, re-pointed at the displayed frame.
     tex: Option<TextureHandle>,
-    /// The [`PreviewKey`] of the frame currently uploaded to [`tex`](Self::tex).
-    shown_key: Option<PreviewKey>,
-    /// The playhead time the currently shown frame was rendered for. Overlays
-    /// align to *this* (not the live playhead) so they don't lead the pixels when
-    /// the off-thread render lags during playback.
+    /// The frame index currently uploaded to [`tex`](Self::tex) (so an unchanged
+    /// display frame isn't re-uploaded).
+    shown_idx: Option<i64>,
+    /// The playhead time of the frame currently displayed. Overlays align to
+    /// *this* (not the live playhead) so they don't lead the pixels when the shown
+    /// frame is a not-yet-rendered frame's nearest cached neighbour.
     shown_time: Option<f32>,
-    /// The most recent key handed to the worker, so the same frame isn't queued
-    /// twice while it's still rendering (avoids flooding the request channel).
-    last_sent: Option<PreviewKey>,
-    /// Request channel to the background render worker (spawned on first use).
-    req_tx: Option<Sender<RenderRequest>>,
-    /// Result channel from the worker (finished, key-tagged frames).
-    res_rx: Option<Receiver<RenderResult>>,
-    /// The worker thread handle, kept alive for the app's lifetime. Dropping the
-    /// renderer closes [`req_tx`](Self::req_tx), which ends the worker loop.
-    #[allow(dead_code)]
-    worker: Option<JoinHandle<()>>,
-}
-
-/// A render job handed to the background worker: the project comps to render,
-/// which comp + time to render, the preview resolution cap, and the
-/// [`PreviewKey`] the result is tagged with (so the UI knows which frame returned).
-struct RenderRequest {
-    comps: Vec<Comp>,
+    /// The RAM frame cache: frame index → rendered (capped-res, sRGB) pixels.
+    frames: HashMap<i64, Frame>,
+    /// Total bytes held in [`frames`](Self::frames) (for budget eviction).
+    bytes: u64,
+    /// The signature `(comp-state hash, render dims)` the cache is valid for. A
+    /// mismatch invalidates the whole cache.
+    sig: Option<(u64, (u32, u32))>,
+    /// Monotonic cache generation; bumped on every invalidation and mirrored into
+    /// [`epoch_shared`](Self::epoch_shared) so workers can skip stale jobs.
+    epoch: u64,
+    /// The shared, worker-visible copy of [`epoch`](Self::epoch): a worker drops a
+    /// job whose epoch no longer matches (superseded by an edit/resize).
+    epoch_shared: Option<Arc<AtomicU64>>,
+    /// Frame indices already handed to the pool for the current epoch (so the same
+    /// frame isn't enqueued twice while it renders).
+    queued: HashSet<i64>,
+    /// The comps the current cache renders from, shared cheaply into each job.
+    comps_arc: Option<Arc<Vec<Comp>>>,
+    /// The active comp id, render dims, fps, and work-area frame count for the
+    /// current [`sig`](Self::sig).
     id: u64,
-    t: f32,
-    cap: u32,
-    key: PreviewKey,
+    dims: (u32, u32),
+    fps: f32,
+    n_frames: i64,
+    /// Round-robin cursor for distributing jobs across the worker pool.
+    rr: usize,
+    /// Per-worker job channels (the pool); a job is sent to `job_tx[rr % len]`.
+    job_tx: Vec<Sender<RenderJob>>,
+    /// Shared result channel the whole pool sends finished frames back on.
+    res_rx: Option<Receiver<RenderDone>>,
+    /// Worker thread handles, kept alive for the app's lifetime. Dropping the
+    /// renderer closes the job channels, which ends each worker loop.
+    #[allow(dead_code)]
+    workers: Vec<JoinHandle<()>>,
 }
 
-/// A finished render from the worker: the tagged [`PreviewKey`], the playhead
-/// time it was rendered for (echoed back so overlays can align to the shown
-/// frame), plus the rendered (capped-resolution sRGB) [`Frame`].
-struct RenderResult {
-    key: PreviewKey,
+/// A render job for the pool: the cache generation it belongs to, the frame index
+/// + time to render, the comp id + resolution cap, and the shared comps.
+struct RenderJob {
+    epoch: u64,
+    idx: i64,
     t: f32,
+    id: u64,
+    cap: u32,
+    comps: Arc<Vec<Comp>>,
+}
+
+/// A finished frame from a worker: its cache generation, frame index, and the
+/// rendered (capped-resolution sRGB) [`Frame`].
+struct RenderDone {
+    epoch: u64,
+    idx: i64,
     frame: Frame,
 }
 
-/// The background preview-render loop. Owns a persistent [`FrameCache`] (so a
-/// footage source decodes once and is reused across renders) and composites
-/// requests off the UI thread. Before each render it **coalesces** any queued
-/// requests down to the most recent (dropping stale frames), so a slow render
-/// never builds an unbounded backlog. Exits when the request channel closes (the
-/// owning [`PreviewRenderer`] is dropped).
-fn worker_loop(req_rx: Receiver<RenderRequest>, res_tx: Sender<RenderResult>) {
+/// A pool worker loop. Owns a persistent [`FrameCache`] (so a footage source
+/// decodes once and is reused across frames it renders) and composites jobs off
+/// the UI thread. A job whose `epoch` no longer matches the shared `epoch` — i.e.
+/// the comp/resolution changed after the job was queued — is **skipped** (before
+/// and after rendering), so superseded work is never produced or sent. Exits when
+/// its job channel closes (the owning [`PreviewRenderer`] is dropped).
+fn worker_loop(job_rx: Receiver<RenderJob>, res_tx: Sender<RenderDone>, epoch: Arc<AtomicU64>) {
     let mut cache = crate::comp::FrameCache::new();
-    while let Ok(mut req) = req_rx.recv() {
-        // Coalesce: skip ahead to the newest pending request (drop stale frames).
-        while let Ok(newer) = req_rx.try_recv() {
-            req = newer;
+    while let Ok(job) = job_rx.recv() {
+        // Superseded before we even start — skip without rendering.
+        if job.epoch != epoch.load(Ordering::Relaxed) {
+            continue;
         }
         let frame =
-            crate::render::render_preview_frame(&req.comps, req.id, req.t, req.cap, &mut cache);
+            crate::render::render_preview_frame(&job.comps, job.id, job.t, job.cap, &mut cache);
+        // Superseded while rendering — drop the now-stale frame.
+        if job.epoch != epoch.load(Ordering::Relaxed) {
+            continue;
+        }
         if res_tx
-            .send(RenderResult {
-                key: req.key,
-                t: req.t,
+            .send(RenderDone {
+                epoch: job.epoch,
+                idx: job.idx,
                 frame,
             })
             .is_err()
@@ -115,149 +162,267 @@ fn worker_loop(req_rx: Receiver<RenderRequest>, res_tx: Sender<RenderResult>) {
     }
 }
 
-/// A cache key fingerprinting everything the rendered preview frame depends on:
-/// the playhead time (quantized to avoid float-noise churn), the target render
-/// dimensions, and a hash of the project comp state at that time.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PreviewKey {
-    /// Playhead time quantized to milliticks (1e-4 s) so equal times compare
-    /// equal across frames but a real scrub/playback step changes the key.
-    time_q: i64,
-    /// Target render width/height (px) — a viewport resize re-renders.
-    dims: (u32, u32),
-    /// Hash of the serialized project comps (id, size, layers, keyframes, …); any
-    /// edit to the comp / its layers changes it, a no-op leaves it stable.
-    state: u64,
+/// Hash the project comp state (comp id + serialized comps) into the cache
+/// signature's state component. Serializing to JSON and hashing the bytes is
+/// robust to any field change without hand-maintaining a hasher; a serialization
+/// failure (never expected for these plain structs) degrades to hashing nothing.
+fn state_hash(comps: &[Comp], id: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    if let Ok(json) = serde_json::to_vec(comps) {
+        json.hash(&mut h);
+    }
+    h.finish()
 }
 
-impl PreviewKey {
-    /// Build the fingerprint for rendering comp `id` of `comps` at time `t` into a
-    /// `dims`-sized target. The state hash serializes the comps to JSON and hashes
-    /// the bytes — robust to any field change without hand-maintaining a hasher.
-    pub fn new(comps: &[Comp], id: u64, t: f32, dims: (u32, u32)) -> Self {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        id.hash(&mut h);
-        // Serialize the comps; serialization failure (never expected for these
-        // plain structs) degrades to hashing nothing — still a valid, stable key.
-        if let Ok(json) = serde_json::to_vec(comps) {
-            json.hash(&mut h);
-        }
-        Self {
-            time_q: (t as f64 * 10_000.0).round() as i64,
-            dims,
-            state: h.finish(),
-        }
-    }
+/// The work-area frame count for a comp of `duration` seconds at `fps` (at least
+/// one frame). Frame `i` is presented at `i / fps` seconds.
+fn frame_count(duration: f32, fps: f32) -> i64 {
+    ((duration.max(0.0) * fps.max(1.0)).ceil() as i64).max(1)
 }
 
 impl PreviewRenderer {
-    /// Spawn the background render worker on first use (idempotent). The worker
-    /// owns the persistent [`FrameCache`](crate::comp::FrameCache) and renders
-    /// off the UI thread.
-    fn ensure_worker(&mut self) {
-        if self.req_tx.is_some() {
+    /// Spawn the worker pool on first use (idempotent). One worker per available
+    /// core minus two (clamped to 1..=8), each with its own job channel + footage
+    /// [`FrameCache`](crate::comp::FrameCache), all sharing one result channel and
+    /// the [`epoch_shared`](Self::epoch_shared) generation counter.
+    fn ensure_workers(&mut self) {
+        if !self.job_tx.is_empty() {
             return;
         }
-        let (req_tx, req_rx) = std::sync::mpsc::channel::<RenderRequest>();
-        let (res_tx, res_rx) = std::sync::mpsc::channel::<RenderResult>();
-        let worker = std::thread::Builder::new()
-            .name("pulse-preview".into())
-            .spawn(move || worker_loop(req_rx, res_tx))
-            .ok();
-        self.req_tx = Some(req_tx);
+        let n = std::thread::available_parallelism()
+            .map(|c| c.get().saturating_sub(2))
+            .unwrap_or(2)
+            .clamp(1, 8);
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<RenderDone>();
+        let epoch = Arc::new(AtomicU64::new(self.epoch));
+        for _ in 0..n {
+            let (job_tx, job_rx) = std::sync::mpsc::channel::<RenderJob>();
+            let res_tx = res_tx.clone();
+            let ep = epoch.clone();
+            if let Ok(h) = std::thread::Builder::new()
+                .name("pulse-preview".into())
+                .spawn(move || worker_loop(job_rx, res_tx, ep))
+            {
+                self.job_tx.push(job_tx);
+                self.workers.push(h);
+            }
+        }
         self.res_rx = Some(res_rx);
-        self.worker = worker;
+        self.epoch_shared = Some(epoch);
+        // The original `res_tx` drops here; the per-worker clones keep `res_rx`
+        // open for as long as any worker lives.
     }
 
-    /// Return the latest rendered preview texture for comp `id` of `comps` at time
-    /// `t`, rendering **off the UI thread**.
+    /// Return the preview texture for comp `id` of `comps` at time `t`, served
+    /// from the **RAM-preview cache**.
     ///
-    /// Finished frames from the worker are picked up and uploaded here; a fresh
-    /// render is requested (at most once per distinct frame) whenever the displayed
-    /// frame is stale. The render size is the comp's aspect capped to
-    /// [`PREVIEW_CAP`] px on the long edge, so a viewport resize only changes how
-    /// the texture is *drawn*, not what is rendered. Because the UI thread never
-    /// composites, playback and interaction stay responsive even when a frame is
-    /// expensive — the preview simply drops frames it can't keep up with (the
-    /// worker coalesces a backlog to its most recent request).
-    ///
-    /// `comps` is taken by value: it is moved into the render request when one is
-    /// issued (no extra clone), and dropped otherwise.
+    /// The comp's frames are rendered once each by the worker pool (off the UI
+    /// thread) and cached by frame index; this re-points the single preview
+    /// texture at the cached frame for `t` (or, while that frame is still
+    /// rendering, its nearest cached neighbour). Any edit/resize invalidates the
+    /// cache (a new epoch) so it re-fills. The UI thread never composites, so the
+    /// app stays responsive; once the work area is cached, loop playback is
+    /// real-time from RAM (see [`is_frame_ready`](Self::is_frame_ready) /
+    /// [`fully_cached`](Self::fully_cached), which gate the playback pacing).
     pub fn texture(
         &mut self,
         ctx: &egui::Context,
         comps: Vec<Comp>,
         id: u64,
         t: f32,
+        fps: f32,
+        duration: f32,
     ) -> Option<TextureHandle> {
-        self.ensure_worker();
+        self.ensure_workers();
 
-        // 1. Drain finished renders and upload the newest (older ones are stale).
-        let mut newest: Option<RenderResult> = None;
-        if let Some(rx) = &self.res_rx {
-            while let Ok(r) = rx.try_recv() {
-                newest = Some(r);
-            }
-        }
-        if let Some(r) = newest {
-            let image = ColorImage::from_rgba_unmultiplied(
-                [r.frame.width as usize, r.frame.height as usize],
-                &r.frame.pixels,
-            );
-            match &mut self.tex {
-                // Re-use the existing GPU texture slot, just swap its pixels.
-                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                None => {
-                    self.tex =
-                        Some(ctx.load_texture("pulse_preview", image, egui::TextureOptions::LINEAR));
-                }
-            }
-            self.shown_key = Some(r.key);
-            self.shown_time = Some(r.t);
-        }
-
-        // 2. Request a render when the displayed frame is stale and this exact
-        //    frame isn't already queued (avoid flooding the worker's channel).
+        // Cache signature: comp-state hash + render dims. A change invalidates the
+        // whole cache and bumps the epoch (so in-flight stale jobs are skipped).
         let dims = comps
             .iter()
             .find(|c| c.id == id)
             .map(|c| crate::render::preview_dims(c.width, c.height, PREVIEW_CAP))
             .unwrap_or((1, 1));
-        let desired = PreviewKey::new(&comps, id, t, dims);
-        let up_to_date = self.shown_key == Some(desired);
-        let already_queued = self.last_sent == Some(desired);
-        if !up_to_date && !already_queued {
-            if let Some(tx) = &self.req_tx {
-                let req = RenderRequest {
-                    comps,
-                    id,
-                    t,
-                    cap: PREVIEW_CAP,
-                    key: desired,
-                };
-                if tx.send(req).is_ok() {
-                    self.last_sent = Some(desired);
+        let sig = (state_hash(&comps, id), dims);
+        if self.sig != Some(sig) {
+            self.sig = Some(sig);
+            self.epoch += 1;
+            if let Some(ep) = &self.epoch_shared {
+                ep.store(self.epoch, Ordering::Relaxed);
+            }
+            self.frames.clear();
+            self.queued.clear();
+            self.bytes = 0;
+            self.shown_idx = None;
+            self.id = id;
+            self.dims = dims;
+            self.fps = fps.max(1.0);
+            self.n_frames = frame_count(duration, fps);
+            self.comps_arc = Some(Arc::new(comps));
+        }
+        // (When `sig` is unchanged the freshly-cloned `comps` is dropped here — the
+        // cache already renders from the identical comps in `comps_arc`.)
+
+        // Drain finished frames for the current epoch into the cache.
+        let cur_epoch = self.epoch;
+        let mut done: Vec<RenderDone> = Vec::new();
+        if let Some(rx) = &self.res_rx {
+            while let Ok(d) = rx.try_recv() {
+                if d.epoch == cur_epoch {
+                    done.push(d);
+                }
+            }
+        }
+        for d in done {
+            self.insert_frame(d.idx, d.frame);
+        }
+
+        // The frame the playhead is on, and the work-area enqueue plan.
+        let cur = ((t * self.fps).round() as i64).clamp(0, (self.n_frames - 1).max(0));
+        self.enqueue(cur);
+        // Fan the rest of the work area out to the pool, look-ahead first, a
+        // bounded batch per call (repeated repaints fill the whole comp).
+        let mut sent = 0;
+        let mut i = cur;
+        let mut scanned = 0;
+        while sent < PREFETCH_PER_CALL && scanned < self.n_frames {
+            i += 1;
+            if i >= self.n_frames {
+                i = 0;
+            }
+            scanned += 1;
+            if self.enqueue(i) {
+                sent += 1;
+            }
+        }
+        self.evict_to_budget(cur);
+
+        // Display the current frame, or its nearest cached neighbour while it
+        // renders, re-pointing the texture only when the displayed frame changes.
+        let display_idx = if self.frames.contains_key(&cur) {
+            Some(cur)
+        } else {
+            self.frames.keys().min_by_key(|&&k| (k - cur).abs()).copied()
+        };
+        if let Some(di) = display_idx {
+            if self.shown_idx != Some(di) {
+                if let Some(frame) = self.frames.get(&di) {
+                    let image = ColorImage::from_rgba_unmultiplied(
+                        [frame.width as usize, frame.height as usize],
+                        &frame.pixels,
+                    );
+                    match &mut self.tex {
+                        Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.tex = Some(ctx.load_texture(
+                                "pulse_preview",
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                    }
+                    self.shown_idx = Some(di);
+                    self.shown_time = Some(di as f32 / self.fps);
                 }
             }
         }
 
-        // 3. Keep repainting until the shown frame matches the request, so the
-        //    finished render is picked up promptly (playback already repaints).
-        if !up_to_date {
+        // Keep repainting while the cache is still filling so finished frames get
+        // picked up (playback also repaints).
+        if !self.fully_cached() {
             ctx.request_repaint();
         }
 
         self.tex.clone()
     }
 
-    /// The playhead time the currently displayed preview frame was rendered for.
-    ///
-    /// Because the render runs off the UI thread, during playback the shown frame
-    /// **lags** the live playhead. Editor overlays (selection box, motion path,
-    /// mask outlines, the transform gizmo) must be drawn at *this* time so they
-    /// land on the pixels actually on screen rather than leading them. `None`
-    /// until the first frame is uploaded (the caller falls back to the live time).
+    /// Insert a freshly-rendered frame into the cache, updating the byte tally and
+    /// clearing its queued mark.
+    fn insert_frame(&mut self, idx: i64, frame: Frame) {
+        self.queued.remove(&idx);
+        let bytes = frame.pixels.len() as u64;
+        if let Some(old) = self.frames.insert(idx, frame) {
+            self.bytes = self.bytes.saturating_sub(old.pixels.len() as u64);
+        }
+        self.bytes += bytes;
+    }
+
+    /// Enqueue frame `idx` for rendering if it isn't already cached or in flight.
+    /// Returns whether a job was sent. Jobs round-robin across the worker pool.
+    fn enqueue(&mut self, idx: i64) -> bool {
+        if idx < 0 || idx >= self.n_frames {
+            return false;
+        }
+        if self.frames.contains_key(&idx) || self.queued.contains(&idx) {
+            return false;
+        }
+        let Some(comps) = &self.comps_arc else {
+            return false;
+        };
+        if self.job_tx.is_empty() {
+            return false;
+        }
+        let job = RenderJob {
+            epoch: self.epoch,
+            idx,
+            t: idx as f32 / self.fps,
+            id: self.id,
+            cap: PREVIEW_CAP,
+            comps: comps.clone(),
+        };
+        let w = self.rr % self.job_tx.len();
+        self.rr = self.rr.wrapping_add(1);
+        if self.job_tx[w].send(job).is_ok() {
+            self.queued.insert(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Evict cached frames **farthest from `cur`** until the cache is within
+    /// [`CACHE_BUDGET_BYTES`] (never evicting `cur` itself). For a work area that
+    /// fits the budget this is a no-op; a longer comp keeps the region around the
+    /// playhead resident.
+    fn evict_to_budget(&mut self, cur: i64) {
+        while self.bytes > CACHE_BUDGET_BYTES {
+            let Some(&far) = self
+                .frames
+                .keys()
+                .filter(|&&k| k != cur)
+                .max_by_key(|&&k| (k - cur).abs())
+            else {
+                break;
+            };
+            if let Some(f) = self.frames.remove(&far) {
+                self.bytes = self.bytes.saturating_sub(f.pixels.len() as u64);
+            }
+        }
+    }
+
+    /// Whether the frame for time `t` is already rendered and resident — the
+    /// signal the render-paced first pass advances on (step only once the current
+    /// frame is shown).
+    pub fn is_frame_ready(&self, t: f32) -> bool {
+        if self.n_frames <= 0 {
+            return false;
+        }
+        let cur = ((t * self.fps).round() as i64).clamp(0, (self.n_frames - 1).max(0));
+        self.frames.contains_key(&cur)
+    }
+
+    /// Whether the entire work area is cached — once true, loop playback can run
+    /// in real time straight from RAM.
+    pub fn fully_cached(&self) -> bool {
+        self.n_frames > 0 && (self.frames.len() as i64) >= self.n_frames
+    }
+
+    /// The playhead time of the frame currently displayed. Overlays / the timeline
+    /// align to *this* so they track the pixels on screen rather than leading them
+    /// (the displayed frame can be the nearest cached neighbour while the exact
+    /// frame still renders). `None` until the first frame is uploaded (callers fall
+    /// back to the live time).
     pub fn shown_time(&self) -> Option<f32> {
         self.shown_time
     }
@@ -606,62 +771,56 @@ mod tests {
         c
     }
 
-    // --- Preview cache key fingerprint -------------------------------------
+    // --- cache signature (state hash) + work-area frame count -------------
 
     #[test]
-    fn preview_key_stable_when_nothing_changes() {
+    fn state_hash_stable_when_nothing_changes() {
         let comps = vec![comp_of(1, 640, 360, vec![])];
-        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
-        let b = PreviewKey::new(&comps, 1, 1.0, (640, 360));
-        assert_eq!(a, b, "same time + state + dims must produce the same key");
+        assert_eq!(
+            state_hash(&comps, 1),
+            state_hash(&comps, 1),
+            "identical comps must hash equal (the cache stays valid)"
+        );
     }
 
     #[test]
-    fn preview_key_changes_with_time() {
-        let comps = vec![comp_of(1, 640, 360, vec![])];
-        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
-        let b = PreviewKey::new(&comps, 1, 1.5, (640, 360));
-        assert_ne!(a, b, "advancing the playhead must invalidate the cache");
-    }
-
-    #[test]
-    fn preview_key_quantizes_time_noise() {
-        // Sub-quantum jitter (< 1e-4 s) collapses to the same key, so float noise
-        // doesn't churn the cache while parked on a frame.
-        let comps = vec![comp_of(1, 640, 360, vec![])];
-        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
-        let b = PreviewKey::new(&comps, 1, 1.0 + 1e-6, (640, 360));
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn preview_key_changes_with_comp_state_edit() {
+    fn state_hash_changes_with_comp_state_edit() {
         let base = vec![comp_of(1, 640, 360, vec![])];
-        let a = PreviewKey::new(&base, 1, 1.0, (640, 360));
+        let a = state_hash(&base, 1);
 
-        // Add a layer — the serialized state, hence the key, must change.
+        // Add a layer — the serialized state, hence the hash, must change.
         let edited = vec![comp_of(
             1,
             640,
             360,
             vec![PulseLayer::new("Solid", [0.5, 0.5, 0.5, 1.0])],
         )];
-        let b = PreviewKey::new(&edited, 1, 1.0, (640, 360));
+        let b = state_hash(&edited, 1);
         assert_ne!(a, b, "a layer edit must invalidate the cache");
 
         // Move a keyframe on that layer — also a state change.
         let mut moved = edited.clone();
         moved[0].layers[0].x.set_key(0.0, 123.0);
-        let c = PreviewKey::new(&moved, 1, 1.0, (640, 360));
+        let c = state_hash(&moved, 1);
         assert_ne!(b, c, "a keyframe edit must invalidate the cache");
     }
 
     #[test]
-    fn preview_key_changes_with_target_size() {
+    fn state_hash_independent_of_time() {
+        // The cache signature has no time component (frames are keyed by index),
+        // so the same comps hash the same regardless of playhead — only edits /
+        // resize (a separate dims component) invalidate the cache.
         let comps = vec![comp_of(1, 640, 360, vec![])];
-        let a = PreviewKey::new(&comps, 1, 1.0, (640, 360));
-        let b = PreviewKey::new(&comps, 1, 1.0, (320, 180));
-        assert_ne!(a, b, "a viewport/resolution change must re-render");
+        assert_eq!(state_hash(&comps, 1), state_hash(&comps, 1));
+    }
+
+    #[test]
+    fn frame_count_covers_the_work_area() {
+        // 5 s @ 30 fps → 150 frames (indices 0..=149); always at least one frame.
+        assert_eq!(frame_count(5.0, 30.0), 150);
+        assert_eq!(frame_count(1.0, 24.0), 24);
+        assert_eq!(frame_count(0.0, 30.0), 1, "a degenerate comp still has one frame");
+        assert_eq!(frame_count(2.0, 0.0), 2, "fps floors at 1 so the count is finite");
     }
 
     // --- comp-space <-> display-rect mapping round-trip --------------------
@@ -718,39 +877,85 @@ mod tests {
         assert_eq!((w, h), (720, 1280));
     }
 
-    // --- off-thread render worker -----------------------------------------
+    // --- pool worker render + stale-epoch skip ----------------------------
 
     #[test]
-    fn worker_renders_and_returns_tagged_frame() {
-        // The background worker composites a request off the UI thread and sends
-        // back a frame tagged with the request's key — the property the preview
-        // relies on to match a finished render to the frame it asked for.
-        let comps = vec![comp_of(
+    fn worker_renders_job_and_skips_stale_epoch() {
+        // A pool worker renders a job tagged with the current epoch and returns it
+        // by frame index; a job whose epoch was superseded (an edit/resize bumped
+        // the shared epoch) is skipped without producing a frame — so the first
+        // result the UI sees is the *current*-epoch job, not the stale one.
+        let comps = Arc::new(vec![comp_of(
             1,
             64,
             36,
             vec![PulseLayer::new("Solid", [1.0, 0.0, 0.0, 1.0])],
-        )];
-        let key = PreviewKey::new(&comps, 1, 0.0, (64, 36));
-        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        )]);
+        let (job_tx, job_rx) = std::sync::mpsc::channel();
         let (res_tx, res_rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || worker_loop(req_rx, res_tx));
-        req_tx
-            .send(RenderRequest {
-                comps,
-                id: 1,
+        let epoch = Arc::new(AtomicU64::new(5));
+        let handle = {
+            let ep = epoch.clone();
+            std::thread::spawn(move || worker_loop(job_rx, res_tx, ep))
+        };
+        // Stale job (epoch 1) — must be skipped.
+        job_tx
+            .send(RenderJob {
+                epoch: 1,
+                idx: 0,
                 t: 0.0,
+                id: 1,
                 cap: 1280,
-                key,
+                comps: comps.clone(),
             })
             .unwrap();
-        let result = res_rx.recv().expect("worker returns a rendered frame");
-        assert_eq!(result.key, key, "the worker tags the frame with the request key");
-        assert_eq!(result.t, 0.0, "the worker echoes the request's playhead time");
-        assert!(result.frame.width >= 1 && result.frame.height >= 1);
-        // Closing the request channel ends the worker loop cleanly.
-        drop(req_tx);
-        handle.join().expect("worker thread exits when its channel closes");
+        // Current job (epoch 5) — renders and returns.
+        job_tx
+            .send(RenderJob {
+                epoch: 5,
+                idx: 7,
+                t: 0.0,
+                id: 1,
+                cap: 1280,
+                comps: comps.clone(),
+            })
+            .unwrap();
+        let done = res_rx.recv().expect("the current-epoch job returns a frame");
+        assert_eq!(done.epoch, 5);
+        assert_eq!(done.idx, 7, "the stale (epoch-1) job was skipped, not returned");
+        assert!(done.frame.width >= 1 && done.frame.height >= 1);
+        drop(job_tx);
+        handle.join().expect("worker exits when its channel closes");
+    }
+
+    #[test]
+    fn cache_readiness_and_full_predicate() {
+        // The pacing gates (is_frame_ready / fully_cached) read straight off the
+        // RAM cache: not ready / not full until every work-area frame is resident.
+        let mut p = PreviewRenderer::default();
+        p.fps = 30.0;
+        p.n_frames = 3; // frames 0, 1, 2
+        assert!(!p.fully_cached());
+        assert!(!p.is_frame_ready(0.0));
+
+        for idx in 0..3 {
+            p.insert_frame(
+                idx,
+                Frame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0u8; 16],
+                },
+            );
+        }
+        assert!(p.fully_cached(), "every work-area frame is cached");
+        assert!(p.is_frame_ready(0.0)); // frame 0
+        assert!(p.is_frame_ready(2.0 / 30.0)); // frame 2
+        assert!(
+            p.is_frame_ready(10.0),
+            "a time past the work area clamps to the cached last frame"
+        );
+        assert_eq!(p.bytes, 16 * 3, "byte tally tracks the cached frames");
     }
 
     // --- persistent FrameCache reuse (no re-decode for the same frame) -----

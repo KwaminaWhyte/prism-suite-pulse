@@ -10,16 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Playback is now render-paced (timeline no longer races the preview)** — with
-  the off-thread render, advancing the playhead by wall-clock time let the
-  timeline playhead run ahead at real time (30 fps) while the slower CPU render
-  lagged behind and dropped frames, so the bar moved "way ahead" of a janky
-  preview. The playhead now advances to the next comp frame **only once the
-  preview has shown the current one** (`step_playhead`, gated on
-  `PreviewRenderer::shown_time`): the timeline and the picture stay locked
-  together and every frame is shown in order (smooth, none dropped). The UI stays
-  responsive throughout — the render never blocks it — so heavy comps simply play
-  back slower than real time instead of desyncing.
+- **Playback no longer races the preview (real-time, cache-gated)** — advancing
+  the playhead by wall-clock time while the slower CPU render lagged behind made
+  the timeline bar run "way ahead" of a janky preview that dropped frames.
+  Playback now advances at **real time but gated by the RAM-preview cache** (see
+  *Added*): the playhead steps by the frame's `dt` only when the target frame is
+  already cached (or the whole work area is), otherwise it **holds** on the
+  current frame until that frame renders. So the playhead never outruns the cache
+  (no racing ahead), and once the comp is fully cached the loop plays back in real
+  time straight from RAM. The UI stays responsive throughout — the render is off
+  the UI thread.
 
 - **Overlays led the pixels during playback** — after moving the preview render
   off the UI thread, the displayed frame lags the live playhead (drop-frame), but
@@ -39,16 +39,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole app laggy: the preview composited the comp on the **UI thread** every
   repaint (a ~1 MP CPU render per frame), and playback's per-frame repaint ran it
   continuously, so input couldn't be serviced and the lag compounded the longer
-  playback ran. The preview render now runs on a **background worker thread**
-  (`preview::worker_loop`) that owns the persistent `FrameCache`; the UI thread
-  only uploads the latest finished frame and requests a render when the shown
-  frame is stale. When renders can't keep up with real-time playback the worker
-  **coalesces** its queue to the most recent request (drop-frame), so the preview
-  shows the newest frame it can produce while the UI stays fully responsive —
-  standard non-realtime-preview behaviour. `PreviewRenderer::texture` now takes
-  the comps by value (moved into the render request — no extra clone).
+  playback ran. Compositing now happens entirely on a **background worker pool**
+  (see *RAM-preview cache* in *Added*); the UI thread never composites, so it
+  stays fully responsive regardless of how heavy a frame is.
 
 ### Added
+
+- **RAM-preview cache + parallel render pool** (After Effects' *RAM Preview* /
+  green cache bar; PLAN Phase 6 *Caching* + *Multi-frame rendering*) — the preview
+  is now a **frame cache**: each comp frame is rendered through the offline
+  compositor **once**, its pixels stored by frame index, so **loop playback runs
+  in real time straight from RAM** after the first pass (no re-compositing). This
+  is the fix for "playback takes ~1 s per frame" — the cost is paid once per frame
+  and then reused every loop.
+  - **Parallel fill** (`preview.rs`, `worker_loop` pool) — a pool of worker
+    threads (one per core minus two, clamped 1–8), each with its own footage
+    `FrameCache`, fills the cache concurrently, so the first pass is ~N× faster
+    than serial. Jobs round-robin across the pool and are tagged with a cache
+    **epoch**; a worker **skips** any job whose epoch was superseded by an edit /
+    resize, so a rapid scrub never wastes full renders on stale frames.
+  - **Invalidation + memory budget** — a signature of `(comp-state hash, render
+    dims)` gates the whole cache; any layer/keyframe/property edit or a resolution
+    change bumps the epoch and re-fills. A **~1 GiB byte budget** bounds memory;
+    when exceeded, frames **farthest from the playhead** are evicted first, so a
+    short comp fits whole (real-time loop) while a long comp keeps a window around
+    the playhead cached. A single reusable texture is re-pointed at the displayed
+    frame (or its nearest cached neighbour while the exact frame still renders).
+  - **Tests** — pool worker renders a job and **skips a stale-epoch** job;
+    `is_frame_ready` / `fully_cached` readiness predicates over the cache; cache
+    signature stability/invalidation; work-area `frame_count`.
 
 - **Preview fidelity — render preview** (After Effects' *Composition viewer*) —
   the interactive preview now shows **real composited pixels** instead of flat
@@ -65,18 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     edge**, preserving the comp's aspect (small comps render native, never
     upscaled). `render_frame_in_project` is promoted to a normal `pub` entry (no
     longer dead-code-gated) as the shared project-aware renderer.
-  - **Caching + off-thread render** (`preview.rs`, `PreviewRenderer` +
-    `PreviewKey`) — the comp is composited on a **background worker thread**, never
-    the UI thread, so playback and scrubbing never block input (see *Fixed* below).
-    The displayed texture is gated by a **fingerprint** of `(playhead time,
-    comp/layer state, target size)`: time is quantized to 1e-4 s so float noise
-    doesn't churn it, and the comp state is hashed from its serialized JSON so
-    **any** layer/keyframe/property edit invalidates it while a static frame renders
-    once. During playback the playhead moves each frame, so the preview advances;
-    parked on a frame, it's a cache hit.
-  - **Persistent footage cache** — `PreviewRenderer` holds a persistent
-    `FrameCache` threaded into every preview render, so a still / sequence frame is
-    decoded **once** and reused across renders (scrubbing doesn't re-decode). The
+  - **Off-thread render + cache** — compositing runs off the UI thread and each
+    rendered frame is cached for reuse (superseded and expanded by the *RAM-preview
+    cache + parallel render pool* entry above — a worker **pool** filling a
+    frame-indexed RAM cache, invalidated by a `(comp-state hash, render dims)`
+    signature). Each worker keeps a persistent footage `FrameCache`, so a still /
+    sequence frame is decoded **once** and reused across the frames it renders; the
     offline-export path keeps its own per-export cache, unchanged.
   - **Overlays on top** — the transform gizmo, selection box, mask paths, null
     pivots, adjustment-layer bounds, and onion-skin ghosts are drawn over the
@@ -86,10 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     arms for footage / precomp / solid / shape / text — and their preview-only
     color/matte/motion-blur approximations — are removed (the texture now carries
     them for real).
-  - **Tests** — preview-cache fingerprint stability/invalidation (time, state,
-    size, quantization), comp-space ↔ display-rect round-trip incl. letterboxing,
-    the resolution cap, and persistent-`FrameCache` decode-once reuse across
-    preview renders.
+  - **Tests** — cache-signature (comp-state hash) stability/invalidation,
+    comp-space ↔ display-rect round-trip incl. letterboxing, the resolution cap,
+    and persistent-`FrameCache` decode-once reuse across preview renders.
 
 - **Time remapping** (After-Effects' *Enable Time Remap*, Phase 4 *Time
   remapping*) — a time-based layer (a **footage image-sequence** or a **precomp**)
