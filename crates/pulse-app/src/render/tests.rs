@@ -1,7 +1,3 @@
-// `GenerateEffect` has a single variant today, so destructuring it with `let`
-// is irrefutable; the generate tests keep that form so they stay correct when
-// more generate variants are added.
-#![allow(irrefutable_let_patterns)]
 use super::export::{frame_count, frame_path, frame_range, frame_time, range_frame_count};
 use super::*;
 use crate::comp::{
@@ -1806,9 +1802,9 @@ fn precomp_freeze_time_remap_holds_one_source_frame() {
     }
 }
 
-// --- Generate (Fractal Noise) render-path -----------------------------------
+// --- Generate render-path ---------------------------------------------------
 
-use crate::comp::{FractalType, GenerateEffect, Overflow};
+use crate::comp::{FractalType, GenerateEffect, Overflow, RampShape};
 
 /// A full-opacity default Fractal Noise that always covers (opacity 1, no clip
 /// killing the center). Scale tuned so several features fall inside the quad.
@@ -1857,8 +1853,9 @@ fn generate_render_is_deterministic() {
 fn generate_evolution_changes_the_frame() {
     // Animating evolution must change the rendered pixels (the motion knob).
     let mut evolved = fractal_fill();
-    let GenerateEffect::FractalNoise { evolution, .. } = &mut evolved;
-    *evolution = 5.0;
+    if let GenerateEffect::FractalNoise { evolution, .. } = &mut evolved {
+        *evolution = 5.0;
+    }
 
     let mut a = solid([1.0, 1.0, 1.0, 1.0]);
     a.layers[0].scale.set_key(0.0, 3.0);
@@ -1938,4 +1935,143 @@ fn generate_on_non_generate_layer_is_inert_when_none() {
     with_none.layers[0].generate = None;
     let cleared = render_frame(&with_none, 0.0);
     assert_eq!(baseline.pixels, cleared.pixels, "cleared generate is inert");
+}
+
+// --- Generate (colour generators) render-path -------------------------------
+
+/// A solid scaled 3× so its quad covers the whole 64×64 frame, with `gen` filling
+/// it. The center pixel (32,32) maps to layer-local (0,0).
+fn generated(gen: GenerateEffect) -> Comp {
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].scale.set_key(0.0, 3.0);
+    c.layers[0].generate = Some(gen);
+    c
+}
+
+#[test]
+fn ramp_render_fills_quad_with_gradient() {
+    // A vertical black→white ramp across the layer: the top of the quad is dark,
+    // the bottom bright, and the whole quad is covered.
+    let ramp = GenerateEffect::Ramp {
+        shape: RampShape::Linear,
+        start: [0.0, -40.0],
+        end: [0.0, 40.0],
+        radius: 40.0,
+        start_color: [0.0, 0.0, 0.0],
+        end_color: [1.0, 1.0, 1.0],
+        scatter: 0.0,
+        opacity: 1.0,
+    };
+    let f = render_frame(&generated(ramp), 0.0);
+    let top = f.pixel(32, 18); // near the top of the quad
+    let bot = f.pixel(32, 46); // near the bottom
+    assert!(top[3] > 0 && bot[3] > 0, "ramp covers the quad");
+    assert!(
+        bot[0] > top[0] + 20,
+        "ramp gets brighter top→bottom: top={} bot={}",
+        top[0],
+        bot[0]
+    );
+}
+
+#[test]
+fn checkerboard_render_alternates_cells() {
+    // A checkerboard whose cells are small enough that several fall inside the
+    // (scale-3, ±14 local-px) quad: adjacent cells differ. Cell size 8 local px →
+    // cell 0 spans local [0,8), cell 1 [8,16). The layer is scaled 3×, so a comp
+    // pixel maps to local = (comp - 32) / 3.
+    let checker = GenerateEffect::Checkerboard {
+        anchor: [0.0, 0.0],
+        size_w: 8.0,
+        size_h: 8.0,
+        color1: [0.0, 0.0, 0.0],
+        color2: [1.0, 1.0, 1.0],
+        opacity: 1.0,
+    };
+    let f = render_frame(&generated(checker), 0.0);
+    // comp 34 → local ~0.67 (cell 0, black); comp 60 → local ~9.3 (cell 1, white).
+    let a = f.pixel(34, 32)[0];
+    let b = f.pixel(60, 32)[0];
+    assert_ne!(a, b, "adjacent checker cells differ: {a} vs {b}");
+    assert!(a.max(b) > 200 && a.min(b) < 60, "one cell white, one black");
+}
+
+#[test]
+fn four_color_render_blends_corners() {
+    // Distinct corner colours blend across the quad; the four corners read close
+    // to their colours and the centre is a mix (not equal to any single corner).
+    let g = GenerateEffect::FourColorGradient {
+        tl: [1.0, 0.0, 0.0],
+        tr: [0.0, 1.0, 0.0],
+        bl: [0.0, 0.0, 1.0],
+        br: [1.0, 1.0, 0.0],
+        blend: 1.0,
+        jitter: 0.0,
+        opacity: 1.0,
+    };
+    let f = render_frame(&generated(g), 0.0);
+    // Quad spans ~[-42,42] local → comp ~[-10,74], clamped to the frame. Sample
+    // inside each quadrant; the dominant channel reflects that corner's colour.
+    let tl = f.pixel(20, 20); // toward top-left → red dominant
+    let tr = f.pixel(44, 20); // toward top-right → green dominant
+    assert!(tl[0] > tl[1] && tl[0] > tl[2], "top-left reds: {tl:?}");
+    assert!(tr[1] > tr[0] && tr[1] > tr[2], "top-right greens: {tr:?}");
+}
+
+#[test]
+fn grid_render_lines_over_transparent_background() {
+    // A grid with a transparent background: the line at the quad centre is opaque,
+    // a cell interior is transparent.
+    let grid = GenerateEffect::Grid {
+        anchor: [0.0, 0.0],
+        size_w: 20.0,
+        size_h: 20.0,
+        border: 4.0,
+        color: [1.0, 1.0, 1.0],
+        background: [0.0, 0.0, 0.0],
+        background_opacity: 0.0,
+        opacity: 1.0,
+    };
+    let f = render_frame(&generated(grid), 0.0);
+    // Local (0,0) (comp 32,32) sits on a grid line → opaque.
+    assert_eq!(f.pixel(32, 32)[3], 255, "grid line is opaque");
+    // Local (10,10) (comp 42,42) is a cell interior → transparent.
+    assert_eq!(f.pixel(42, 42)[3], 0, "cell interior is transparent");
+}
+
+#[test]
+fn color_generator_render_is_deterministic() {
+    // Each colour generator renders byte-identically across passes (cache / MFR).
+    for i in 1..GenerateEffect::defaults().len() {
+        let c = generated(GenerateEffect::defaults()[i]);
+        let a = render_frame(&c, 0.0);
+        let b = render_frame(&c, 0.0);
+        assert_eq!(
+            a.pixels,
+            b.pixels,
+            "{} render must be deterministic",
+            GenerateEffect::defaults()[i].label()
+        );
+    }
+}
+
+#[test]
+fn checkerboard_color_decodes_through_srgb() {
+    // A checkerboard with a known sRGB colour 1 round-trips through the
+    // sRGB→linear compositor decode and back to ~the same 8-bit value on output.
+    let checker = GenerateEffect::Checkerboard {
+        anchor: [0.0, 0.0],
+        size_w: 128.0, // one big cell over the quad → cell (0,0) = color1
+        size_h: 128.0,
+        color1: [0.5, 0.25, 0.75],
+        color2: [0.0, 0.0, 0.0],
+        opacity: 1.0,
+    };
+    let f = render_frame(&generated(checker), 0.0);
+    let [r, g, b, a] = f.pixel(32, 32);
+    assert_eq!(a, 255, "opaque cell");
+    // Output 8-bit ≈ the sRGB input (within rounding of the decode/encode trip).
+    assert!((r as i32 - 128).abs() <= 3, "r ~128, got {r}");
+    assert!((g as i32 - 64).abs() <= 3, "g ~64, got {g}");
+    assert!((b as i32 - 191).abs() <= 3, "b ~191, got {b}");
 }

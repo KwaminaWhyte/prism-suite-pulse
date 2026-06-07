@@ -1,32 +1,39 @@
-//! Generate (whole-buffer fill) effects: **Fractal Noise** — the motion-design
-//! workhorse.
+//! Generate (whole-buffer fill) effects — the After-Effects *Generate* category.
 //!
 //! Unlike [`Effect`](super::Effect) (a per-pixel colour-correction pass that
 //! *reads* the layer's pixels) or [`SpatialEffect`](super::SpatialEffect) (a
 //! convolve / bloom / offset pass that *filters* them), a **generate** effect
 //! *replaces* the layer's pixels: it synthesises content from its parameters and
 //! the pixel position, filling the layer's quad. This mirrors After Effects'
-//! *Generate* category, whose flagship is **Fractal Noise** — multi-octave
-//! gradient noise driving smoke, clouds, energy, organic textures, mattes, and
-//! displacement maps.
+//! *Generate* category.
 //!
-//! The noise is **deterministic**: the same `(params, evolution, seed, pixel)`
-//! always produces the same value — it is hash-seeded gradient noise (the same
-//! SplitMix64-hash philosophy the `wiggle` expression uses), never `rand` / system
-//! entropy / `Math.random`. That determinism is non-negotiable: a frame must
-//! render identically on every pass (for the RAM-preview cache, multi-frame
-//! render, and golden-frame tests), and **evolution** (a phase/time input) is the
-//! only thing that moves the field — so animating evolution gives the signature
-//! flowing-noise motion while a still frame stays bit-stable.
+//! The family so far:
+//! - **Fractal Noise** — multi-octave gradient noise (the motion-design
+//!   workhorse: smoke, clouds, energy, organic textures, mattes, displacement).
+//!   Grayscale, authored in linear `[0,1]`.
+//! - **Gradient / Ramp** — a linear or radial colour ramp between two colours
+//!   (AE's *Ramp*).
+//! - **Checkerboard** — a two-colour chequer grid (AE's *Checkerboard*).
+//! - **4-Color Gradient** — four corner colours blended across the frame (AE's
+//!   *4-Color Gradient*).
+//! - **Grid** — a line grid over a (transparent or filled) background (AE's
+//!   *Grid*).
 //!
-//! The field is evaluated in the layer's **local** frame (comp px, origin at the
-//! layer centre) so it rides the layer's transform — `scale` zooms the noise,
-//! the layer's position/rotation move it — and is written into the compositor's
-//! **premultiplied, linear-light** isolated buffer (`color · coverage` in RGB,
-//! `coverage` in A). Pure (no GPU, no IO, no `Track` sampling here — the
-//! evolution/scale values are sampled by the caller and passed in), so the noise
-//! math is unit-testable; it'll migrate to the suite's `prism-fx` host when that
-//! lands.
+//! Every generator is **deterministic**: the same `(params, evolution, seed,
+//! pixel)` always produces the same value, so a frame renders identically on
+//! every pass (for the RAM-preview cache, multi-frame render, and golden-frame
+//! tests). For Fractal Noise the only motion knob is **evolution**; the colour
+//! generators are static within a frame (they animate by keyframing their
+//! scalar params / scatter via evolution).
+//!
+//! Each field is evaluated in the layer's **local** frame (comp px, origin at the
+//! layer centre) so it rides the layer's transform — `scale` zooms it, the
+//! layer's position/rotation move it. Fractal Noise emits a straight grayscale
+//! value treated as *linear-light*; the colour generators emit straight **sRGB**
+//! colour (decoded to linear by the compositor at the gamma boundary, exactly
+//! like a solid's swatch). Pure (no GPU, no IO, no `Track` sampling here — the
+//! evolution/scale values are sampled by the caller and passed in), so the math
+//! is unit-testable; it'll migrate to the suite's `prism-fx` host when that lands.
 
 use serde::{Deserialize, Serialize};
 
@@ -93,12 +100,40 @@ impl Overflow {
     }
 }
 
+/// The shape of a [`GenerateEffect::Ramp`] gradient.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RampShape {
+    /// **Linear** ramp: the colour interpolates along the start→end axis,
+    /// constant on lines perpendicular to it. The default (AE's *Linear Ramp*).
+    #[default]
+    Linear,
+    /// **Radial** ramp: the colour interpolates with distance from the start
+    /// point out to the radius (AE's *Radial Ramp*).
+    Radial,
+}
+
+impl RampShape {
+    /// All shapes, in menu order.
+    pub const ALL: [RampShape; 2] = [RampShape::Linear, RampShape::Radial];
+
+    /// A short, stable label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            RampShape::Linear => "Linear",
+            RampShape::Radial => "Radial",
+        }
+    }
+}
+
 /// A **generate** (whole-buffer fill) effect in a layer's effect stack.
 ///
-/// Currently the one member is [`GenerateEffect::FractalNoise`] — After Effects'
-/// motion-design workhorse. A layer carries at most one generate fill (an
-/// `Option<GenerateEffect>`): like AE's Fractal Noise it *replaces* the layer's
-/// content rather than stacking, so two fills would just override each other.
+/// A layer carries at most one generate fill (an `Option<GenerateEffect>`): like
+/// AE's generate effects each *replaces* the layer's content rather than
+/// stacking, so two fills would just override each other.
+///
+/// All geometry params (start / end / centre / sizes) are in the layer's
+/// **local** frame, in comp px with the origin at the layer centre, so the fill
+/// rides the layer's transform like the other generators.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GenerateEffect {
     /// Multi-octave gradient **fractal noise** — the field that drives smoke,
@@ -138,6 +173,101 @@ pub enum GenerateEffect {
         /// Output **opacity** (the generated value scales the layer's coverage).
         opacity: f32,
     },
+
+    /// **Gradient / Ramp** — a colour ramp between `start_color` and `end_color`,
+    /// either [`RampShape::Linear`] (along the start→end axis) or
+    /// [`RampShape::Radial`] (with distance from `start` out to `radius`). An
+    /// optional **scatter** dithers the ramp parameter (deterministic, seeded by
+    /// the pixel) to break up banding.
+    Ramp {
+        /// Linear vs. radial ramp.
+        shape: RampShape,
+        /// Ramp start point, layer-local (comp px, origin at centre). The
+        /// `start_color` end of the ramp; the radial ramp's centre.
+        start: [f32; 2],
+        /// Ramp end point, layer-local. The `end_color` end of a linear ramp
+        /// (unused for radial, which uses `radius`).
+        end: [f32; 2],
+        /// Radial ramp radius (comp px): the distance from `start` at which the
+        /// ramp reaches `end_color`. Ignored for a linear ramp.
+        radius: f32,
+        /// Colour at the start of the ramp (straight sRGB).
+        start_color: [f32; 3],
+        /// Colour at the end of the ramp (straight sRGB).
+        end_color: [f32; 3],
+        /// **Ramp scatter**: dither amount on the ramp parameter (`0` = clean
+        /// bands, larger = more dithered), deterministic per pixel.
+        scatter: f32,
+        /// Output **opacity** (scales the fill's coverage).
+        opacity: f32,
+    },
+
+    /// **Checkerboard** — a two-colour chequer grid. Cell `(i + j)` parity picks
+    /// `color1` (even) or `color2` (odd); `anchor` shifts the grid origin and
+    /// `size` is the cell edge length.
+    Checkerboard {
+        /// Grid origin offset, layer-local (comp px). Shifts which cells fall
+        /// where.
+        anchor: [f32; 2],
+        /// Cell **width** (comp px).
+        size_w: f32,
+        /// Cell **height** (comp px).
+        size_h: f32,
+        /// The **even**-parity cell colour (straight sRGB).
+        color1: [f32; 3],
+        /// The **odd**-parity cell colour (straight sRGB).
+        color2: [f32; 3],
+        /// Output **opacity** (scales the fill's coverage).
+        opacity: f32,
+    },
+
+    /// **4-Color Gradient** — four corner colours bilinearly blended across the
+    /// layer's quad (top-left, top-right, bottom-left, bottom-right). An optional
+    /// **jitter** dithers the blend (deterministic per pixel) to soften banding;
+    /// `blend` biases the bilinear weights toward the corners (sharper) or centre
+    /// (softer).
+    FourColorGradient {
+        /// Top-left corner colour (straight sRGB).
+        tl: [f32; 3],
+        /// Top-right corner colour (straight sRGB).
+        tr: [f32; 3],
+        /// Bottom-left corner colour (straight sRGB).
+        bl: [f32; 3],
+        /// Bottom-right corner colour (straight sRGB).
+        br: [f32; 3],
+        /// **Blend** sharpness about 0.5: 1 = plain bilinear, >1 pushes the blend
+        /// toward the corners (sharper transitions), <1 toward the centre.
+        blend: f32,
+        /// **Jitter**: dither amount on the blend weights (deterministic per
+        /// pixel) to break up banding.
+        jitter: f32,
+        /// Output **opacity** (scales the fill's coverage).
+        opacity: f32,
+    },
+
+    /// **Grid** — a line grid over a (transparent or filled) background. Cells of
+    /// `size_w × size_h` are outlined with lines of `border` px in `color`;
+    /// `anchor` shifts the grid origin. The cell interior is `background` (which
+    /// may be transparent).
+    Grid {
+        /// Grid origin offset, layer-local (comp px).
+        anchor: [f32; 2],
+        /// Cell **width** (comp px).
+        size_w: f32,
+        /// Cell **height** (comp px).
+        size_h: f32,
+        /// Line **width** (comp px).
+        border: f32,
+        /// Line **colour** (straight sRGB).
+        color: [f32; 3],
+        /// Cell **background** colour (straight sRGB).
+        background: [f32; 3],
+        /// Background **opacity** (`0` = transparent cells, so only the lines
+        /// show — the common AE grid-over-footage look).
+        background_opacity: f32,
+        /// Output **opacity** (scales the whole fill's coverage).
+        opacity: f32,
+    },
 }
 
 impl GenerateEffect {
@@ -145,34 +275,85 @@ impl GenerateEffect {
     pub fn label(&self) -> &'static str {
         match self {
             GenerateEffect::FractalNoise { .. } => "Fractal Noise",
+            GenerateEffect::Ramp { .. } => "Gradient Ramp",
+            GenerateEffect::Checkerboard { .. } => "Checkerboard",
+            GenerateEffect::FourColorGradient { .. } => "4-Color Gradient",
+            GenerateEffect::Grid { .. } => "Grid",
         }
     }
 
     /// A fresh, sensibly-defaulted instance of each generate effect, for the
-    /// "add effect" menu. The default gives a recognizable, mid-scale cloud field
-    /// so adding it reads immediately.
-    pub fn defaults() -> [GenerateEffect; 1] {
-        [GenerateEffect::FractalNoise {
-            fractal_type: FractalType::Basic,
-            contrast: 1.0,
-            brightness: 0.0,
-            scale: 80.0,
-            scale_x: 1.0,
-            scale_y: 1.0,
-            complexity: 6,
-            sub_influence: 0.6,
-            sub_scaling: 2.0,
-            evolution: 0.0,
-            seed: 0,
-            overflow: Overflow::Clip,
-            opacity: 1.0,
-        }]
+    /// "add effect" menu / browser. The order is the registry/browser order.
+    pub fn defaults() -> [GenerateEffect; 5] {
+        [
+            GenerateEffect::FractalNoise {
+                fractal_type: FractalType::Basic,
+                contrast: 1.0,
+                brightness: 0.0,
+                scale: 80.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                complexity: 6,
+                sub_influence: 0.6,
+                sub_scaling: 2.0,
+                evolution: 0.0,
+                seed: 0,
+                overflow: Overflow::Clip,
+                opacity: 1.0,
+            },
+            GenerateEffect::Ramp {
+                shape: RampShape::Linear,
+                start: [0.0, -120.0],
+                end: [0.0, 120.0],
+                radius: 160.0,
+                start_color: [0.0, 0.0, 0.0],
+                end_color: [1.0, 1.0, 1.0],
+                scatter: 0.0,
+                opacity: 1.0,
+            },
+            GenerateEffect::Checkerboard {
+                anchor: [0.0, 0.0],
+                size_w: 64.0,
+                size_h: 64.0,
+                color1: [0.0, 0.0, 0.0],
+                color2: [1.0, 1.0, 1.0],
+                opacity: 1.0,
+            },
+            GenerateEffect::FourColorGradient {
+                tl: [0.90, 0.20, 0.25],
+                tr: [0.95, 0.80, 0.20],
+                bl: [0.20, 0.45, 0.90],
+                br: [0.25, 0.80, 0.45],
+                blend: 1.0,
+                jitter: 0.0,
+                opacity: 1.0,
+            },
+            GenerateEffect::Grid {
+                anchor: [0.0, 0.0],
+                size_w: 64.0,
+                size_h: 64.0,
+                border: 2.0,
+                color: [1.0, 1.0, 1.0],
+                background: [0.0, 0.0, 0.0],
+                background_opacity: 0.0,
+                opacity: 1.0,
+            },
+        ]
+    }
+
+    /// Whether this generator emits **colour** (straight sRGB, decoded to linear
+    /// by the compositor) rather than Fractal Noise's grayscale *linear* value.
+    /// The compositor uses this to pick the right colour-space path.
+    pub fn produces_color(&self) -> bool {
+        !matches!(self, GenerateEffect::FractalNoise { .. })
     }
 
     /// Sample the generated **straight grayscale value** at a layer-local pixel
-    /// position `(lx, ly)` (comp px, origin at the layer centre). Returns the
-    /// noise value brought into range by [`Overflow`] in `[0,1]` (or `≥0` for
-    /// `AllowHdr`). Pure and deterministic in `(self, lx, ly)`.
+    /// position `(lx, ly)` — only meaningful for [`GenerateEffect::FractalNoise`]
+    /// (the field). Returns the noise value brought into range by [`Overflow`] in
+    /// `[0,1]` (or `≥0` for `AllowHdr`); for a colour generator returns the
+    /// luminance of its colour (so callers that only want a scalar still get one).
+    /// Pure and deterministic in `(self, lx, ly)`.
     pub fn value_at(&self, lx: f32, ly: f32) -> f32 {
         match *self {
             GenerateEffect::FractalNoise {
@@ -218,13 +399,161 @@ impl GenerateEffect {
                 let contrasted = (centered - 0.5) * contrast.max(0.0) + 0.5 + brightness;
                 overflow.apply(contrasted)
             }
+            // For a colour generator the "value" is its colour's luminance, with
+            // the colour evaluated at a unit half-extent (the scalar callers don't
+            // pass geometry). Mostly used by tests / generic callers; the
+            // compositor uses `rgba_at`.
+            _ => {
+                let [r, g, b, _] = self.rgba_at(lx, ly, 100.0, 100.0);
+                0.2126 * r + 0.7152 * g + 0.0722 * b
+            }
+        }
+    }
+
+    /// Sample the generated **straight RGBA** at a layer-local pixel position
+    /// `(lx, ly)`, given the layer's half-extents `(half_w, half_h)` (so the
+    /// 4-color gradient / radial ramp can normalise across the quad). RGB is
+    /// straight colour (sRGB for the colour generators, linear-grayscale for
+    /// Fractal Noise) and A is the fill coverage **before** the effect/layer
+    /// opacity multiply. Pure and deterministic.
+    pub fn rgba_at(&self, lx: f32, ly: f32, half_w: f32, half_h: f32) -> [f32; 4] {
+        match *self {
+            GenerateEffect::FractalNoise { .. } => {
+                let v = self.value_at(lx, ly);
+                [v, v, v, v]
+            }
+
+            GenerateEffect::Ramp {
+                shape,
+                start,
+                end,
+                radius,
+                start_color,
+                end_color,
+                scatter,
+                ..
+            } => {
+                let mut t = match shape {
+                    RampShape::Linear => {
+                        // Project (lx,ly) onto the start→end axis; t = the
+                        // normalised position along it, clamped to the endpoints.
+                        let dx = end[0] - start[0];
+                        let dy = end[1] - start[1];
+                        let len2 = dx * dx + dy * dy;
+                        if len2 <= 1e-6 {
+                            0.0
+                        } else {
+                            ((lx - start[0]) * dx + (ly - start[1]) * dy) / len2
+                        }
+                    }
+                    RampShape::Radial => {
+                        let dx = lx - start[0];
+                        let dy = ly - start[1];
+                        let r = (dx * dx + dy * dy).sqrt();
+                        r / radius.abs().max(1e-3)
+                    }
+                };
+                // Optional scatter: dither the ramp parameter, deterministic per
+                // pixel (a hash of the rounded local position), centred on 0.
+                if scatter.abs() > 1e-6 {
+                    let n = hash_unit(lx, ly, 0) - 0.5;
+                    t += n * scatter;
+                }
+                let t = t.clamp(0.0, 1.0);
+                let rgb = lerp3(start_color, end_color, t);
+                [rgb[0], rgb[1], rgb[2], 1.0]
+            }
+
+            GenerateEffect::Checkerboard {
+                anchor,
+                size_w,
+                size_h,
+                color1,
+                color2,
+                ..
+            } => {
+                let cw = size_w.abs().max(1e-3);
+                let ch = size_h.abs().max(1e-3);
+                // Cell indices (floored), shifted by the anchor.
+                let i = ((lx - anchor[0]) / cw).floor() as i64;
+                let j = ((ly - anchor[1]) / ch).floor() as i64;
+                let rgb = if (i + j).rem_euclid(2) == 0 {
+                    color1
+                } else {
+                    color2
+                };
+                [rgb[0], rgb[1], rgb[2], 1.0]
+            }
+
+            GenerateEffect::FourColorGradient {
+                tl,
+                tr,
+                bl,
+                br,
+                blend,
+                jitter,
+                ..
+            } => {
+                // Normalised position in the quad, u/v ∈ [0,1] (origin top-left).
+                let mut u = (lx / half_w.max(1e-3)) * 0.5 + 0.5;
+                let mut v = (ly / half_h.max(1e-3)) * 0.5 + 0.5;
+                if jitter.abs() > 1e-6 {
+                    u += (hash_unit(lx, ly, 1) - 0.5) * jitter;
+                    v += (hash_unit(lx, ly, 2) - 0.5) * jitter;
+                }
+                let u = bias(u.clamp(0.0, 1.0), blend);
+                let v = bias(v.clamp(0.0, 1.0), blend);
+                // Bilinear blend of the four corners.
+                let top = lerp3(tl, tr, u);
+                let bot = lerp3(bl, br, u);
+                let rgb = lerp3(top, bot, v);
+                [rgb[0], rgb[1], rgb[2], 1.0]
+            }
+
+            GenerateEffect::Grid {
+                anchor,
+                size_w,
+                size_h,
+                border,
+                color,
+                background,
+                background_opacity,
+                ..
+            } => {
+                let cw = size_w.abs().max(1e-3);
+                let ch = size_h.abs().max(1e-3);
+                let bw = border.max(0.0);
+                // Distance from the nearest vertical / horizontal grid line. A
+                // line sits on each integer multiple of the cell size (offset by
+                // the anchor); a pixel is "on a line" when within half the border
+                // width of one.
+                let px = (lx - anchor[0]).rem_euclid(cw);
+                let py = (ly - anchor[1]).rem_euclid(ch);
+                let dx = px.min(cw - px);
+                let dy = py.min(ch - py);
+                let on_line = dx <= bw * 0.5 || dy <= bw * 0.5;
+                if on_line {
+                    [color[0], color[1], color[2], 1.0]
+                } else {
+                    [
+                        background[0],
+                        background[1],
+                        background[2],
+                        background_opacity.clamp(0.0, 1.0),
+                    ]
+                }
+            }
         }
     }
 
     /// The output **opacity** this generate fill scales coverage by.
     pub fn opacity(&self) -> f32 {
         match *self {
-            GenerateEffect::FractalNoise { opacity, .. } => opacity.clamp(0.0, 1.0),
+            GenerateEffect::FractalNoise { opacity, .. }
+            | GenerateEffect::Ramp { opacity, .. }
+            | GenerateEffect::Checkerboard { opacity, .. }
+            | GenerateEffect::FourColorGradient { opacity, .. }
+            | GenerateEffect::Grid { opacity, .. } => opacity.clamp(0.0, 1.0),
         }
     }
 }
@@ -232,6 +561,46 @@ impl GenerateEffect {
 /// The maximum octave count (complexity) the fractal sum honours — keeps the
 /// per-pixel cost bounded.
 pub const MAX_OCTAVES: u32 = 10;
+
+/// Linear interpolation of two RGB triples.
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// A blend-sharpness bias about 0.5: `amount == 1` is the identity, `> 1` pushes
+/// `t` toward the ends (sharper corners), `< 1` toward 0.5 (softer). Symmetric so
+/// 0 and 1 are fixed points.
+fn bias(t: f32, amount: f32) -> f32 {
+    let k = amount.max(0.0);
+    if (k - 1.0).abs() < 1e-6 {
+        return t;
+    }
+    // Raise the half-range to the `amount` power: `> 1` steepens the centre
+    // transition (pushing values toward 0 / 1 — sharper corners), `< 1` flattens
+    // it (toward 0.5 — softer).
+    if t < 0.5 {
+        0.5 * (2.0 * t).powf(k)
+    } else {
+        1.0 - 0.5 * (2.0 * (1.0 - t)).powf(k)
+    }
+}
+
+/// A deterministic pseudo-random value in `[0,1)` for a local pixel position +
+/// channel salt — used for ramp scatter / gradient jitter so the dither is
+/// stable per (pixel, frame) (never `rand` / `Math.random`).
+fn hash_unit(x: f32, y: f32, salt: u32) -> f32 {
+    let xi = (x * 16.0).floor() as i64 as u64;
+    let yi = (y * 16.0).floor() as i64 as u64;
+    let mut h = xi.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= yi.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h ^= (salt as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    let m = splitmix64(h);
+    (m >> 11) as f32 / (1u64 << 53) as f32
+}
 
 /// Fractional Brownian motion: sum `octaves` of gradient noise, each at a higher
 /// frequency (`lacunarity`) and lower amplitude (`persistence`) than the last.
@@ -382,10 +751,6 @@ fn splitmix64(mut x: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    // `GenerateEffect` has a single variant today, so destructuring it with
-    // `if let` is irrefutable; the helpers keep the `if let` form so they stay
-    // correct when more generate variants are added.
-    #![allow(irrefutable_let_patterns)]
     use super::*;
 
     /// A default Fractal Noise for tweaking in tests.
@@ -393,18 +758,37 @@ mod tests {
         GenerateEffect::defaults()[0]
     }
 
-    /// Replace the named fields of a Fractal Noise (terse test helper).
+    /// Replace the named fields of a generate effect (terse test helper).
     fn with(mut e: GenerateEffect, f: impl FnOnce(&mut GenerateEffect)) -> GenerateEffect {
         f(&mut e);
         e
     }
 
-    #[test]
-    fn label_and_defaults() {
-        let d = GenerateEffect::defaults();
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].label(), "Fractal Noise");
+    fn approx(a: [f32; 4], b: [f32; 4], eps: f32) -> bool {
+        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= eps)
     }
+
+    #[test]
+    fn labels_and_defaults() {
+        let d = GenerateEffect::defaults();
+        assert_eq!(d.len(), 5);
+        assert_eq!(d[0].label(), "Fractal Noise");
+        assert_eq!(d[1].label(), "Gradient Ramp");
+        assert_eq!(d[2].label(), "Checkerboard");
+        assert_eq!(d[3].label(), "4-Color Gradient");
+        assert_eq!(d[4].label(), "Grid");
+    }
+
+    #[test]
+    fn produces_color_only_for_color_generators() {
+        let d = GenerateEffect::defaults();
+        assert!(!d[0].produces_color(), "fractal noise is grayscale-linear");
+        for e in &d[1..] {
+            assert!(e.produces_color(), "{} is a colour generator", e.label());
+        }
+    }
+
+    // --- Fractal Noise ------------------------------------------------------
 
     #[test]
     fn noise_is_deterministic_across_calls() {
@@ -690,19 +1074,354 @@ mod tests {
 
     #[test]
     fn opacity_is_clamped() {
-        let e = with(fractal(), |e| {
-            if let GenerateEffect::FractalNoise { opacity, .. } = e {
-                *opacity = 2.0;
-            }
-        });
-        assert_eq!(e.opacity(), 1.0);
+        for d in GenerateEffect::defaults() {
+            let e = with(d, |x| match x {
+                GenerateEffect::FractalNoise { opacity, .. }
+                | GenerateEffect::Ramp { opacity, .. }
+                | GenerateEffect::Checkerboard { opacity, .. }
+                | GenerateEffect::FourColorGradient { opacity, .. }
+                | GenerateEffect::Grid { opacity, .. } => *opacity = 2.0,
+            });
+            assert_eq!(e.opacity(), 1.0, "{} opacity clamps", e.label());
+        }
     }
 
     #[test]
-    fn serde_round_trips() {
-        let e = fractal();
-        let json = serde_json::to_string(&e).unwrap();
-        let back: GenerateEffect = serde_json::from_str(&json).unwrap();
-        assert_eq!(e, back);
+    fn serde_round_trips_every_generator() {
+        for e in GenerateEffect::defaults() {
+            let json = serde_json::to_string(&e).unwrap();
+            let back: GenerateEffect = serde_json::from_str(&json).unwrap();
+            assert_eq!(e, back, "{} serde round-trip", e.label());
+        }
+    }
+
+    // --- Gradient / Ramp ----------------------------------------------------
+
+    /// A linear ramp from black at y=-100 to white at y=+100 (vertical).
+    fn linear_ramp() -> GenerateEffect {
+        GenerateEffect::Ramp {
+            shape: RampShape::Linear,
+            start: [0.0, -100.0],
+            end: [0.0, 100.0],
+            radius: 100.0,
+            start_color: [0.0, 0.0, 0.0],
+            end_color: [1.0, 1.0, 1.0],
+            scatter: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn linear_ramp_endpoints_and_midpoint() {
+        let r = linear_ramp();
+        // At the start point: start_color (black).
+        assert!(approx(r.rgba_at(0.0, -100.0, 200.0, 200.0), [0.0, 0.0, 0.0, 1.0], 1e-4));
+        // At the end point: end_color (white).
+        assert!(approx(r.rgba_at(0.0, 100.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-4));
+        // Midpoint: mid-grey.
+        let mid = r.rgba_at(0.0, 0.0, 200.0, 200.0);
+        assert!(approx(mid, [0.5, 0.5, 0.5, 1.0], 1e-4), "midpoint grey, got {mid:?}");
+    }
+
+    #[test]
+    fn linear_ramp_clamps_past_the_endpoints() {
+        let r = linear_ramp();
+        // Past the white end stays white (clamped, not extrapolated).
+        assert!(approx(r.rgba_at(0.0, 500.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-4));
+        // Before the black end stays black.
+        assert!(approx(r.rgba_at(0.0, -500.0, 200.0, 200.0), [0.0, 0.0, 0.0, 1.0], 1e-4));
+    }
+
+    #[test]
+    fn linear_ramp_is_constant_perpendicular_to_axis() {
+        // A vertical ramp is constant along x.
+        let r = linear_ramp();
+        let a = r.rgba_at(-80.0, 0.0, 200.0, 200.0);
+        let b = r.rgba_at(80.0, 0.0, 200.0, 200.0);
+        assert!(approx(a, b, 1e-5), "constant across the perpendicular axis");
+    }
+
+    #[test]
+    fn radial_ramp_centre_and_edge() {
+        let r = GenerateEffect::Ramp {
+            shape: RampShape::Radial,
+            start: [0.0, 0.0],
+            end: [0.0, 0.0],
+            radius: 100.0,
+            start_color: [0.0, 0.0, 0.0],
+            end_color: [1.0, 1.0, 1.0],
+            scatter: 0.0,
+            opacity: 1.0,
+        };
+        // Centre = start_color.
+        assert!(approx(r.rgba_at(0.0, 0.0, 200.0, 200.0), [0.0, 0.0, 0.0, 1.0], 1e-4));
+        // At the radius (along +x) = end_color.
+        assert!(approx(r.rgba_at(100.0, 0.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-4));
+        // Halfway out = mid-grey, and isotropic (same in any direction).
+        let half_x = r.rgba_at(50.0, 0.0, 200.0, 200.0);
+        let half_y = r.rgba_at(0.0, 50.0, 200.0, 200.0);
+        assert!(approx(half_x, [0.5, 0.5, 0.5, 1.0], 1e-4), "radial midpoint grey");
+        assert!(approx(half_x, half_y, 1e-5), "radial ramp is isotropic");
+    }
+
+    #[test]
+    fn degenerate_linear_ramp_does_not_nan() {
+        // start == end → zero-length axis, must not divide by zero.
+        let r = GenerateEffect::Ramp {
+            shape: RampShape::Linear,
+            start: [10.0, 10.0],
+            end: [10.0, 10.0],
+            radius: 100.0,
+            start_color: [0.2, 0.4, 0.6],
+            end_color: [0.8, 0.6, 0.4],
+            scatter: 0.0,
+            opacity: 1.0,
+        };
+        let v = r.rgba_at(50.0, 50.0, 200.0, 200.0);
+        assert!(v.iter().all(|c| c.is_finite()), "degenerate ramp finite, got {v:?}");
+    }
+
+    #[test]
+    fn ramp_scatter_dithers_deterministically() {
+        let mut r = linear_ramp();
+        if let GenerateEffect::Ramp { scatter, .. } = &mut r {
+            *scatter = 0.4;
+        }
+        // Deterministic: the same pixel always gives the same dithered value.
+        let a = r.rgba_at(13.0, 7.0, 200.0, 200.0);
+        let b = r.rgba_at(13.0, 7.0, 200.0, 200.0);
+        assert_eq!(a, b, "scatter must be deterministic per pixel");
+        // And it actually perturbs vs the clean ramp at some pixels.
+        let clean = linear_ramp();
+        let mut diff = 0.0f32;
+        for i in 0..64 {
+            let x = i as f32 * 3.0;
+            let y = i as f32 * 2.0 - 50.0;
+            diff = diff.max((r.rgba_at(x, y, 200.0, 200.0)[1] - clean.rgba_at(x, y, 200.0, 200.0)[1]).abs());
+        }
+        assert!(diff > 0.01, "scatter should perturb the ramp, max diff {diff}");
+    }
+
+    // --- Checkerboard -------------------------------------------------------
+
+    fn checker() -> GenerateEffect {
+        GenerateEffect::Checkerboard {
+            anchor: [0.0, 0.0],
+            size_w: 50.0,
+            size_h: 50.0,
+            color1: [0.0, 0.0, 0.0],
+            color2: [1.0, 1.0, 1.0],
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn checkerboard_cell_parity() {
+        let c = checker();
+        // Cell (0,0): even parity → color1 (black). Sample its interior.
+        assert!(approx(c.rgba_at(25.0, 25.0, 200.0, 200.0), [0.0, 0.0, 0.0, 1.0], 1e-5));
+        // Cell (1,0): odd parity → color2 (white).
+        assert!(approx(c.rgba_at(75.0, 25.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-5));
+        // Cell (0,1): odd parity → color2 (white).
+        assert!(approx(c.rgba_at(25.0, 75.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-5));
+        // Cell (1,1): even parity → color1 (black).
+        assert!(approx(c.rgba_at(75.0, 75.0, 200.0, 200.0), [0.0, 0.0, 0.0, 1.0], 1e-5));
+    }
+
+    #[test]
+    fn checkerboard_negative_cells_keep_parity() {
+        // rem_euclid keeps the chequer continuous across the origin.
+        let c = checker();
+        // Cell (-1,0): odd → white.
+        assert!(approx(c.rgba_at(-25.0, 25.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-5));
+        // Cell (-1,-1): even → black.
+        assert!(approx(c.rgba_at(-25.0, -25.0, 200.0, 200.0), [0.0, 0.0, 0.0, 1.0], 1e-5));
+    }
+
+    #[test]
+    fn checkerboard_anchor_shifts_the_grid() {
+        let mut c = checker();
+        if let GenerateEffect::Checkerboard { anchor, .. } = &mut c {
+            *anchor = [50.0, 0.0]; // shift one cell right
+        }
+        // The pixel that was cell (0,0) black is now cell (-1,0) odd → white.
+        assert!(approx(c.rgba_at(25.0, 25.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-5));
+    }
+
+    #[test]
+    fn checkerboard_zero_size_does_not_panic() {
+        let c = GenerateEffect::Checkerboard {
+            anchor: [0.0, 0.0],
+            size_w: 0.0,
+            size_h: 0.0,
+            color1: [0.2, 0.2, 0.2],
+            color2: [0.8, 0.8, 0.8],
+            opacity: 1.0,
+        };
+        let v = c.rgba_at(10.0, 20.0, 200.0, 200.0);
+        assert!(v.iter().all(|x| x.is_finite()));
+    }
+
+    // --- 4-Color Gradient ---------------------------------------------------
+
+    fn four_color() -> GenerateEffect {
+        GenerateEffect::FourColorGradient {
+            tl: [1.0, 0.0, 0.0],
+            tr: [0.0, 1.0, 0.0],
+            bl: [0.0, 0.0, 1.0],
+            br: [1.0, 1.0, 0.0],
+            blend: 1.0,
+            jitter: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn four_color_corner_values() {
+        let g = four_color();
+        let (hw, hh) = (100.0, 100.0);
+        // Top-left corner (lx=-hw, ly=-hh) → tl (red).
+        assert!(approx(g.rgba_at(-hw, -hh, hw, hh), [1.0, 0.0, 0.0, 1.0], 1e-4));
+        // Top-right (lx=+hw, ly=-hh) → tr (green).
+        assert!(approx(g.rgba_at(hw, -hh, hw, hh), [0.0, 1.0, 0.0, 1.0], 1e-4));
+        // Bottom-left (lx=-hw, ly=+hh) → bl (blue).
+        assert!(approx(g.rgba_at(-hw, hh, hw, hh), [0.0, 0.0, 1.0, 1.0], 1e-4));
+        // Bottom-right (lx=+hw, ly=+hh) → br (yellow).
+        assert!(approx(g.rgba_at(hw, hh, hw, hh), [1.0, 1.0, 0.0, 1.0], 1e-4));
+    }
+
+    #[test]
+    fn four_color_interior_blend() {
+        let g = four_color();
+        let (hw, hh) = (100.0, 100.0);
+        // Centre = average of the four corners.
+        let c = g.rgba_at(0.0, 0.0, hw, hh);
+        let avg = [
+            (1.0 + 0.0 + 0.0 + 1.0) / 4.0,
+            (0.0 + 1.0 + 0.0 + 1.0) / 4.0,
+            (0.0 + 0.0 + 1.0 + 0.0) / 4.0,
+        ];
+        assert!(approx(c, [avg[0], avg[1], avg[2], 1.0], 1e-4), "centre is the average, got {c:?}");
+        // Top edge midpoint = average of tl & tr.
+        let top = g.rgba_at(0.0, -hh, hw, hh);
+        assert!(approx(top, [0.5, 0.5, 0.0, 1.0], 1e-4), "top edge blends tl/tr, got {top:?}");
+    }
+
+    #[test]
+    fn four_color_jitter_is_deterministic_and_perturbs() {
+        let mut g = four_color();
+        if let GenerateEffect::FourColorGradient { jitter, .. } = &mut g {
+            *jitter = 0.3;
+        }
+        let a = g.rgba_at(11.0, 23.0, 100.0, 100.0);
+        let b = g.rgba_at(11.0, 23.0, 100.0, 100.0);
+        assert_eq!(a, b, "jitter deterministic per pixel");
+        let clean = four_color();
+        let mut diff = 0.0f32;
+        for i in 0..64 {
+            let x = i as f32 * 2.0 - 60.0;
+            let y = i as f32 * 1.5 - 40.0;
+            diff = diff.max((g.rgba_at(x, y, 100.0, 100.0)[0] - clean.rgba_at(x, y, 100.0, 100.0)[0]).abs());
+        }
+        assert!(diff > 0.005, "jitter should perturb the blend, max diff {diff}");
+    }
+
+    // --- Grid ---------------------------------------------------------------
+
+    fn grid() -> GenerateEffect {
+        GenerateEffect::Grid {
+            anchor: [0.0, 0.0],
+            size_w: 50.0,
+            size_h: 50.0,
+            border: 4.0,
+            color: [1.0, 1.0, 1.0],
+            background: [0.0, 0.0, 0.0],
+            background_opacity: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn grid_line_vs_cell_pixels() {
+        let g = grid();
+        // On a vertical line (x near a multiple of 50): opaque white line.
+        let on = g.rgba_at(0.0, 25.0, 200.0, 200.0);
+        assert!(approx(on, [1.0, 1.0, 1.0, 1.0], 1e-5), "on a grid line, got {on:?}");
+        // Cell interior (far from any line): transparent background.
+        let off = g.rgba_at(25.0, 25.0, 200.0, 200.0);
+        assert_eq!(off[3], 0.0, "cell interior is transparent");
+    }
+
+    #[test]
+    fn grid_horizontal_and_corner_lines() {
+        let g = grid();
+        // On a horizontal line.
+        assert!(approx(g.rgba_at(25.0, 50.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-5));
+        // On a grid intersection (both lines).
+        assert!(approx(g.rgba_at(0.0, 0.0, 200.0, 200.0), [1.0, 1.0, 1.0, 1.0], 1e-5));
+    }
+
+    #[test]
+    fn grid_filled_background_is_opaque() {
+        let mut g = grid();
+        if let GenerateEffect::Grid {
+            background_opacity, ..
+        } = &mut g
+        {
+            *background_opacity = 1.0;
+        }
+        let off = g.rgba_at(25.0, 25.0, 200.0, 200.0);
+        assert_eq!(off[3], 1.0, "filled background is opaque");
+        assert!(approx(off, [0.0, 0.0, 0.0, 1.0], 1e-5));
+    }
+
+    #[test]
+    fn grid_thicker_border_covers_more() {
+        let thin = grid();
+        let thick = with(grid(), |e| {
+            if let GenerateEffect::Grid { border, .. } = e {
+                *border = 20.0;
+            }
+        });
+        // A pixel 8 px from a line: off for the thin border, on for the thick.
+        assert_eq!(thin.rgba_at(8.0, 25.0, 200.0, 200.0)[3], 0.0);
+        assert_eq!(thick.rgba_at(8.0, 25.0, 200.0, 200.0)[3], 1.0);
+    }
+
+    #[test]
+    fn grid_zero_size_does_not_panic() {
+        let g = GenerateEffect::Grid {
+            anchor: [0.0, 0.0],
+            size_w: 0.0,
+            size_h: 0.0,
+            border: 2.0,
+            color: [1.0, 1.0, 1.0],
+            background: [0.0, 0.0, 0.0],
+            background_opacity: 0.0,
+            opacity: 1.0,
+        };
+        let v = g.rgba_at(10.0, 20.0, 200.0, 200.0);
+        assert!(v.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn bias_is_identity_at_one_and_fixes_ends() {
+        assert!((bias(0.3, 1.0) - 0.3).abs() < 1e-6);
+        assert!((bias(0.0, 2.0) - 0.0).abs() < 1e-6);
+        assert!((bias(1.0, 2.0) - 1.0).abs() < 1e-6);
+        assert!((bias(0.5, 2.0) - 0.5).abs() < 1e-6, "0.5 is a fixed point");
+        // Sharper (>1) pushes a below-mid value lower.
+        assert!(bias(0.3, 2.0) < 0.3);
+    }
+
+    #[test]
+    fn color_generators_are_deterministic() {
+        for e in &GenerateEffect::defaults()[1..] {
+            for &(x, y) in &[(0.0, 0.0), (33.0, -17.0), (-90.0, 120.0)] {
+                let a = e.rgba_at(x, y, 100.0, 100.0);
+                let b = e.rgba_at(x, y, 100.0, 100.0);
+                assert_eq!(a, b, "{} must be deterministic", e.label());
+            }
+        }
     }
 }

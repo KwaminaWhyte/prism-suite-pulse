@@ -476,21 +476,27 @@ pub(super) fn composite_layer(
     }
 }
 
-/// Fill a layer's quad with its **generate** effect (Fractal Noise) into the
-/// (assumed-clear) isolated `out` buffer, in the compositor's premultiplied-free
-/// linear-light form.
+/// Fill a layer's quad with its **generate** effect into the (assumed-clear)
+/// isolated `out` buffer, in the compositor's premultiplied-free linear-light form.
 ///
 /// A generate effect *replaces* the layer's pixels: each comp-space pixel in the
-/// layer's quad is inverse-mapped into the layer's local frame, the noise field is
+/// layer's quad is inverse-mapped into the layer's local frame, the generator is
 /// evaluated there (so it rides the layer's transform — `scale` zooms it, the
-/// layer's position/rotation move it), giving a straight **grayscale** value
-/// `[0,1]`. That value fills RGB (so the field reads as a luminance map) and, ×
-/// the generate's `opacity` × the layer's `opacity`, the coverage alpha — so the
-/// field can also drive a matte / displacement. The grayscale is treated as a
-/// *linear-light* value (the noise is authored in `[0,1]`; no sRGB decode), then
-/// the layer's per-pixel colour-correction [`effects`](PulseLayer::effects) stack
-/// runs on it before it's composited. A singular `world` (zero scale) or empty
-/// quad leaves the buffer clear.
+/// layer's position/rotation move it). Two colour-space paths:
+///
+/// - **Fractal Noise** yields a straight **grayscale** value `[0,1]` treated as
+///   *linear-light* (the noise is authored in `[0,1]`; no sRGB decode); RGB = the
+///   value, coverage = value × `opacity` × layer `opacity` (so the field can drive
+///   a matte / displacement).
+/// - the **colour generators** (Ramp / Checkerboard / 4-Color / Grid) yield a
+///   straight **sRGB** colour + coverage; the RGB is decoded **sRGB → linear** at
+///   the gamma boundary exactly like a solid's swatch, coverage = the generator's
+///   alpha × `opacity` × layer `opacity`.
+///
+/// In both cases the layer's per-pixel colour-correction
+/// [`effects`](PulseLayer::effects) stack runs on the straight RGB before it's
+/// composited. A singular `world` (zero scale) or empty quad leaves the buffer
+/// clear.
 pub(super) fn composite_generate(
     out: &mut [Lin],
     geom: &Geom,
@@ -521,6 +527,7 @@ pub(super) fn composite_generate(
         return;
     };
 
+    let color_gen = gen.produces_color();
     for py in y0..=y1 {
         let comp_y = py as f32 + 0.5 - cy;
         for px in x0..=x1 {
@@ -530,12 +537,26 @@ pub(super) fn composite_generate(
             if lx.abs() > half_w || ly.abs() > half_h {
                 continue;
             }
-            // The deterministic grayscale noise value at this local pixel.
-            let v = gen.value_at(lx, ly);
-            let cov = (v * gen_opacity * opacity).clamp(0.0, 1.0);
-            // Grayscale fill (linear-light); run the layer's colour-correction
+            // The deterministic generator sample at this local pixel.
+            let [sr, sg, sb, sa] = gen.rgba_at(lx, ly, half_w, half_h);
+            let cov = (sa * gen_opacity * opacity).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            // Decode the colour generators' sRGB to linear (Fractal Noise's value
+            // is already linear-light), then run the layer's colour-correction
             // stack on the straight value before compositing.
-            let [r, g, b, _] = apply_effects(&layer.effects, [v, v, v, 1.0]);
+            let straight = if color_gen {
+                [
+                    srgb_to_linear(sr.clamp(0.0, 1.0)),
+                    srgb_to_linear(sg.clamp(0.0, 1.0)),
+                    srgb_to_linear(sb.clamp(0.0, 1.0)),
+                    1.0,
+                ]
+            } else {
+                [sr, sg, sb, 1.0]
+            };
+            let [r, g, b, _] = apply_effects(&layer.effects, straight);
             let idx = (py as u32 * w + px as u32) as usize;
             out[idx] = over(
                 Lin {

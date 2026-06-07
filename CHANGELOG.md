@@ -45,6 +45,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Generate effect family — Ramp / Checkerboard / 4-Color Gradient / Grid**
+  (After-Effects *Generate ▸ Gradient Ramp / Checkerboard / 4-Color Gradient /
+  Grid*; PLAN Phase 3 *Generate*) — four more **generate** fills joining Fractal
+  Noise, all on the **same** generate infrastructure (the `GenerateEffect` enum +
+  the `composite_generate` compositor pass + the Properties *Generate* section +
+  the *Effects & Presets* browser's *Generate* category). Like Fractal Noise each
+  *replaces* the layer's content with synthesised pixels rather than reading them,
+  fills the layer's quad in the **isolated premultiplied linear-light** buffer,
+  and honours opacity / blend / masks / track-mattes / spatial effects.
+  - **Gradient / Ramp** (`GenerateEffect::Ramp`) — a colour ramp between
+    `start_color` and `end_color`, either **Linear** (interpolating along the
+    start→end axis, constant perpendicular to it) or **Radial** (interpolating
+    with distance from `start` out to `radius`). The ramp parameter is clamped at
+    the endpoints (no extrapolation past the ends), and an optional **ramp
+    scatter** dithers it (deterministic per pixel — a stable SplitMix64 hash, never
+    `rand`) to break up banding.
+  - **Checkerboard** (`GenerateEffect::Checkerboard`) — a two-colour chequer grid;
+    cell `(i + j)` parity (via `rem_euclid`, so the pattern stays continuous across
+    the origin) picks `color1` (even) or `color2` (odd), with per-axis cell `size`
+    and an `anchor` that shifts the grid origin.
+  - **4-Color Gradient** (`GenerateEffect::FourColorGradient`) — four corner
+    colours (top-left / top-right / bottom-left / bottom-right) **bilinearly
+    blended** across the layer's quad. A **blend** knob biases the weights toward
+    the corners (sharper) or centre (softer), and an optional **jitter** dithers
+    them (deterministic per pixel) to soften banding.
+  - **Grid** (`GenerateEffect::Grid`) — a line grid over a transparent or filled
+    background: cells of `size_w × size_h` outlined with `border`-px lines in
+    `color`, the cell interior the `background` colour at `background_opacity`
+    (`0` = transparent cells, so only the lines show — the common grid-over-footage
+    look); `anchor` shifts the grid origin.
+  - **Colour-space-correct compositing** — Fractal Noise emits a grayscale value
+    treated as *linear-light* (`[0,1]`, no decode); the four colour generators emit
+    straight **sRGB** colour decoded **sRGB → linear** at the gamma boundary by the
+    compositor, exactly like a solid's swatch — so their colours match the colour
+    pickers. A new `GenerateEffect::produces_color()` drives that path split, and a
+    new `GenerateEffect::rgba_at(lx, ly, half_w, half_h)` returns the straight RGBA
+    each generator synthesises (the 4-color / radial ramp normalise across the
+    quad's half-extents); `composite_generate` now samples `rgba_at` for every
+    generator. The per-layer colour-correction stack still runs on the straight
+    value before compositing.
+  - **Deterministic + keyframable** — every generator is deterministic in
+    `(params, pixel)` (the colour generators have no time axis, so they're bit-
+    stable within a frame; they animate by keyframing their scalar params). The
+    Fractal-Noise **evolution** track is a no-op for the colour generators (they
+    have no evolution axis), so it's hidden in the UI for them.
+  - **UI** — the Properties **Generate** section gained a **generator picker**
+    (Fractal Noise / Gradient Ramp / Checkerboard / 4-Color Gradient / Grid;
+    switching swaps to that generator's defaults) and per-generator parameter
+    editors (shape / points / radius / colours / sizes / border / scatter / jitter
+    / blend / opacity), with the evolution-animation row shown only for Fractal
+    Noise. Each generator is registered in the **Effects & Presets** browser under
+    the **Generate** category, found by name + synonyms (e.g. *gradient* / *radial*
+    → Gradient Ramp, *checker* / *squares* → Checkerboard, *corner* / *mesh* →
+    4-Color Gradient, *lines* / *graph* → Grid).
+  - **Pure + tested** (+29 tests, 413 total) — each generator is unit-tested:
+    linear-ramp endpoints / midpoint / endpoint-clamp / constant-perpendicular,
+    radial-ramp centre / radius-edge / isotropy / midpoint, ramp scatter
+    determinism + perturbation, degenerate (zero-length / zero-size) no-NaN
+    guards; checkerboard cell parity (the four cells around the origin), negative-
+    cell continuity, anchor shift; 4-color corner values + interior bilinear blend
+    (centre = corner average, edge midpoints) + jitter determinism; grid line-vs-
+    cell pixels, horizontal / intersection lines, filled-background opacity,
+    thicker-border coverage; the `bias` curve; opacity clamp + serde round-trip for
+    **every** generator + `produces_color`. The **render path** is integration-
+    tested for each (ramp gradient fills the quad top→bottom, checkerboard
+    alternates adjacent cells, 4-color blends the corners across quadrants, grid
+    draws opaque lines over a transparent background), plus colour-generator render
+    determinism and an sRGB-decode round-trip (a known sRGB colour comes back to
+    ~the same 8-bit output). The browser registry test confirms all five
+    generators are findable and grouped under Generate.
+
 - **Fractal Noise generator** (After-Effects *Generate ▸ Fractal Noise* — the
   motion-design workhorse; PLAN Phase 3 *Generate*) — the first **generate**
   effect: a per-layer fill that *replaces* the layer's pixels with multi-octave

@@ -1,7 +1,3 @@
-// `GenerateEffect` has a single variant today, so destructuring it with `let`
-// is irrefutable; the generate tests keep that form so they stay correct when
-// more generate variants are added.
-#![allow(irrefutable_let_patterns)]
 use super::effect::{curve_eval, hsl_to_rgb, rgb_to_hsl, smoothstep};
 use super::keyframe::{cubic_bezier, solve_bezier_x};
 use super::mask::{dist_to_polygon, point_in_polygon};
@@ -480,18 +476,29 @@ fn generate_serde_defaults_to_none() {
     assert!(layer.generate.is_none());
 }
 
+/// Pull the `evolution` out of a Fractal-Noise generate (test helper).
+fn evo_of(g: GenerateEffect) -> f32 {
+    match g {
+        GenerateEffect::FractalNoise { evolution, .. } => evolution,
+        other => panic!("expected Fractal Noise, got {}", other.label()),
+    }
+}
+
 #[test]
 fn generate_at_uses_static_evolution_when_track_empty() {
     // No evolution keys → generate_at returns the static field unchanged.
     let mut gen = GenerateEffect::defaults()[0];
-    let GenerateEffect::FractalNoise { evolution, .. } = &mut gen;
-    *evolution = 3.0;
+    if let GenerateEffect::FractalNoise { evolution, .. } = &mut gen {
+        *evolution = 3.0;
+    }
     let mut layer = PulseLayer::new("L", [1.0; 4]);
     layer.generate = Some(gen);
-    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(0.0).unwrap();
-    assert_eq!(evolution, 3.0);
-    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(5.0).unwrap();
-    assert_eq!(evolution, 3.0, "static evolution is constant over time");
+    assert_eq!(evo_of(layer.generate_at(0.0).unwrap()), 3.0);
+    assert_eq!(
+        evo_of(layer.generate_at(5.0).unwrap()),
+        3.0,
+        "static evolution is constant over time"
+    );
 }
 
 #[test]
@@ -501,12 +508,22 @@ fn generate_at_track_overrides_static_evolution() {
     layer.generate = Some(GenerateEffect::defaults()[0]);
     layer.generate_evolution.set_key(0.0, 0.0);
     layer.generate_evolution.set_key(2.0, 10.0);
-    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(0.0).unwrap();
-    assert!((evolution - 0.0).abs() < 1e-5);
-    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(1.0).unwrap();
-    assert!((evolution - 5.0).abs() < 1e-4, "linear interp at midpoint, got {evolution}");
-    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(2.0).unwrap();
-    assert!((evolution - 10.0).abs() < 1e-4);
+    assert!((evo_of(layer.generate_at(0.0).unwrap()) - 0.0).abs() < 1e-5);
+    let mid = evo_of(layer.generate_at(1.0).unwrap());
+    assert!((mid - 5.0).abs() < 1e-4, "linear interp at midpoint, got {mid}");
+    assert!((evo_of(layer.generate_at(2.0).unwrap()) - 10.0).abs() < 1e-4);
+}
+
+#[test]
+fn generate_at_color_generator_ignores_evolution_track() {
+    // A colour generator has no evolution axis, so a keyed evolution track is a
+    // no-op for it (the generate is returned unchanged).
+    let mut layer = PulseLayer::new("L", [1.0; 4]);
+    let ramp = GenerateEffect::defaults()[1];
+    layer.generate = Some(ramp);
+    layer.generate_evolution.set_key(0.0, 0.0);
+    layer.generate_evolution.set_key(2.0, 10.0);
+    assert_eq!(layer.generate_at(1.0).unwrap(), ramp);
 }
 
 #[test]

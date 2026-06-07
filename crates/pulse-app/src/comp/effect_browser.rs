@@ -216,6 +216,49 @@ pub const REGISTRY: &[BrowserEntry] = &[
             "evolution",
         ],
     },
+    BrowserEntry {
+        name: "Gradient Ramp",
+        category: Category::Generate,
+        stack: Stack::Generate,
+        default_index: 1,
+        keywords: &[
+            "ramp",
+            "gradient",
+            "linear",
+            "radial",
+            "fade",
+            "blend",
+            "color",
+        ],
+    },
+    BrowserEntry {
+        name: "Checkerboard",
+        category: Category::Generate,
+        stack: Stack::Generate,
+        default_index: 2,
+        keywords: &["checker", "checkerboard", "chequer", "grid", "tile", "squares"],
+    },
+    BrowserEntry {
+        name: "4-Color Gradient",
+        category: Category::Generate,
+        stack: Stack::Generate,
+        default_index: 3,
+        keywords: &[
+            "4 color",
+            "four color",
+            "gradient",
+            "corner",
+            "blend",
+            "mesh",
+        ],
+    },
+    BrowserEntry {
+        name: "Grid",
+        category: Category::Generate,
+        stack: Stack::Generate,
+        default_index: 4,
+        keywords: &["grid", "lines", "graph", "guides", "mesh", "checker"],
+    },
 ];
 
 /// A scored search hit: the matched registry entry and a relevance `score`
@@ -398,6 +441,33 @@ mod tests {
         // And it groups under the Generate category.
         let groups = filter_grouped("fractal");
         assert!(groups.iter().any(|(c, _)| *c == Category::Generate));
+    }
+
+    #[test]
+    fn generate_family_is_findable() {
+        // Each new generate effect is reachable by name and a synonym, and groups
+        // under the Generate category.
+        for (name, queries) in [
+            ("Gradient Ramp", ["ramp", "gradient"]),
+            ("Checkerboard", ["checker", "checkerboard"]),
+            ("4-Color Gradient", ["4 color", "corner"]),
+            ("Grid", ["grid", "lines"]),
+        ] {
+            for q in queries {
+                let hits = filter(q);
+                assert!(
+                    hits.iter().any(|h| h.entry.name == name),
+                    "querying {q:?} should find {name}"
+                );
+            }
+        }
+        // The Generate folder holds all five generators on an empty query.
+        let groups = filter_grouped("");
+        let gen = groups
+            .iter()
+            .find(|(c, _)| *c == Category::Generate)
+            .expect("Generate folder present");
+        assert_eq!(gen.1.len(), 5, "five generators in the Generate folder");
     }
 
     #[test]
