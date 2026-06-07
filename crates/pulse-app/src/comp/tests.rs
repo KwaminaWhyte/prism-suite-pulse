@@ -1878,8 +1878,8 @@ fn bilinear_sample_hits_pixel_centers() {
     // Sampling at a pixel's center returns that pixel exactly.
     let buf = gradient_buf(4, 4);
     let s = sample_bilinear(&buf, 4, 4, 2.5, 1.5); // center of pixel (2, 1)
-    assert!((s[0] - buf[1 * 4 + 2][0]).abs() < 1e-5);
-    assert!((s[1] - buf[1 * 4 + 2][1]).abs() < 1e-5);
+    assert!((s[0] - buf[4 + 2][0]).abs() < 1e-5);
+    assert!((s[1] - buf[4 + 2][1]).abs() < 1e-5);
 }
 
 #[test]
@@ -1929,7 +1929,7 @@ fn corner_pin_maps_corners_to_targets() {
     .apply(&mut buf, w, w);
     // The far top-right corner of the *output* is outside the pinned quad (which
     // now bends inward at the top-right), so it's transparent.
-    assert_eq!(buf[1 * w + (w - 2)][3], 0.0, "output TR is outside the quad");
+    assert_eq!(buf[w + (w - 2)][3], 0.0, "output TR is outside the quad");
     // The source's bright-red top-right region (x≈1) was pinned toward the centre,
     // so a point a little inside the quad near the centre carries high red — well
     // above the source's red at that same buffer location without the pin.
