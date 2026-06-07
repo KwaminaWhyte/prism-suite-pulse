@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Playback is now render-paced (timeline no longer races the preview)** — with
+  the off-thread render, advancing the playhead by wall-clock time let the
+  timeline playhead run ahead at real time (30 fps) while the slower CPU render
+  lagged behind and dropped frames, so the bar moved "way ahead" of a janky
+  preview. The playhead now advances to the next comp frame **only once the
+  preview has shown the current one** (`step_playhead`, gated on
+  `PreviewRenderer::shown_time`): the timeline and the picture stay locked
+  together and every frame is shown in order (smooth, none dropped). The UI stays
+  responsive throughout — the render never blocks it — so heavy comps simply play
+  back slower than real time instead of desyncing.
+
 - **Overlays led the pixels during playback** — after moving the preview render
   off the UI thread, the displayed frame lags the live playhead (drop-frame), but
   the editor overlays (selection box, motion path, mask outlines, transform

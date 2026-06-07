@@ -423,12 +423,21 @@ impl eframe::App for PulseApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
 
-        // Advance the playhead by real dt while playing; loop at duration.
+        // Playback is **render-paced**, not wall-clock-paced: advance to the next
+        // comp frame only once the preview has actually shown the current one. The
+        // CPU compositor runs off the UI thread and may be slower than real time,
+        // so pacing playback to it keeps the timeline and the picture locked
+        // together — and smooth, since every frame is shown in order, none dropped.
+        // (Wall-clock advance let the playhead race ahead of a lagging, frame-
+        // dropping preview.) The UI stays responsive throughout — the render never
+        // blocks it — so heavy comps simply play back slower than real time.
         if self.playing {
-            let dt = ctx.input(|i| i.stable_dt).min(0.1);
-            self.time += dt;
-            if self.time >= self.comp.duration {
-                self.time %= self.comp.duration.max(0.001);
+            let caught_up = self
+                .preview
+                .shown_time()
+                .is_some_and(|shown| (shown - self.time).abs() < 1e-4);
+            if caught_up {
+                self.time = step_playhead(self.time, self.comp.fps, self.comp.duration);
             }
             ctx.request_repaint();
         }
@@ -474,4 +483,45 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     };
     let m = v - c;
     (r + m, g + m, b + m)
+}
+
+/// Advance the playhead by one frame at `fps`, looping back to the start once it
+/// reaches `duration`. Pure (no app state) so the render-paced playback step is
+/// unit-testable; the live loop calls this only when the preview has caught up to
+/// the current frame.
+fn step_playhead(time: f32, fps: f32, duration: f32) -> f32 {
+    let step = 1.0 / fps.max(1.0);
+    let t = time + step;
+    if t >= duration {
+        t % duration.max(0.001)
+    } else {
+        t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_playhead;
+
+    #[test]
+    fn step_advances_by_one_frame() {
+        // 30 fps → a single step is 1/30 s.
+        let t = step_playhead(0.0, 30.0, 5.0);
+        assert!((t - 1.0 / 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn step_loops_at_duration() {
+        // One frame before the end (5.0 s @ 30 fps), the next step wraps to ~0.
+        let last = 5.0 - 1.0 / 30.0;
+        let wrapped = step_playhead(last, 30.0, 5.0);
+        assert!(wrapped < 1.0 / 30.0, "playback loops back to the start");
+    }
+
+    #[test]
+    fn step_handles_degenerate_fps_and_duration() {
+        // Zero fps clamps to a 1 s step; a zero duration can't divide by zero.
+        let t = step_playhead(0.0, 0.0, 0.0);
+        assert!(t.is_finite());
+    }
 }
