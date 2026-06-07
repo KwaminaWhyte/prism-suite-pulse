@@ -1709,7 +1709,89 @@ fn effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut Effect) 
             color_balance_range(ui, idx, ei, 1, "Midtones", midtones);
             color_balance_range(ui, idx, ei, 2, "Highlights", highlights);
         }
+        Effect::ChannelMixer {
+            red,
+            green,
+            blue,
+            monochrome,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(monochrome, "Monochrome");
+            });
+            // When monochrome, only the red row drives the single gray mix.
+            channel_mixer_row(ui, idx, ei, 0, "Red", red);
+            if !*monochrome {
+                channel_mixer_row(ui, idx, ei, 1, "Green", green);
+                channel_mixer_row(ui, idx, ei, 2, "Blue", blue);
+            }
+        }
+        Effect::GradientMap {
+            low,
+            mid,
+            high,
+            amount,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Shadows");
+                rgb_button(ui, (idx, ei, 0), low);
+                ui.label("Midtones");
+                rgb_button(ui, (idx, ei, 1), mid);
+                ui.label("Highlights");
+                rgb_button(ui, (idx, ei, 2), high);
+            });
+            slider(ui, "Amount", amount, 0.0, 1.0);
+        }
+        Effect::Tritone {
+            shadows,
+            midtones,
+            highlights,
+            amount,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Shadows");
+                rgb_button(ui, (idx, ei, 0), shadows);
+                ui.label("Midtones");
+                rgb_button(ui, (idx, ei, 1), midtones);
+                ui.label("Highlights");
+                rgb_button(ui, (idx, ei, 2), highlights);
+            });
+            slider(ui, "Amount", amount, 0.0, 1.0);
+        }
     }
+}
+
+/// One output-channel row of [`Effect::ChannelMixer`]: a label and four drag
+/// values — the source-R/G/B weights (`-2..=2`) and a constant offset
+/// (`-1..=1`). `row` salts the widget ids per output channel.
+fn channel_mixer_row(
+    ui: &mut egui::Ui,
+    idx: usize,
+    ei: usize,
+    row: usize,
+    label: &str,
+    weights: &mut [f32; 4],
+) {
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(label).strong());
+    });
+    ui.push_id(("channelmixer", idx, ei, row), |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            for (i, name) in ["R", "G", "B", "Const"].iter().enumerate() {
+                let (lo, hi) = if i < 3 { (-2.0, 2.0) } else { (-1.0, 1.0) };
+                ui.label(*name);
+                ui.add(
+                    egui::DragValue::new(&mut weights[i])
+                        .speed(0.01)
+                        .range(lo..=hi),
+                );
+            }
+        });
+    });
 }
 
 /// One tonal-range row of [`Effect::ColorBalance`]: a label and three

@@ -198,6 +198,52 @@ pub const REGISTRY: &[BrowserEntry] = &[
         default_index: 6,
         keywords: &["shadows", "midtones", "highlights", "grade", "tint"],
     },
+    BrowserEntry {
+        name: "Channel Mixer",
+        category: Category::Color,
+        stack: Stack::Color,
+        default_index: 7,
+        keywords: &[
+            "channel",
+            "mixer",
+            "swap",
+            "rgb",
+            "monochrome",
+            "grayscale",
+            "mix",
+        ],
+    },
+    BrowserEntry {
+        name: "Gradient Map",
+        category: Category::Color,
+        stack: Stack::Color,
+        default_index: 8,
+        keywords: &[
+            "gradient",
+            "map",
+            "luma",
+            "ramp",
+            "duotone",
+            "grade",
+            "color",
+        ],
+    },
+    BrowserEntry {
+        name: "Tritone",
+        category: Category::Color,
+        stack: Stack::Color,
+        default_index: 9,
+        keywords: &[
+            "tritone",
+            "tint",
+            "duotone",
+            "three tone",
+            "shadows",
+            "midtones",
+            "highlights",
+            "grade",
+        ],
+    },
     // --- Spatial (SpatialEffect::defaults() order) --------------------------
     BrowserEntry {
         name: "Gaussian Blur",
@@ -756,6 +802,36 @@ mod tests {
             .find(|(c, _)| *c == Category::Keying)
             .expect("Keying folder present");
         assert_eq!(key.1.len(), 5, "five keyers in the Keying folder");
+    }
+
+    #[test]
+    fn color_correction_family_is_findable() {
+        // The newest color-correction effects are reachable by name and a
+        // synonym, and group under the Color Correction category.
+        for (name, queries) in [
+            ("Channel Mixer", ["channel", "monochrome"]),
+            ("Gradient Map", ["gradient map", "luma"]),
+            ("Tritone", ["tritone", "three tone"]),
+        ] {
+            for q in queries {
+                let hits = filter(q);
+                assert!(
+                    hits.iter().any(|h| h.entry.name == name),
+                    "querying {q:?} should find {name}"
+                );
+            }
+        }
+        // The Color Correction folder holds every Effect on an empty query.
+        let groups = filter_grouped("");
+        let color = groups
+            .iter()
+            .find(|(c, _)| *c == Category::Color)
+            .expect("Color Correction folder present");
+        assert_eq!(
+            color.1.len(),
+            Effect::defaults().len(),
+            "every color effect in the Color Correction folder"
+        );
     }
 
     #[test]

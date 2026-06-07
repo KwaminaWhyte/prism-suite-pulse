@@ -45,6 +45,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Color-correction expansion — Channel Mixer / Gradient Map / Tritone** (After
+  Effects' *Color Correction ▸ Channel Mixer / Photoshop "Gradient Map" /
+  Tritone*; PLAN Phase 3 *Color correction*) — three new per-layer
+  **color-correction** effects added to the existing CC stack (Tint,
+  Brightness/Contrast, Exposure, Levels, Hue/Saturation, Curves, Color Balance),
+  each a pure straight-RGBA linear-light pass wired exactly like the others
+  (new `Effect` variant + `apply` arm + `defaults()` slot + a Properties editor
+  + the *Effects & Presets* browser's *Color Correction* folder). All reuse
+  shared `prism_core` math — Pulse only wires it; the shared crate is untouched.
+  - **Channel Mixer** (`Effect::ChannelMixer`) — each output channel is a linear
+    mix of the input R/G/B plus a constant (`[from_r, from_g, from_b, const]`
+    per output row), with a **monochrome** toggle that collapses to the red row's
+    weighted gray. The mix math is the shared
+    `prism_core::adjust::ChannelMixerMatrix::apply` (asserted bit-identical in a
+    test) — no reimplementation. Defaults to identity (a no-op until edited).
+  - **Gradient Map** (`Effect::GradientMap`) — maps each pixel's Rec.709 luma
+    through a **three-stop** color gradient (`low` at luma 0, `mid` at 0.5,
+    `high` at 1) so black takes the first stop, mid-gray the middle, white the
+    last. Built from the shared multi-stop `prism_core::gradient::Gradient` and
+    sampled with `Gradient::color_at`; an `amount` knob blends original→mapped.
+    Defaults to an identity grayscale map (a no-op until recolored).
+  - **Tritone** (`Effect::Tritone`) — the same shared gradient primitive authored
+    as three named tonal targets (shadows / midtones / highlights), a classic
+    three-tone duotone-style grade; `amount` blends original→toned. Seeds a
+    recognizable blue-shadow / warm-mid / pale-highlight look.
+  - Tests: channel-mixer identity passthrough / **R←B swap** / constant + clamp /
+    monochrome gray / **bit-identical to the shared `ChannelMixerMatrix`**;
+    gradient-map black→first / white→last / mid→mid / interpolation / amount-0
+    passthrough; tritone three-tone mapping; determinism + alpha preserved for all
+    three; **render-path** tests compositing a Channel-Mixer swap and a
+    Gradient-Map recolor into the frame buffer; browser findability + the
+    Color-Correction folder now lists all ten effects.
+
 - **Blur & Sharpen family — Box Blur / Directional Blur / Radial Blur** (After
   Effects' *Blur & Sharpen ▸ Box Blur / Directional Blur / Radial Blur*; PLAN
   Phase 3 *Blur & sharpen*) — three new **spatial** (whole-buffer) blurs added to

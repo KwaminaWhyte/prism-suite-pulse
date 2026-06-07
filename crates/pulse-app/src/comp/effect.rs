@@ -1,5 +1,7 @@
 //! Layer kinds and the per-pixel color-correction effect stack.
 
+use prism_core::adjust::ChannelMixerMatrix;
+use prism_core::gradient::{ColorStop, Gradient, GradientType};
 use serde::{Deserialize, Serialize};
 
 /// What a layer *is* — its source/role in the composite, in the After-Effects
@@ -159,6 +161,55 @@ pub enum Effect {
         /// Highlight R/G/B push, each `-1..=1`.
         highlights: [f32; 3],
     },
+    /// Channel Mixer (After Effects / Photoshop "Channel Mixer"): each output
+    /// channel is a linear mix of the input R/G/B plus a constant. Each of `red`,
+    /// `green`, `blue` is `[from_r, from_g, from_b, constant]`; `monochrome`
+    /// collapses to the **red** row written to all three outputs (a custom
+    /// grayscale). The mix math is the shared
+    /// [`prism_core::adjust::ChannelMixerMatrix::apply`] — Pulse only wires it.
+    /// Identity (each output = its own input) is a no-op.
+    ChannelMixer {
+        /// Red output row: `[from_r, from_g, from_b, constant]`.
+        red: [f32; 4],
+        /// Green output row: `[from_r, from_g, from_b, constant]`.
+        green: [f32; 4],
+        /// Blue output row: `[from_r, from_g, from_b, constant]`.
+        blue: [f32; 4],
+        /// Collapse to a single weighted gray (the `red` row → all outputs).
+        monochrome: bool,
+    },
+    /// Gradient Map (After Effects / Photoshop "Gradient Map"): map each pixel's
+    /// luminance through a three-stop color gradient — `low` at luma 0, `mid` at
+    /// luma 0.5, `high` at luma 1 — so black takes the first stop, white the last,
+    /// mid-gray the middle. Built from the shared multi-stop
+    /// [`prism_core::gradient::Gradient`] and sampled with `Gradient::color_at`.
+    /// `amount` blends original→mapped (0 = original, 1 = full map).
+    GradientMap {
+        /// Shadow color at luma 0 (straight linear RGB).
+        low: [f32; 3],
+        /// Midtone color at luma 0.5 (straight linear RGB).
+        mid: [f32; 3],
+        /// Highlight color at luma 1 (straight linear RGB).
+        high: [f32; 3],
+        /// Original→mapped blend, `0..=1`.
+        amount: f32,
+    },
+    /// Tritone / Tint-map (After Effects' "Tritone"): like Gradient Map but
+    /// authored as three named tonal targets — `shadows`, `midtones`,
+    /// `highlights` — mapped by luma through the same shared multi-stop
+    /// [`prism_core::gradient::Gradient`] (`Gradient::color_at`). Distinct from
+    /// Gradient Map only in intent / defaults (a classic three-tone duotone-style
+    /// grade). `amount` blends original→toned.
+    Tritone {
+        /// Color mapped to the darkest pixels (luma 0).
+        shadows: [f32; 3],
+        /// Color mapped to mid-gray pixels (luma 0.5).
+        midtones: [f32; 3],
+        /// Color mapped to the brightest pixels (luma 1).
+        highlights: [f32; 3],
+        /// Original→toned blend, `0..=1`.
+        amount: f32,
+    },
 }
 
 impl Effect {
@@ -172,6 +223,9 @@ impl Effect {
             Effect::HueSaturation { .. } => "Hue / Saturation",
             Effect::Curves { .. } => "Curves",
             Effect::ColorBalance { .. } => "Color Balance",
+            Effect::ChannelMixer { .. } => "Channel Mixer",
+            Effect::GradientMap { .. } => "Gradient Map",
+            Effect::Tritone { .. } => "Tritone",
         }
     }
 
@@ -182,7 +236,7 @@ impl Effect {
     /// the "add effect" menu. Defaults are identity where possible so adding an
     /// effect never changes the look until a parameter is touched — except Tint,
     /// which seeds a recognizable black→white map at full strength.
-    pub fn defaults() -> [Effect; 7] {
+    pub fn defaults() -> [Effect; 10] {
         [
             Effect::Tint {
                 black: [0.0, 0.0, 0.0],
@@ -217,6 +271,29 @@ impl Effect {
                 shadows: [0.0; 3],
                 midtones: [0.0; 3],
                 highlights: [0.0; 3],
+            },
+            Effect::ChannelMixer {
+                // Identity: each output channel = its own input, no constant.
+                red: [1.0, 0.0, 0.0, 0.0],
+                green: [0.0, 1.0, 0.0, 0.0],
+                blue: [0.0, 0.0, 1.0, 0.0],
+                monochrome: false,
+            },
+            Effect::GradientMap {
+                // Identity grayscale map (black→black, mid→gray, white→white):
+                // adding it is a no-op until the stops are recolored.
+                low: [0.0, 0.0, 0.0],
+                mid: [0.5, 0.5, 0.5],
+                high: [1.0, 1.0, 1.0],
+                amount: 1.0,
+            },
+            Effect::Tritone {
+                // A recognizable three-tone grade (deep blue shadows, warm
+                // midtones, pale highlights) at full strength.
+                shadows: [0.04, 0.02, 0.18],
+                midtones: [0.55, 0.42, 0.30],
+                highlights: [0.98, 0.95, 0.82],
+                amount: 1.0,
             },
         ]
     }
@@ -338,6 +415,33 @@ impl Effect {
                     apply_push(b, push(2)),
                 ]
             }
+            Effect::ChannelMixer {
+                red,
+                green,
+                blue,
+                monochrome,
+            } => {
+                // Reuse the shared prism-core mixer math — Pulse only wires it.
+                let m = ChannelMixerMatrix {
+                    r: red,
+                    g: green,
+                    b: blue,
+                    monochrome,
+                };
+                m.apply([r, g, b])
+            }
+            Effect::GradientMap {
+                low,
+                mid,
+                high,
+                amount,
+            } => gradient_map(low, mid, high, amount, r, g, b),
+            Effect::Tritone {
+                shadows,
+                midtones,
+                highlights,
+                amount,
+            } => gradient_map(shadows, midtones, highlights, amount, r, g, b),
         };
         [
             out[0].clamp(0.0, 1.0),
@@ -354,6 +458,40 @@ pub fn apply_effects(effects: &[Effect], mut rgba: [f32; 4]) -> [f32; 4] {
         rgba = e.apply(rgba);
     }
     rgba
+}
+
+/// Map a pixel's Rec.709 luma through a three-stop color gradient (`low` at luma
+/// 0, `mid` at 0.5, `high` at 1) and blend original→mapped by `amount`. The
+/// gradient is the shared multi-stop [`prism_core::gradient::Gradient`], sampled
+/// with [`Gradient::color_at`] — the reusable primitive behind both Gradient Map
+/// and Tritone. Returns straight RGB (alpha handled by the caller).
+fn gradient_map(
+    low: [f32; 3],
+    mid: [f32; 3],
+    high: [f32; 3],
+    amount: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+) -> [f32; 3] {
+    let luma = (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0);
+    let grad = Gradient {
+        color_stops: vec![
+            ColorStop::new(0.0, low),
+            ColorStop::new(0.5, mid),
+            ColorStop::new(1.0, high),
+        ],
+        opacity_stops: Vec::new(),
+        kind: GradientType::Linear,
+        dither: false,
+    };
+    let mapped = grad.color_at(luma);
+    let m = amount.clamp(0.0, 1.0);
+    [
+        r + (mapped[0] - r) * m,
+        g + (mapped[1] - g) * m,
+        b + (mapped[2] - b) * m,
+    ]
 }
 
 /// The classic GLSL `smoothstep`: 0 below `e0`, 1 above `e1`, a smooth Hermite

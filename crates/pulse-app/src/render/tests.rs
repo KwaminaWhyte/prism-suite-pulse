@@ -307,6 +307,45 @@ fn solid_effect_stack_recolors_the_quad() {
 }
 
 #[test]
+fn channel_mixer_swaps_channels_in_render_path() {
+    // A pure-blue solid with a Channel Mixer that sources red from blue (R<-B)
+    // should read with a high red channel at the center after compositing.
+    let mut c = solid([0.0, 0.0, 1.0, 1.0]);
+    c.layers[0].effects.push(crate::comp::Effect::ChannelMixer {
+        red: [0.0, 0.0, 1.0, 0.0], // R <- B
+        green: [0.0, 1.0, 0.0, 0.0],
+        blue: [0.0, 0.0, 1.0, 0.0],
+        monochrome: false,
+    });
+    let f = render_frame(&c, 0.0);
+    let [r, g, b, a] = f.pixel(32, 32);
+    assert_eq!(a, 255);
+    assert!(r > 250, "expected red lifted from blue, got r={r}");
+    assert!(g < 5, "green should stay zero, got {g}");
+    assert!(b > 250, "blue should stay high, got {b}");
+}
+
+#[test]
+fn gradient_map_recolors_solid_in_render_path() {
+    // A black solid through a Gradient Map whose shadow stop is pure red should
+    // composite as red at the center (luma 0 -> first stop).
+    let mut c = solid([0.0, 0.0, 0.0, 1.0]);
+    c.layers[0].effects.push(crate::comp::Effect::GradientMap {
+        low: [1.0, 0.0, 0.0],
+        mid: [0.0, 1.0, 0.0],
+        high: [0.0, 0.0, 1.0],
+        amount: 1.0,
+    });
+    let f = render_frame(&c, 0.0);
+    let [r, g, b, a] = f.pixel(32, 32);
+    assert_eq!(a, 255);
+    assert!(
+        r > 250 && g < 5 && b < 5,
+        "expected red shadow stop, got {r},{g},{b}"
+    );
+}
+
+#[test]
 fn adjustment_layer_regrades_layers_below() {
     // A mid-gray solid beneath a full-frame adjustment that lifts brightness
     // should read brighter at the center than without the adjustment.

@@ -828,6 +828,160 @@ fn new_effects_preserve_alpha() {
     }
 }
 
+// --- Channel Mixer, Gradient Map, Tritone -------------------------------
+
+#[test]
+fn channel_mixer_identity_is_passthrough() {
+    // The default channel mixer (each output = its own input) is a no-op.
+    let id = Effect::ChannelMixer {
+        red: [1.0, 0.0, 0.0, 0.0],
+        green: [0.0, 1.0, 0.0, 0.0],
+        blue: [0.0, 0.0, 1.0, 0.0],
+        monochrome: false,
+    };
+    assert!(approx_rgb(id.apply([0.2, 0.5, 0.8, 1.0]), [0.2, 0.5, 0.8]));
+    assert_eq!(id.apply([0.2, 0.5, 0.8, 0.3])[3], 0.3);
+}
+
+#[test]
+fn channel_mixer_swaps_red_from_blue() {
+    // Output red sourced entirely from input blue (R←B); green/blue unchanged.
+    let swap = Effect::ChannelMixer {
+        red: [0.0, 0.0, 1.0, 0.0],
+        green: [0.0, 1.0, 0.0, 0.0],
+        blue: [0.0, 0.0, 1.0, 0.0],
+        monochrome: false,
+    };
+    let out = swap.apply([0.1, 0.4, 0.9, 1.0]);
+    assert!(approx_rgb(out, [0.9, 0.4, 0.9]), "R<-B failed: {out:?}");
+}
+
+#[test]
+fn channel_mixer_constant_and_clamp() {
+    // A +0.5 constant lifts the channel; output stays clamped to [0,1].
+    let lift = Effect::ChannelMixer {
+        red: [1.0, 0.0, 0.0, 0.5],
+        green: [0.0, 1.0, 0.0, 0.0],
+        blue: [0.0, 0.0, 1.0, 0.0],
+        monochrome: false,
+    };
+    assert!((lift.apply([0.2, 0.2, 0.2, 1.0])[0] - 0.7).abs() < 1e-4);
+    // 0.8 + 0.5 = 1.3 -> clamped to 1.0.
+    assert_eq!(lift.apply([0.8, 0.2, 0.2, 1.0])[0], 1.0);
+}
+
+#[test]
+fn channel_mixer_monochrome_writes_gray_from_red_row() {
+    // Monochrome collapses every output to the red row's weighted gray.
+    let mono = Effect::ChannelMixer {
+        red: [0.3, 0.59, 0.11, 0.0], // luma-ish weights
+        green: [0.0, 1.0, 0.0, 0.0], // ignored when monochrome
+        blue: [0.0, 0.0, 1.0, 0.0],  // ignored when monochrome
+        monochrome: true,
+    };
+    let out = mono.apply([1.0, 0.0, 0.0, 1.0]);
+    assert!((out[0] - out[1]).abs() < 1e-6 && (out[1] - out[2]).abs() < 1e-6);
+    assert!((out[0] - 0.3).abs() < 1e-4, "gray = {}", out[0]);
+}
+
+#[test]
+fn channel_mixer_matches_shared_prism_core_math() {
+    // Pulse must defer to the shared prism_core ChannelMixerMatrix — assert the
+    // result is bit-identical to calling the shared math directly (no reimpl).
+    let red = [0.4, 0.2, 0.1, 0.05];
+    let green = [0.1, 0.7, 0.2, 0.0];
+    let blue = [0.0, 0.3, 0.6, -0.1];
+    let e = Effect::ChannelMixer {
+        red,
+        green,
+        blue,
+        monochrome: false,
+    };
+    let px = [0.35, 0.6, 0.8];
+    let shared = prism_core::adjust::ChannelMixerMatrix {
+        r: red,
+        g: green,
+        b: blue,
+        monochrome: false,
+    }
+    .apply(px);
+    let out = e.apply([px[0], px[1], px[2], 1.0]);
+    assert_eq!([out[0], out[1], out[2]], shared);
+}
+
+#[test]
+fn gradient_map_black_white_mid() {
+    // Map black->first stop, white->last stop, mid-gray->mid stop.
+    let e = Effect::GradientMap {
+        low: [0.0, 0.0, 1.0],  // blue shadows
+        mid: [0.0, 1.0, 0.0],  // green mids
+        high: [1.0, 0.0, 0.0], // red highlights
+        amount: 1.0,
+    };
+    assert!(approx_rgb(e.apply([0.0, 0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]));
+    assert!(approx_rgb(e.apply([1.0, 1.0, 1.0, 1.0]), [1.0, 0.0, 0.0]));
+    // Pure gray at luma 0.5 lands on the mid stop.
+    let mid = e.apply([0.5, 0.5, 0.5, 1.0]);
+    assert!(approx_rgb(mid, [0.0, 1.0, 0.0]), "mid = {mid:?}");
+}
+
+#[test]
+fn gradient_map_amount_zero_is_passthrough() {
+    let e = Effect::GradientMap {
+        low: [0.0, 0.0, 1.0],
+        mid: [0.0, 1.0, 0.0],
+        high: [1.0, 0.0, 0.0],
+        amount: 0.0,
+    };
+    assert!(approx_rgb(e.apply([0.2, 0.5, 0.8, 1.0]), [0.2, 0.5, 0.8]));
+    assert_eq!(e.apply([0.2, 0.5, 0.8, 0.7])[3], 0.7);
+}
+
+#[test]
+fn gradient_map_interpolates_between_stops() {
+    // A grayscale identity gradient (black/gray/white) maps luma->luma; a value
+    // a quarter of the way up should read ~that luma on all channels.
+    let e = Effect::GradientMap {
+        low: [0.0, 0.0, 0.0],
+        mid: [0.5, 0.5, 0.5],
+        high: [1.0, 1.0, 1.0],
+        amount: 1.0,
+    };
+    let out = e.apply([0.25, 0.25, 0.25, 1.0]);
+    assert!((out[0] - 0.25).abs() < 1e-3, "out = {out:?}");
+    assert!((out[0] - out[1]).abs() < 1e-6 && (out[1] - out[2]).abs() < 1e-6);
+}
+
+#[test]
+fn tritone_maps_three_tones_by_luma() {
+    // Tritone shares the gradient-map primitive: dark->shadows, mid->midtones,
+    // bright->highlights.
+    let e = Effect::Tritone {
+        shadows: [0.1, 0.0, 0.3],
+        midtones: [0.6, 0.4, 0.2],
+        highlights: [1.0, 0.95, 0.8],
+        amount: 1.0,
+    };
+    assert!(approx_rgb(e.apply([0.0, 0.0, 0.0, 1.0]), [0.1, 0.0, 0.3]));
+    assert!(approx_rgb(e.apply([0.5, 0.5, 0.5, 1.0]), [0.6, 0.4, 0.2]));
+    assert!(approx_rgb(e.apply([1.0, 1.0, 1.0, 1.0]), [1.0, 0.95, 0.8]));
+    // Alpha untouched.
+    assert_eq!(e.apply([0.5, 0.5, 0.5, 0.4])[3], 0.4);
+}
+
+#[test]
+fn color_effects_are_deterministic() {
+    // The new color effects are pure: identical inputs yield identical outputs.
+    let px = [0.33, 0.61, 0.27, 0.9];
+    for e in [
+        Effect::defaults()[7], // Channel Mixer
+        Effect::defaults()[8], // Gradient Map
+        Effect::defaults()[9], // Tritone
+    ] {
+        assert_eq!(e.apply(px), e.apply(px), "{} not deterministic", e.label());
+    }
+}
+
 // --- Track mattes -------------------------------------------------------
 
 #[test]
