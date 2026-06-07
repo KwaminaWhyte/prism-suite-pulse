@@ -4,6 +4,7 @@
 //! [`Track`] interpolates between two [`Keyframe`]s — linear, hold, or a
 //! normalized cubic-Bézier [`Ease`].
 
+use super::expr::{self, ExprCtx};
 use serde::{Deserialize, Serialize};
 
 /// Temporal interpolation between a keyframe and the next one.
@@ -198,12 +199,24 @@ pub struct Keyframe {
     pub interp: Interp,
 }
 
-/// One animated property: a time-ordered list of keyframes.
+/// One animated property: a time-ordered list of keyframes, plus an optional
+/// **expression**.
 ///
 /// Invariant: `keys` is kept sorted ascending by `t` (see [`Track::set_key`]).
+///
+/// When [`expression`](Self::expression) is `Some` and non-empty, the property's
+/// value at time `t` is the result of evaluating that script (see [`expr`]) with
+/// the keyframed sample exposed as `value` — so an expression can offset or
+/// drive the animation. A parse/eval error transparently falls back to the
+/// keyframed value (see [`Track::sample_expr`]).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Track {
     pub keys: Vec<Keyframe>,
+    /// Optional per-property expression. `serde`-defaulted to `None` so pre-
+    /// expression `.pulse` files still load (and skipped on serialize when empty
+    /// so unexpressed tracks round-trip byte-identically to old files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
 }
 
 impl Track {
@@ -242,6 +255,36 @@ impl Track {
                 a.value + (b.value - a.value) * eased
             }
         }
+    }
+
+    /// Sample the track at time `t`, evaluating its **expression** if one is set.
+    ///
+    /// First samples the keyframes exactly like [`Track::sample`] (so the
+    /// expression sees the keyframed value as `value`). If [`expression`] is
+    /// `Some` and non-empty, that script is evaluated against `ctx` (with `value`
+    /// overridden to the keyframed sample); its finite result replaces the value.
+    /// A parse or runtime error — or a non-finite result — falls back to the
+    /// keyframed value (never panics; the error is recorded for the UI via
+    /// [`expr::last_error`]).
+    ///
+    /// [`expression`]: Self::expression
+    pub fn sample_expr(&self, t: f32, default: f32, ctx: ExprCtx) -> f32 {
+        let keyed = self.sample(t, default);
+        match self.expression.as_deref() {
+            Some(src) if !src.trim().is_empty() => {
+                let mut ctx = ctx;
+                ctx.value = keyed; // expose the keyframed value to the script
+                expr::eval(src, &ctx).unwrap_or(keyed)
+            }
+            _ => keyed,
+        }
+    }
+
+    /// Whether this track carries a non-empty expression.
+    pub fn has_expression(&self) -> bool {
+        self.expression
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
     }
 
     /// Borrow the keyframe nearest in time to `t` (within `EPS`), if any.

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 mod blend;
 mod effect;
 mod effect_browser;
+mod expr;
 mod footage;
 mod keyframe;
 mod mask;
@@ -38,6 +39,7 @@ mod transform;
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
 pub use effect::{apply_effects, Effect, LayerKind};
 pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
+pub use expr::{last_error as expr_last_error, ExprCtx};
 pub use footage::{
     source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
 };
@@ -208,12 +210,24 @@ impl PulseLayer {
         }
     }
 
-    /// Sample one property at time `t`.
+    /// Sample one property at time `t`, ignoring any expression (keyframes only).
     pub fn value(&self, prop: Prop, t: f32) -> f32 {
         self.track(prop).sample(t, prop.default_value())
     }
 
-    /// Sample the transform properties at time `t` into a [`Transform`].
+    /// Sample one property at time `t`, **evaluating its expression** if one is
+    /// set. `ctx` carries the comp/layer context (fps, duration, layer index);
+    /// `ctx.time` should be `t`. The keyframed value is exposed to the expression
+    /// as `value`; a parse/eval error falls back to the keyframed value.
+    pub fn value_ctx(&self, prop: Prop, ctx: ExprCtx) -> f32 {
+        self.track(prop)
+            .sample_expr(ctx.time, prop.default_value(), ctx)
+    }
+
+    /// Sample the transform properties at time `t` into a [`Transform`],
+    /// ignoring expressions. Kept for callers without comp context (the gizmo's
+    /// drag-start snapshot, tests). Expression-aware rendering uses
+    /// [`Comp::layer_transform`].
     pub fn transform(&self, t: f32) -> Transform {
         Transform {
             anchor_x: self.value(Prop::AnchorX, t),
@@ -223,6 +237,21 @@ impl PulseLayer {
             scale: self.value(Prop::Scale, t),
             rotation_deg: self.value(Prop::Rotation, t),
             opacity: self.value(Prop::Opacity, t).clamp(0.0, 1.0),
+        }
+    }
+
+    /// Sample the transform properties at time `t` into a [`Transform`],
+    /// **evaluating each property's expression** against `ctx` (one per
+    /// property — each sees its own keyframed value as `value`).
+    pub fn transform_ctx(&self, ctx: ExprCtx) -> Transform {
+        Transform {
+            anchor_x: self.value_ctx(Prop::AnchorX, ctx),
+            anchor_y: self.value_ctx(Prop::AnchorY, ctx),
+            x: self.value_ctx(Prop::X, ctx),
+            y: self.value_ctx(Prop::Y, ctx),
+            scale: self.value_ctx(Prop::Scale, ctx),
+            rotation_deg: self.value_ctx(Prop::Rotation, ctx),
+            opacity: self.value_ctx(Prop::Opacity, ctx).clamp(0.0, 1.0),
         }
     }
 
@@ -339,6 +368,11 @@ impl Comp {
         satellite.scale.set_key(0.0, 0.4);
         satellite.x.set_key(0.0, 360.0);
         satellite.y.set_key(0.0, -180.0);
+        // An **expression** drives the satellite's rotation: it spins steadily
+        // with time and jitters with a deterministic wiggle — so the AE-style
+        // per-property expression engine reads on launch (and demonstrates
+        // `time` + `wiggle` + offsetting the keyframed `value`).
+        satellite.rotation.expression = Some("value + time * 120 + wiggle(3, 15)".to_string());
         // A soft drop shadow + glow on the satellite so the spatial-effect stack
         // (whole-buffer blur/shadow/bloom passes) reads out of the box.
         satellite.spatial_effects.push(SpatialEffect::DropShadow {
@@ -477,14 +511,70 @@ impl Comp {
                 break; // cycle guard
             }
             visited[cur] = true;
-            // Parent applies outermost: world = parent_world · ... · local.
-            m = layer.transform(t).local_matrix().then(m);
+            // Parent applies outermost: world = parent_world · ... · local. Each
+            // layer in the chain samples its own transform with **its own**
+            // expression context (its index), so an expression on a parent drives
+            // the child through the chain exactly as in After Effects.
+            m = layer.transform_ctx(self.expr_ctx(cur, t)).local_matrix().then(m);
             match layer.parent {
                 Some(p) if p != cur && p < self.layers.len() => cur = p,
                 _ => break,
             }
         }
         m
+    }
+
+    /// The expression-evaluation context for layer `idx` at time `t`: the comp's
+    /// `fps` / `duration` and the layer's stack index. `value` is filled in per
+    /// property by the track sampler (overridden to the keyframed sample).
+    pub fn expr_ctx(&self, idx: usize, t: f32) -> ExprCtx {
+        ExprCtx {
+            time: t,
+            value: 0.0,
+            fps: self.fps,
+            duration: self.duration,
+            index: idx,
+        }
+    }
+
+    /// Layer `idx`'s sampled [`Transform`] at time `t`, **expression-aware**
+    /// (each transform property evaluates its expression against the layer's
+    /// context). The renderer/preview use this instead of [`PulseLayer::transform`]
+    /// so expressions drive position / scale / rotation / anchor / opacity.
+    pub fn layer_transform(&self, idx: usize, t: f32) -> Transform {
+        match self.layers.get(idx) {
+            Some(layer) => layer.transform_ctx(self.expr_ctx(idx, t)),
+            None => Transform {
+                anchor_x: 0.0,
+                anchor_y: 0.0,
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                rotation_deg: 0.0,
+                opacity: 1.0,
+            },
+        }
+    }
+
+    /// Layer `idx`'s sampled (and clamped) **opacity** at time `t`, expression-
+    /// aware — the value the rasterizers scale coverage by. `0.0` for a missing
+    /// layer. Reads it off the resolved [`Transform`] so it always matches
+    /// [`layer_transform`](Self::layer_transform).
+    pub fn layer_opacity(&self, idx: usize, t: f32) -> f32 {
+        if self.layers.get(idx).is_none() {
+            return 0.0;
+        }
+        self.layer_transform(idx, t).opacity
+    }
+
+    /// Sample layer `idx`'s property `prop` at time `t`, expression-aware. Used by
+    /// the UI to show the live (expression-resolved) value. `default_value` for a
+    /// missing layer.
+    pub fn layer_value(&self, idx: usize, prop: Prop, t: f32) -> f32 {
+        self.layers
+            .get(idx)
+            .map(|l| l.value_ctx(prop, self.expr_ctx(idx, t)))
+            .unwrap_or_else(|| prop.default_value())
     }
 
     /// Whether layer `idx` is rendered with **motion blur**: the comp's master

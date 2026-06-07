@@ -1540,3 +1540,89 @@ fn precompose_wraps_layer_into_new_comp() {
     assert_eq!(made.layers[0].name, content_name);
     assert_ne!(new_id, host_id, "the precomp target is a distinct comp");
 }
+
+// --- Expressions on properties ---------------------------------------------
+
+#[test]
+fn expression_overrides_keyframed_value() {
+    // `time * 2` ignores the keyframes and is a pure function of time.
+    let mut track = Track::default();
+    track.set_key(0.0, 100.0); // keyframed value the expression replaces
+    track.expression = Some("time * 2".to_string());
+    for &t in &[0.0_f32, 1.0, 2.5, 4.0] {
+        let got = track.sample_expr(t, 0.0, ExprCtx::at(t, 0.0));
+        assert!((got - t * 2.0).abs() < 1e-4, "t={t} got={got}");
+    }
+}
+
+#[test]
+fn expression_value_sees_keyframed_sample() {
+    // `value + 10` offsets the *keyframed* value at each time, proving the
+    // keyframed sample is exposed to the script as `value`.
+    let mut track = Track::default();
+    track.set_key(0.0, 0.0);
+    track.set_key(2.0, 20.0); // linear ramp 0 -> 20
+    track.expression = Some("value + 10".to_string());
+    // Midpoint keyframed value is 10, so the expression yields 20.
+    let got = track.sample_expr(1.0, 0.0, ExprCtx::at(1.0, 0.0));
+    assert!((got - 20.0).abs() < 1e-4, "got={got}");
+}
+
+#[test]
+fn malformed_expression_falls_back_to_keyframed_value() {
+    // A syntax error must not panic and must fall back to the keyframed value.
+    let mut track = Track::default();
+    track.set_key(0.0, 42.0);
+    track.expression = Some("this is not valid $#@".to_string());
+    let got = track.sample_expr(0.0, 0.0, ExprCtx::at(0.0, 0.0));
+    assert_eq!(got, 42.0, "malformed expression should fall back");
+}
+
+#[test]
+fn empty_expression_is_keyframed() {
+    let mut track = Track::default();
+    track.set_key(0.0, 5.0);
+    track.expression = Some("   ".to_string()); // whitespace-only = no expression
+    assert!(!track.has_expression());
+    assert_eq!(track.sample_expr(0.0, 0.0, ExprCtx::at(0.0, 0.0)), 5.0);
+}
+
+#[test]
+fn expression_serde_round_trips() {
+    let mut layer = PulseLayer::new("Expr", [1.0; 4]);
+    layer.x.set_key(0.0, 1.0);
+    layer.x.expression = Some("value + wiggle(2, 30)".to_string());
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.x.expression.as_deref(),
+        Some("value + wiggle(2, 30)"),
+        "expression must survive a serde round-trip"
+    );
+    // A property without an expression deserializes as None (back-compat: the
+    // field is skipped when empty).
+    assert!(back.opacity.expression.is_none());
+}
+
+#[test]
+fn missing_expression_field_defaults_to_none() {
+    // A pre-expression track (no `expression` key) deserializes as None.
+    let json = r#"{"keys":[{"t":0.0,"value":1.0}]}"#;
+    let track: Track = serde_json::from_str(json).unwrap();
+    assert!(track.expression.is_none());
+    assert!(!track.has_expression());
+}
+
+#[test]
+fn comp_layer_value_is_expression_aware() {
+    // Through the comp-level sampler, an expression on a transform property
+    // resolves with the comp's fps/duration/index context.
+    let mut comp = Comp::new();
+    // Put a deterministic expression on layer 0's rotation: `index * 90 + time`.
+    comp.layers[0].rotation.expression = Some("index * 90 + time".to_string());
+    let got = comp.layer_value(0, Prop::Rotation, 5.0);
+    assert!((got - (0.0 * 90.0 + 5.0)).abs() < 1e-4, "got={got}");
+    // The opacity sampler (no expression) is unaffected.
+    let op = comp.layer_opacity(0, 0.0);
+    assert!((0.0..=1.0).contains(&op));
+}

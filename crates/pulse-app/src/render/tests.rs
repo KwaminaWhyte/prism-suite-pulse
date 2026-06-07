@@ -1511,3 +1511,40 @@ fn single_comp_render_ignores_precomp() {
     let f = render_frame(&c, 0.0);
     assert!(f.pixels.iter().all(|&px| px == 0));
 }
+
+// --- Expressions drive the render path -------------------------------------
+
+#[test]
+fn position_expression_moves_coverage_in_render() {
+    // An expression `value + 20` on X (with value defaulting to 0) shifts the
+    // quad right exactly like a keyframed offset would — proving expressions are
+    // wired through the compositor's world matrix, not just the model.
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].x.expression = Some("20".to_string());
+    let f = render_frame(&c, 0.0);
+    assert_eq!(f.pixel(50, 32)[3], 255, "covered band shifted right");
+    assert_eq!(f.pixel(10, 32)[3], 0, "left of the shifted quad is clear");
+}
+
+#[test]
+fn opacity_expression_fades_layer_in_render() {
+    // `time` as an opacity expression makes the center alpha grow with time
+    // (clamped to [0,1]) — the opacity sampler is expression-aware end to end.
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].opacity.expression = Some("time".to_string());
+    let a0 = render_frame(&c, 0.0).pixel(32, 32)[3];
+    let amid = render_frame(&c, 0.5).pixel(32, 32)[3];
+    let a1 = render_frame(&c, 1.0).pixel(32, 32)[3];
+    assert!(a0 < amid && amid < a1, "{a0} < {amid} < {a1}");
+    assert_eq!(a1, 255);
+}
+
+#[test]
+fn malformed_render_expression_does_not_crash() {
+    // A broken expression on a property must not panic the render — it falls
+    // back to the keyframed value (here the default), so the layer still draws.
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].x.expression = Some("@@@ broken @@@".to_string());
+    let f = render_frame(&c, 0.0);
+    assert_eq!(f.pixel(32, 32)[3], 255, "falls back to keyframed X (center)");
+}

@@ -195,6 +195,7 @@ pub fn paint_comp(painter: &Painter, avail: Rect, comp: &Comp, t: f32, selected:
         }
         paint_layer(
             painter,
+            i,
             layer,
             center,
             scale,
@@ -251,8 +252,7 @@ fn paint_ghost_frame(painter: &Painter, comp: &Comp, ghost: &Ghost, center: Pos2
             continue;
         }
         let world = comp.world_matrix(i, ghost.time);
-        let tf = layer.transform(ghost.time);
-        let op = (tf.opacity.clamp(0.0, 1.0) * ghost.opacity).clamp(0.0, 1.0);
+        let op = (comp.layer_opacity(i, ghost.time) * ghost.opacity).clamp(0.0, 1.0);
         if op <= 0.0 {
             continue;
         }
@@ -287,7 +287,7 @@ fn matte_opacity(comp: &Comp, i: usize, t: f32) -> f32 {
     // The source's effect-processed straight color in linear light, scaled by its
     // own opacity — the same inputs the offline matte factor sees, flattened.
     let c = effected_color(src);
-    let src_a = c[3].clamp(0.0, 1.0) * src.transform(t).opacity.clamp(0.0, 1.0);
+    let src_a = c[3].clamp(0.0, 1.0) * comp.layer_opacity(src_idx, t);
     let lin = [
         srgb_to_linear(c[0].clamp(0.0, 1.0)),
         srgb_to_linear(c[1].clamp(0.0, 1.0)),
@@ -302,6 +302,7 @@ fn matte_opacity(comp: &Comp, i: usize, t: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn paint_layer(
     painter: &Painter,
+    idx: usize,
     layer: &PulseLayer,
     center: Pos2,
     scale: f32,
@@ -311,9 +312,9 @@ fn paint_layer(
     matte: f32,
     selected: bool,
 ) {
-    let tf = layer.transform(t);
-    // The track matte (coarsely) scales effective opacity in the preview.
-    let opacity = tf.opacity * matte.clamp(0.0, 1.0);
+    // Expression-aware opacity; the track matte (coarsely) scales it in the
+    // preview.
+    let opacity = comp.layer_opacity(idx, t) * matte.clamp(0.0, 1.0);
     if opacity <= 0.0 {
         return;
     }
@@ -610,7 +611,7 @@ fn paint_motion_blur_ghosts(
 
     for st in ghosts {
         let world = comp.world_matrix(i, st);
-        let opacity = layer.transform(st).opacity * matte.clamp(0.0, 1.0) / count;
+        let opacity = comp.layer_opacity(i, st) * matte.clamp(0.0, 1.0) / count;
         if opacity <= 0.0 {
             continue;
         }

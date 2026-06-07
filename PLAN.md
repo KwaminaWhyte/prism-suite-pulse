@@ -179,7 +179,7 @@ authored once and stacks non-destructively per layer.
 - [ ] **Frame blending** (S): frame-mix + pixel-motion (optical-flow later)
 - [ ] **Time remapping** (M): remap a layer's time via a `Property`; **time stretch**, reverse, freeze-frame
 - [ ] **Spatial motion paths** (M): position keys draw an editable Bézier path; auto-orient along path; roving in time
-- [ ] **Expressions** (L): per-property `rhai`/`rune` engine; the AE staples — `wiggle`, `time`, `value`, `loopOut/In`, `linear/ease`, `random/seedRandom`, `valueAtTime`, `thisComp/thisLayer`, **pick-whip property links**; expression error surfacing + enable/disable
+- [~] **Expressions** (L): per-property `rhai` engine **done** (first slice) — any animatable **scalar** property (anchor/position/scale/rotation/opacity) carries an optional `serde`-defaulted `expression: Option<String>`; at sample time it's evaluated against a context exposing **`time` / `value` / `fps` / `duration` / `index`** plus helpers **`wiggle`** (deterministic per (layer, time) — stable-hash seeded, *not* `Math.random`), **`linear`**, **`clamp`** (and rhai's `sin/cos/abs/floor/…`); the keyframed value is exposed as `value` so expressions offset/drive it; compiled ASTs are cached per string; a parse/eval error **falls back to the keyframed value without panicking** and is surfaced in the UI; wired through the **real compositor + preview** (position/scale/rotation/anchor/opacity, parent chain, motion-blur sub-frames, matte sources); `fx` toggle + per-property expression field with a red error state in the Properties panel; engine + integration + render-path unit-tested. Still TODO: the broader AE library (**`loopOut/In`**, **`ease`**, **`random/seedRandom`**, **`valueAtTime`**, **`thisComp/thisLayer`**), **pick-whip property links**, and expressions on **non-scalar** properties (2D/3D/color/path) + effect/mask params (land with the typed-`Property<T>` rebuild)
 - [ ] **Markers** (S): comp + layer markers, work-area, time navigation
 - [ ] Tests: time-remap sampling, expression evaluation parity, motion-blur sample count
 
@@ -232,7 +232,7 @@ authored once and stacks non-destructively per layer.
 | Effects | ~hundreds; color/blur/distort/generate/keying/stylize/time | **Partial** (color-correction stack — Tint/Bright-Contrast/Exposure/Levels/**Hue-Sat**/**Curves**/**Color Balance** — + spatial **Gaussian Blur / Drop Shadow / Glow**; the rest **Planned** via `prism-fx`) | 3 |
 | Motion blur / frame blend | full | **Planned** | 4 |
 | Time remap / stretch | full | **Planned** | 4 |
-| Expressions | full JS expression language | **Planned** (`rhai`/`rune`) | 4 |
+| Expressions | full JS expression language | **Partial** (scalar props via `rhai`: `time`/`value`/`fps`/`duration`/`index` + `wiggle`/`linear`/`clamp` + math, AST-cached, error fallback + UI `fx` toggle; `loopOut`/`ease`/`random`/`valueAtTime`/`thisComp` + **pick-whip links** + non-scalar props **Planned**) | 4 |
 | 3D layers / camera / lights / shadows | classic + advanced 3D | **Planned** | 5 |
 | Media import (video/seq/audio/EXR) | full | **Partial** (still images + numbered **image sequences** as footage layers via `prism-io`) → **video** / audio / EXR/DPX **Planned** (`prism-media`) | 2,6 |
 | Render queue / output modules / MFR | full | **Planned** | 6 |

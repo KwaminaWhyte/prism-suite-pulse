@@ -25,11 +25,10 @@ pub(super) fn composite_shape(
     geom: &Geom,
     world: Affine2,
     layer: &PulseLayer,
-    t: f32,
+    opacity: f32,
 ) {
     let &Geom { w, cx, cy, .. } = geom;
-    let tf = layer.transform(t);
-    if tf.opacity <= 0.0 {
+    if opacity <= 0.0 {
         return;
     }
     let Some(inv) = world.inverse() else {
@@ -51,7 +50,7 @@ pub(super) fn composite_shape(
             let comp_x = px as f32 + 0.5 - cx;
             let (llx, lly) = inv.apply(comp_x, comp_y);
             let straight = layer.shape.coverage_at(&polys, llx, lly);
-            let cov = straight[3] * tf.opacity;
+            let cov = straight[3] * opacity;
             if cov <= 0.0 {
                 continue;
             }
@@ -84,11 +83,10 @@ pub(super) fn composite_text(
     geom: &Geom,
     world: Affine2,
     layer: &PulseLayer,
-    t: f32,
+    opacity: f32,
 ) {
     let &Geom { w, cx, cy, .. } = geom;
-    let tf = layer.transform(t);
-    if tf.opacity <= 0.0 {
+    if opacity <= 0.0 {
         return;
     }
     let Some(inv) = world.inverse() else {
@@ -112,7 +110,7 @@ pub(super) fn composite_text(
             let comp_x = px as f32 + 0.5 - cx;
             let (llx, lly) = inv.apply(comp_x, comp_y);
             let straight = layer.text.coverage_at(&segs, llx, lly);
-            let cov = straight[3] * tf.opacity;
+            let cov = straight[3] * opacity;
             if cov <= 0.0 {
                 continue;
             }
@@ -148,7 +146,7 @@ pub(super) fn composite_footage(
     world: Affine2,
     layer: &PulseLayer,
     frame: &DecodedFrame,
-    t: f32,
+    opacity: f32,
 ) {
     let &Geom {
         w,
@@ -158,8 +156,7 @@ pub(super) fn composite_footage(
         half_h,
         ..
     } = geom;
-    let tf = layer.transform(t);
-    if tf.opacity <= 0.0 || frame.width == 0 || frame.height == 0 {
+    if opacity <= 0.0 || frame.width == 0 || frame.height == 0 {
         return;
     }
     let Some(inv) = world.inverse() else {
@@ -192,7 +189,7 @@ pub(super) fn composite_footage(
             if has_effects {
                 texel = apply_effects(&layer.effects, texel);
             }
-            let cov = texel[3].clamp(0.0, 1.0) * tf.opacity;
+            let cov = texel[3].clamp(0.0, 1.0) * opacity;
             if cov <= 0.0 {
                 continue;
             }
@@ -233,6 +230,7 @@ pub(super) fn composite_precomp(
     layer: &PulseLayer,
     cache: &mut crate::comp::FrameCache,
     t: f32,
+    opacity: f32,
     ctx: RenderCtx,
 ) {
     let &Geom {
@@ -243,8 +241,7 @@ pub(super) fn composite_precomp(
         half_h,
         ..
     } = geom;
-    let tf = layer.transform(t);
-    if tf.opacity <= 0.0 {
+    if opacity <= 0.0 {
         return;
     }
     let Some(src_id) = layer.precomp.source else {
@@ -304,7 +301,7 @@ pub(super) fn composite_precomp(
             if has_effects {
                 lin = apply_effects(&layer.effects, lin);
             }
-            let cov = lin[3].clamp(0.0, 1.0) * tf.opacity;
+            let cov = lin[3].clamp(0.0, 1.0) * opacity;
             if cov <= 0.0 {
                 continue;
             }
@@ -351,6 +348,9 @@ pub(super) fn composite_motion_blur(
             *px = Lin::CLEAR;
         }
         let world = comp.world_matrix(idx, st);
+        // Opacity is expression-aware and resampled per sub-frame time, so an
+        // animated/expressed opacity blurs across the shutter too.
+        let op = comp.layer_opacity(idx, st);
         // `scratch` is cleared each sample, so each pixel is the snapshot's
         // premultiplied (color·coverage, coverage) output; accumulate it
         // directly. Shape and text layers rasterize their vector content; footage
@@ -359,23 +359,23 @@ pub(super) fn composite_motion_blur(
         // time `st`, so a sequence that advances across the shutter blurs across
         // its own frames too.
         if layer.has_shape() {
-            composite_shape(&mut scratch, geom, world, layer, st);
+            composite_shape(&mut scratch, geom, world, layer, op);
         } else if layer.has_text() {
-            composite_text(&mut scratch, geom, world, layer, st);
+            composite_text(&mut scratch, geom, world, layer, op);
         } else if layer.has_footage() {
             if let Some(path) = layer.footage.path_at(st, comp.fps) {
                 if let Some(frame) = cache.get(&path, layer.footage.alpha) {
                     let frame = frame.clone();
-                    composite_footage(&mut scratch, geom, world, layer, &frame, st);
+                    composite_footage(&mut scratch, geom, world, layer, &frame, op);
                 }
             }
         } else if layer.has_precomp() {
             // Re-render the nested comp at each sub-frame time, so a moving
             // precomp blurs across the shutter (and the nested comp's own
             // animation advances across it too).
-            composite_precomp(&mut scratch, geom, world, layer, cache, st, ctx);
+            composite_precomp(&mut scratch, geom, world, layer, cache, st, op, ctx);
         } else {
-            composite_layer(&mut scratch, geom, world, layer, st);
+            composite_layer(&mut scratch, geom, world, layer, op);
         }
         for (dst, src) in out.iter_mut().zip(scratch.iter()) {
             dst.r += src.r;
@@ -405,7 +405,7 @@ pub(super) fn composite_layer(
     geom: &Geom,
     world: Affine2,
     layer: &PulseLayer,
-    t: f32,
+    opacity: f32,
 ) {
     let &Geom {
         w,
@@ -415,8 +415,7 @@ pub(super) fn composite_layer(
         half_h,
         ..
     } = geom;
-    let tf = layer.transform(t);
-    if tf.opacity <= 0.0 {
+    if opacity <= 0.0 {
         return;
     }
 
@@ -425,7 +424,7 @@ pub(super) fn composite_layer(
     let lr = srgb_to_linear(layer.color[0].clamp(0.0, 1.0));
     let lg = srgb_to_linear(layer.color[1].clamp(0.0, 1.0));
     let lb = srgb_to_linear(layer.color[2].clamp(0.0, 1.0));
-    let src_a = (layer.color[3].clamp(0.0, 1.0)) * tf.opacity;
+    let src_a = (layer.color[3].clamp(0.0, 1.0)) * opacity;
     if src_a <= 0.0 {
         return;
     }
@@ -484,7 +483,7 @@ pub(super) fn apply_adjustment(
     geom: &Geom,
     world: Affine2,
     layer: &PulseLayer,
-    t: f32,
+    opacity: f32,
 ) {
     let &Geom {
         w,
@@ -497,8 +496,7 @@ pub(super) fn apply_adjustment(
     if layer.effects.is_empty() {
         return;
     }
-    let tf = layer.transform(t);
-    let mix = tf.opacity.clamp(0.0, 1.0);
+    let mix = opacity.clamp(0.0, 1.0);
     if mix <= 0.0 {
         return;
     }
@@ -559,22 +557,23 @@ pub(super) fn apply_track_matte(
     // measured in isolation, not on top of anything below it).
     let mut matte = vec![Lin::CLEAR; (geom.w * geom.h) as usize];
     let src_world = comp.world_matrix(src_idx, t);
+    let src_op = comp.layer_opacity(src_idx, t);
     if let Some(src_layer) = comp.layers.get(src_idx) {
         if src_layer.has_shape() {
-            composite_shape(&mut matte, geom, src_world, src_layer, t);
+            composite_shape(&mut matte, geom, src_world, src_layer, src_op);
         } else if src_layer.has_text() {
-            composite_text(&mut matte, geom, src_world, src_layer, t);
+            composite_text(&mut matte, geom, src_world, src_layer, src_op);
         } else if src_layer.has_footage() {
             if let Some(path) = src_layer.footage.path_at(t, comp.fps) {
                 if let Some(frame) = cache.get(&path, src_layer.footage.alpha) {
                     let frame = frame.clone();
-                    composite_footage(&mut matte, geom, src_world, src_layer, &frame, t);
+                    composite_footage(&mut matte, geom, src_world, src_layer, &frame, src_op);
                 }
             }
         } else if src_layer.has_precomp() {
-            composite_precomp(&mut matte, geom, src_world, src_layer, cache, t, ctx);
+            composite_precomp(&mut matte, geom, src_world, src_layer, cache, t, src_op, ctx);
         } else {
-            composite_layer(&mut matte, geom, src_world, src_layer, t);
+            composite_layer(&mut matte, geom, src_world, src_layer, src_op);
         }
     }
     for (px, m) in matte.iter().enumerate() {

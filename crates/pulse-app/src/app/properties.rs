@@ -4,9 +4,9 @@
 
 use super::PulseApp;
 use crate::comp::{
-    blend_label, source_from_path, AlphaMode, BlendMode, Ease, Effect, Fill, FootageSource, Interp,
-    LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem, ShapePrimitive,
-    SpatialEffect, Stroke, TextAlign,
+    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, Ease, Effect, Fill,
+    FootageSource, Interp, LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
+    ShapePrimitive, SpatialEffect, Stroke, TextAlign,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -878,20 +878,41 @@ impl PulseApp {
         }
     }
 
-    /// One property: live value slider + keyframe controls.
+    /// One property: live value slider + keyframe controls + an "fx" expression
+    /// toggle that reveals a per-property expression editor.
     fn property_row(&mut self, ui: &mut egui::Ui, idx: usize, prop: Prop, t: f32) {
-        let layer = &mut self.comp.layers[idx];
         let (range, suffix) = prop.range();
+        // Expression-resolved value (post-expression) for the live read-out, and
+        // whether this property currently carries an expression — both computed
+        // before the mutable layer borrow below (they read `self.comp`).
+        let resolved = self.comp.layer_value(idx, prop, t);
+        let has_expr = self.comp.layers[idx].track(prop).has_expression();
+
+        let layer = &mut self.comp.layers[idx];
         let key_count = layer.track(prop).keys.len();
 
-        // The slider edits the *sampled value at the playhead*. When keyframes
-        // exist, dragging the slider re-keys the current time so animation and
-        // direct editing stay consistent.
+        // The slider edits the *keyframed value at the playhead*. When an
+        // expression is active it overrides the keyframes at render time, so the
+        // slider edits the underlying value the expression sees as `value`.
         let mut value = layer.value(prop, t);
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(prop.label()).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // "fx" toggle: enable/disable an expression on this property.
+                let fx = ui
+                    .selectable_label(has_expr, "fx")
+                    .on_hover_text("Toggle an expression on this property");
+                if fx.clicked() {
+                    let track = layer.track_mut(prop);
+                    track.expression = if has_expr {
+                        None
+                    } else {
+                        // Seed with `value` so enabling fx is value-neutral until
+                        // the user edits it (the property keeps its keyframed value).
+                        Some("value".to_string())
+                    };
+                }
                 ui.weak(format!("{key_count} {}", icons::KEYFRAME));
             });
         });
@@ -918,6 +939,37 @@ impl PulseApp {
                 layer.track_mut(prop).set_key(t, value);
             }
         });
+
+        // Expression editor: a text field bound to the property's expression,
+        // shown only while fx is on. Shows the resolved value and flags a
+        // parse/eval error (the render falls back to the keyframed value).
+        if let Some(expr) = layer.track_mut(prop).expression.as_mut() {
+            let errored = !expr.trim().is_empty() && expr_last_error(expr);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let mut edit = egui::TextEdit::singleline(expr)
+                    .id_salt(("expr", idx, prop.label()))
+                    .hint_text("value + wiggle(2, 30)")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Monospace);
+                if errored {
+                    // Tint the field red when the expression failed to evaluate.
+                    edit = edit.text_color(egui::Color32::from_rgb(0xE0, 0x5A, 0x5A));
+                }
+                ui.add(edit);
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if errored {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xE0, 0x5A, 0x5A),
+                        "expression error — using keyframed value",
+                    );
+                } else {
+                    ui.weak(format!("= {resolved:.2}{suffix}"));
+                }
+            });
+        }
 
         // Interpolation selector — only meaningful when the playhead sits on a
         // keyframe of this property. The mode applies to the segment leaving the

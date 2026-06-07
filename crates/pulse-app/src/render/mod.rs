@@ -267,6 +267,9 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         let spatial = layer.has_spatial_effects();
         let matte_src = comp.matte_source(i);
         let world = comp.world_matrix(i, t);
+        // Expression-aware opacity for this layer at the frame time (the value the
+        // rasterizers scale coverage by).
+        let opacity = comp.layer_opacity(i, t);
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
@@ -306,7 +309,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             // is composited over the accumulator.
             LayerKind::Shape => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_shape(&mut layer_buf, &geom, world, layer, t);
+                composite_shape(&mut layer_buf, &geom, world, layer, opacity);
                 finish_layer(
                     &mut acc,
                     &mut layer_buf,
@@ -327,7 +330,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             // passes apply before it is composited.
             LayerKind::Text => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_text(&mut layer_buf, &geom, world, layer, t);
+                composite_text(&mut layer_buf, &geom, world, layer, opacity);
                 finish_layer(
                     &mut acc,
                     &mut layer_buf,
@@ -352,7 +355,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 if let Some(path) = layer.footage.path_at(t, comp.fps) {
                     if let Some(frame) = cache.get(&path, layer.footage.alpha) {
                         let frame = frame.clone();
-                        composite_footage(&mut layer_buf, &geom, world, layer, &frame, t);
+                        composite_footage(&mut layer_buf, &geom, world, layer, &frame, opacity);
                     }
                 }
                 finish_layer(
@@ -378,7 +381,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             // matte / spatial passes then apply before it is composited.
             LayerKind::Precomp => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_precomp(&mut layer_buf, &geom, world, layer, cache, t, ctx);
+                composite_precomp(&mut layer_buf, &geom, world, layer, cache, t, opacity, ctx);
                 finish_layer(
                     &mut acc,
                     &mut layer_buf,
@@ -404,7 +407,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 let blended = layer.blend_mode() != BlendMode::Normal;
                 if masked || spatial || matte_src.is_some() || blended {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                    composite_layer(&mut layer_buf, &geom, world, layer, t);
+                    composite_layer(&mut layer_buf, &geom, world, layer, opacity);
                     finish_layer(
                         &mut acc,
                         &mut layer_buf,
@@ -420,13 +423,13 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                         ctx,
                     );
                 } else {
-                    composite_layer(&mut acc, &geom, world, layer, t);
+                    composite_layer(&mut acc, &geom, world, layer, opacity);
                 }
             }
             // An adjustment re-processes the composite beneath it, within its own
             // transformed quad bounds.
             LayerKind::Adjustment => {
-                apply_adjustment(&mut acc, &geom, world, layer, t);
+                apply_adjustment(&mut acc, &geom, world, layer, opacity);
             }
         }
     }

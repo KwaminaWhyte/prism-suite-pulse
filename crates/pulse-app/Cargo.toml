@@ -31,6 +31,7 @@ egui-phosphor = "0.12.0"
 # PNG encoding for image-sequence export. Only the `png` codec is enabled to
 # keep the dependency lean (already in the lockfile transitively).
 image = { version = "0.25", default-features = false, features = ["png"] }
+rhai = "1.25.1"
 
 [lints]
 workspace = true

@@ -10,6 +10,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Expressions on properties** (After-Effects *expression* parity, Phase 4
+  *Expressions* — first slice) — any animatable scalar property (anchor X/Y,
+  position X/Y, scale, rotation, opacity) can now carry an optional **expression**
+  string. When set, the property's value at time `t` is computed by evaluating the
+  expression instead of (or driven by) the keyframed value — the AE signature
+  feature that makes things move procedurally.
+  - **Engine** (`comp/expr.rs`, new dep **`rhai` 1.25**, pure-Rust / no system
+    deps) — a sandboxed scripting evaluator with tightened limits (max operations
+    / call depth) so a runaway script can't hang the render. Each evaluation binds
+    a small `ExprCtx` into scope as plain variables: **`time`** (seconds),
+    **`value`** (the property's keyframed sample at `t`, so an expression can
+    *offset* the animation — `value + 10`), comp **`fps`** / **`duration`**, and
+    the layer **`index`**. Helper functions are registered alongside rhai's math
+    (`sin`/`cos`/`abs`/`floor`/…): **`wiggle(freq, amp)`** — smooth jitter that is
+    **deterministic** per `(layer, time)` (seeded from a stable SplitMix64 hash,
+    never `Math.random`, so a given frame always renders identically),
+    **`linear(t, tmin, tmax, v1, v2)`** (endpoint-clamped remap), and
+    **`clamp(v, lo, hi)`**. Integer literals coerce to floats so natural
+    expressions like `wiggle(2, 30)` just work.
+  - **Sampling integration** — `Track` gains a `serde`-defaulted
+    `expression: Option<String>` (skipped on serialize when empty, so unexpressed
+    tracks round-trip byte-identically to pre-expression `.pulse` files);
+    `Track::sample_expr` samples the keyframes, exposes that as `value`, evaluates
+    the expression, and **falls back to the keyframed value on any parse/eval
+    error or non-finite result — never panicking**. Comp-level expression-aware
+    samplers (`layer_value` / `layer_opacity` / an expression-aware `world_matrix`
+    + `transform_ctx`) thread the context (fps/duration/index) so expressions
+    drive **position / scale / rotation / anchor / opacity through the real
+    compositor and preview** (including the parent chain, motion-blur sub-frames,
+    and track-matte sources), not just the model.
+  - **UI** — every transform property row in the Properties panel gains an **`fx`
+    toggle** that reveals a monospace **expression text field** (seeded with
+    `value` so enabling it is value-neutral). The field shows the live
+    expression-resolved value, and **turns red with an "expression error" note**
+    when the script fails to evaluate (the render transparently uses the keyframed
+    value). The launch demo's satellite now spins via
+    `value + time * 120 + wiggle(3, 15)` so the feature reads out of the box.
+  - **Pure + tested** (+18 tests, 304 total) — engine unit tests (`time * 2` at
+    several `t`; `value + 10` offsets the keyframed value; `wiggle` is
+    deterministic for a fixed time and varies across time within amplitude;
+    `linear`/`clamp`/math helpers; fps/duration/index in scope; a malformed
+    expression returns `None` and flags an error) plus integration tests (an
+    expression overrides the keyframed value; `value` sees the keyframed sample;
+    a malformed expression falls back without panicking; serde round-trip of a
+    property with an expression; the missing field defaults to `None`; and through
+    the **render path** — a position expression moves coverage, an opacity
+    expression fades the layer over time, and a broken expression doesn't crash
+    the render).
+  - **Deferred** (kept honest as gaps, not silently dropped): the broader AE
+    expression library (`loopOut`/`loopIn`, `ease`, `random`/`seedRandom`,
+    `valueAtTime`, `thisComp`/`thisLayer`), **pick-whip property links** (one
+    property referencing another), expressions on **non-scalar** properties
+    (2D/3D position, color, path), and on **effect/mask parameters** — these land
+    with the typed-`Property<T>` rebuild and the property-link picker.
 - **Precomps / nested compositions** (After-Effects *precomp* parity, Phase 2
   *Precomps*) — a new layer kind that **nests another composition**: a precomp
   layer references a sibling comp by id and, at comp time, that referenced comp is
