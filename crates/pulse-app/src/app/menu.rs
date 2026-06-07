@@ -20,6 +20,15 @@ impl PulseApp {
                     }
                     ui.separator();
                     if ui
+                        .button(format!("{}  Import footage…", icons::ADD_LAYER))
+                        .on_hover_text("Add a still image or image sequence as a footage layer")
+                        .clicked()
+                    {
+                        self.import_footage();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
                         .button(format!("{}  Export PNG sequence…", icons::EXPORT))
                         .on_hover_text("Render every frame to a PNG image sequence")
                         .clicked()

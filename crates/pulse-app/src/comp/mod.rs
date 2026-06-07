@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 mod blend;
 mod effect;
 mod effect_browser;
+mod footage;
 mod keyframe;
 mod mask;
 mod matte;
@@ -36,6 +37,9 @@ mod transform;
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
 pub use effect::{apply_effects, Effect, LayerKind};
 pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
+pub use footage::{
+    source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
+};
 pub use keyframe::{Ease, Handle, Interp, Track};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
 pub use matte::MatteMode;
@@ -113,6 +117,11 @@ pub struct PulseLayer {
     /// so pre-text `.pulse` files still load.
     #[serde(default)]
     pub text: TextLayer,
+    /// **Footage** content (a still image or numbered image sequence on disk),
+    /// drawn only when [`kind`](Self::kind) is [`LayerKind::Footage`].
+    /// `serde`-defaulted so pre-footage `.pulse` files still load with no source.
+    #[serde(default)]
+    pub footage: FootageLayer,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -144,6 +153,7 @@ impl PulseLayer {
             masks: Vec::new(),
             shape: ShapeLayer::default(),
             text: TextLayer::default(),
+            footage: FootageLayer::default(),
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -234,6 +244,11 @@ impl PulseLayer {
     /// Whether this layer is a [`LayerKind::Text`] with text to draw.
     pub fn has_text(&self) -> bool {
         self.kind == LayerKind::Text && !self.text.is_empty()
+    }
+
+    /// Whether this layer is a [`LayerKind::Footage`] with a source set.
+    pub fn has_footage(&self) -> bool {
+        self.kind == LayerKind::Footage && self.footage.is_set()
     }
 }
 

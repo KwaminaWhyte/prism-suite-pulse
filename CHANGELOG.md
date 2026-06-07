@@ -10,6 +10,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Footage layers** (After-Effects footage-layer parity, Phase 2 *Footage
+  layers*) — a new layer kind that draws **decoded image footage** — a single
+  **still** or a numbered **image sequence** — sampled at comp time, the first
+  layer type whose pixels come from a file on disk rather than authored geometry
+  or a swatch. Scoped to stills + sequences via the suite's shared `prism-io`;
+  **real FFmpeg video decode is deferred** to the shared `prism-media` crate (the
+  next footage step — see PLAN.md Phase 2).
+  - **`LayerKind::Footage`** — joins Solid / Shape / Text / Null / Adjustment. A
+    footage layer carries a [`FootageLayer`] (a `serde`-defaulted `footage` field
+    on every layer, so pre-footage `.pulse` files still load with no source) — an
+    optional [`FootageSource`] plus interpretation settings: **alpha mode**, an
+    optional **fps override**, and **loop** / **hold-last** end behaviour. The
+    kind is added from *Layer ▸ New* and switchable per-layer in Properties like
+    any other.
+  - **`FootageSource`** (`comp/footage.rs`) — either a **Still** (constant over
+    the whole timeline) or a numbered **Sequence** (a printf-style `{}` pattern +
+    zero-pad width + start number + frame count, one file per frame). Time-indexed
+    frame sampling — `frame_index(t, fps, looping, hold_last)` maps comp time to
+    the 0-based source frame as `floor(t·fps)` (fps = the layer override or the
+    comp fps), holding the first frame before `t = 0`, and past the end either
+    **looping** (modulo wrap) or **holding the last frame** (the safe default when
+    neither is set). `source_from_path` auto-detects a sequence from any one
+    chosen frame: it splits the stem's trailing digit run into a pattern, infers
+    pad/start, and probes the contiguous run of frames on disk (the picked frame
+    need not be the first), falling back to a Still when there's no trailing
+    number.
+  - **Decode-once `FrameCache`** — a bounded **MRU decode cache** so a given
+    (path) is decoded at most once per render pass and reused across the many comp
+    frames (and motion-blur sub-frames) that reference the same source frame; a
+    failed/missing decode is cached as a miss so it isn't retried (or re-logged)
+    within a pass, and a least-recently-used eviction keeps memory bounded. Decode
+    goes through `prism_io::load_image` (8-bit sRGB RGBA), converts each channel
+    **sRGB → linear at the gamma boundary**, and resolves the **alpha mode**
+    (Straight / Premultiplied un-premultiply / Ignore-as-opaque) to straight color
+    + straight coverage — the exact representation the solid / shape / text
+    rasterizers feed the compositor. `DecodedFrame::sample` bilinearly samples a
+    decoded frame at normalized UV, with transparent out-of-range edges.
+  - **Full compositor path** (`render/`) — the software compositor rasterizes a
+    footage layer into an **isolated, premultiplied linear-light** buffer
+    (inverse-mapping each comp pixel to footage UV through the layer's resolved
+    world matrix and bilinearly sampling the cached frame), then runs the same
+    **masks**, **track matte**, and **spatial-effect** passes a solid does before
+    compositing through the layer's **transform / anchor / parenting / opacity /
+    blend mode** — so footage composes with masks, mattes, blur/shadow/glow, track
+    mattes, and **motion blur** (the shutter integrator samples the
+    time-indexed frame per sub-frame, and a footage layer can serve as a
+    track-matte source).
+  - **UI** — a new **Footage** section in the Properties panel (a native `rfd`
+    file picker for the source with a Still / Image-sequence kind label and
+    display path, an **alpha** mode dropdown, an **fps override** toggle + value,
+    and **loop** / **hold-last** checkboxes), shown for footage layers; *Layer ▸
+    New ▸ Footage*; and **File ▸ Import footage…**, which pops a file picker and
+    adds a footage layer with the auto-detected sequence (or still), named after
+    the file.
+  - **Pure + tested** (+17 tests, 274 total) — the time→frame mapping
+    (still-is-constant, fps-driven index, fps override, hold-last clamp,
+    loop-wrap, negative-time-holds-first), `path_for` zero-padding + start offset,
+    `path_at` override-then-comp-fps, the unset-source no-op, the cache
+    (decode-once, failure-caching, LRU eviction), and `DecodedFrame` bilerp + OOB
+    are all unit-tested; the renderer's footage path is integration-tested
+    (unset footage renders nothing).
+
 - **Effects & Presets browser** (After-Effects *Effects & Presets* panel parity,
   previously a noted UI/UX gap) — a **searchable, categorised** effect panel that
   replaces the two flat "Add" menus with a type-to-filter surface: type part of

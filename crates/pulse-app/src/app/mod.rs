@@ -2,7 +2,7 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{Comp, LayerKind, PulseLayer, ShapeItem, ShapePrimitive};
+use crate::comp::{source_from_path, Comp, LayerKind, PulseLayer, ShapeItem, ShapePrimitive};
 use crate::graph::GraphState;
 use crate::{icons, render, theme};
 
@@ -126,6 +126,7 @@ impl PulseApp {
             LayerKind::Adjustment => (format!("Adjustment {n}"), [1.0, 1.0, 1.0, 1.0]),
             LayerKind::Shape => (format!("Shape {n}"), self.next_color()),
             LayerKind::Text => (format!("Text {n}"), self.next_color()),
+            LayerKind::Footage => (format!("Footage {n}"), [0.5, 0.5, 0.5, 1.0]),
         };
         let mut layer = PulseLayer::of_kind(kind, name, color);
         match kind {
@@ -155,6 +156,31 @@ impl PulseApp {
             }
             _ => {}
         }
+        self.comp.layers.push(layer);
+        self.selected = Some(self.comp.layers.len() - 1);
+    }
+
+    /// Import footage as a new layer: pop a file picker, then add a
+    /// [`LayerKind::Footage`] layer whose source is a single still or (when the
+    /// picked file is a numbered frame) the detected image sequence on disk. The
+    /// new layer is named after the file and selected. No-op if cancelled.
+    fn import_footage(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import footage (still or image-sequence frame)")
+            .add_filter("Images", prism_io::SUPPORTED_EXTENSIONS)
+            .pick_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Footage".to_string());
+        // Prefer a detected sequence; fall back to a single still.
+        let source = source_from_path(&path);
+        let mut layer = PulseLayer::of_kind(LayerKind::Footage, name, [0.5, 0.5, 0.5, 1.0]);
+        layer.footage.source = Some(source);
         self.comp.layers.push(layer);
         self.selected = Some(self.comp.layers.len() - 1);
     }

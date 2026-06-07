@@ -19,7 +19,7 @@
 //! The rasterizer is deliberately pure (no egui, no IO) so the transform and
 //! compositing math is unit-testable; [`export_sequence`] is the thin IO shell
 //! that drives it across a comp's frames and writes `name_0001.png`, ….
-use crate::comp::{blend_over, Affine2, BlendMode, BlendRgba, Comp, LayerKind};
+use crate::comp::{blend_over, Affine2, BlendMode, BlendRgba, Comp, FrameCache, LayerKind};
 use prism_core::color::linear_to_srgb;
 
 mod export;
@@ -27,8 +27,8 @@ mod passes;
 
 pub use export::export_sequence;
 use passes::{
-    apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_layer,
-    composite_motion_blur, composite_shape, composite_text,
+    apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_footage,
+    composite_layer, composite_motion_blur, composite_shape, composite_text,
 };
 
 /// The half-extent of a layer's base quad as a fraction of the comp size. Must
@@ -120,12 +120,27 @@ fn blend_lin(mode: BlendMode, src: Lin, dst: Lin) -> Lin {
     }
 }
 
-/// Render the composition at time `t` to a native-resolution [`Frame`].
+/// Render the composition at time `t` to a native-resolution [`Frame`], decoding
+/// footage through a throwaway [`FrameCache`].
+///
+/// A convenience wrapper over [`render_frame_cached`] for callers (tests, one-off
+/// renders) that don't keep a persistent footage cache. Interactive callers
+/// (the export loop) should reuse a cache via [`render_frame_cached`] so a
+/// sequence isn't re-decoded for every comp frame.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn render_frame(comp: &Comp, t: f32) -> Frame {
+    let mut cache = FrameCache::new();
+    render_frame_cached(comp, t, &mut cache)
+}
+
+/// Render the composition at time `t` to a native-resolution [`Frame`], decoding
+/// footage layers through the supplied [`FrameCache`] (so repeated source frames
+/// across comp frames / motion-blur samples decode at most once).
 ///
 /// The comp backdrop is fully transparent black; visible layers are composited
 /// back-to-front (index 0 first / behind). Coordinates follow the preview:
 /// the comp origin is its center, `+y` is downward (screen space).
-pub fn render_frame(comp: &Comp, t: f32) -> Frame {
+pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame {
     let w = comp.width.max(1);
     let h = comp.height.max(1);
     let mut acc = vec![
@@ -173,14 +188,17 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
             // snapshots, then mask-carved, matte-clipped, spatially filtered, and
             // composited over the accumulator. `composite_motion_blur` dispatches
             // to the right rasterizer per sub-frame.
-            LayerKind::Solid | LayerKind::Shape | LayerKind::Text if blurred => {
+            LayerKind::Solid | LayerKind::Shape | LayerKind::Text | LayerKind::Footage
+                if blurred =>
+            {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_motion_blur(&mut layer_buf, &geom, comp, i, t);
+                composite_motion_blur(&mut layer_buf, &geom, comp, i, cache, t);
                 finish_layer(
                     &mut acc,
                     &mut layer_buf,
                     &geom,
                     comp,
+                    cache,
                     world,
                     layer,
                     masked,
@@ -201,6 +219,7 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                     &mut layer_buf,
                     &geom,
                     comp,
+                    cache,
                     world,
                     layer,
                     masked,
@@ -220,6 +239,33 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                     &mut layer_buf,
                     &geom,
                     comp,
+                    cache,
+                    world,
+                    layer,
+                    masked,
+                    spatial,
+                    matte_src,
+                    t,
+                );
+            }
+            // A footage layer decodes its source frame for time `t` (through the
+            // shared cache) and samples it into an isolated buffer, then mask /
+            // matte / spatial passes apply before it is composited. An unset or
+            // failed-to-decode source draws nothing (the buffer stays clear).
+            LayerKind::Footage => {
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                if let Some(path) = layer.footage.path_at(t, comp.fps) {
+                    if let Some(frame) = cache.get(&path, layer.footage.alpha) {
+                        let frame = frame.clone();
+                        composite_footage(&mut layer_buf, &geom, world, layer, &frame, t);
+                    }
+                }
+                finish_layer(
+                    &mut acc,
+                    &mut layer_buf,
+                    &geom,
+                    comp,
+                    cache,
                     world,
                     layer,
                     masked,
@@ -244,6 +290,7 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
                         &mut layer_buf,
                         &geom,
                         comp,
+                        cache,
                         world,
                         layer,
                         masked,
@@ -291,6 +338,7 @@ fn finish_layer(
     layer_buf: &mut [Lin],
     geom: &Geom,
     comp: &Comp,
+    cache: &mut FrameCache,
     world: Affine2,
     layer: &crate::comp::PulseLayer,
     masked: bool,
@@ -302,7 +350,7 @@ fn finish_layer(
         apply_masks(layer_buf, geom, world, layer);
     }
     if let Some(src_idx) = matte_src {
-        apply_track_matte(layer_buf, geom, comp, src_idx, layer.matte, t);
+        apply_track_matte(layer_buf, geom, comp, src_idx, cache, layer.matte, t);
     }
     if spatial {
         apply_spatial(layer_buf, geom, layer);

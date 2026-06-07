@@ -21,6 +21,11 @@ use serde::{Deserialize, Serialize};
 ///   (its [`text`](super::PulseLayer::text) field): font size, tracking,
 ///   leading, alignment, and a fill / stroke, rasterized in the layer's local
 ///   frame. Matches AE's text layer.
+/// - [`LayerKind::Footage`] — draws decoded image **footage** (a single still or
+///   a numbered image sequence, its [`footage`](super::PulseLayer::footage)
+///   field), sampled at comp time `t` and rasterized into the layer's quad.
+///   Matches AE's footage layer (stills + sequences; real video decode is
+///   deferred to the shared `prism-media` crate).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerKind {
     #[default]
@@ -29,14 +34,16 @@ pub enum LayerKind {
     Adjustment,
     Shape,
     Text,
+    Footage,
 }
 
 impl LayerKind {
     /// All kinds, in menu order.
-    pub const ALL: [LayerKind; 5] = [
+    pub const ALL: [LayerKind; 6] = [
         LayerKind::Solid,
         LayerKind::Text,
         LayerKind::Shape,
+        LayerKind::Footage,
         LayerKind::Null,
         LayerKind::Adjustment,
     ];
@@ -48,14 +55,18 @@ impl LayerKind {
             LayerKind::Adjustment => "Adjustment",
             LayerKind::Shape => "Shape",
             LayerKind::Text => "Text",
+            LayerKind::Footage => "Footage",
         }
     }
 
     /// Whether a layer of this kind draws its own pixels. A null draws nothing;
     /// an adjustment draws nothing of its own (it only re-processes the layers
-    /// beneath it). A solid, a shape, and text all draw their own pixels.
+    /// beneath it). A solid, a shape, text, and footage all draw their own pixels.
     pub fn draws_own_pixels(self) -> bool {
-        matches!(self, LayerKind::Solid | LayerKind::Shape | LayerKind::Text)
+        matches!(
+            self,
+            LayerKind::Solid | LayerKind::Shape | LayerKind::Text | LayerKind::Footage
+        )
     }
 }
 

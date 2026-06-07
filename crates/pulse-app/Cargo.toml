@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 prism-core.workspace = true
+prism-io.workspace = true
 serde.workspace = true
 log.workspace = true
 env_logger.workspace = true

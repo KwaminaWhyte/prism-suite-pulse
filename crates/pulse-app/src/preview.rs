@@ -361,6 +361,17 @@ fn paint_layer(
             // offline pen-band rasterizer).
             paint_text(painter, layer, center, scale, world, opacity);
         }
+        LayerKind::Footage => {
+            // Footage layers paint a flat placeholder quad in the layer's swatch
+            // (the decoded image shows in the offline render / export, not the
+            // coarse preview), with a thin outline so the source quad reads.
+            let fill = to_color32(layer.color, opacity);
+            painter.add(egui::Shape::convex_polygon(
+                corners.clone(),
+                fill,
+                Stroke::new(1.0, theme::muted().gamma_multiply(0.8)),
+            ));
+        }
         LayerKind::Adjustment => {
             // Adjustment layers don't paint pixels (the regrade is render-only);
             // show a dashed bounds outline so they stay visible & selectable.

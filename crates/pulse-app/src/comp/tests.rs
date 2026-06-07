@@ -1346,3 +1346,59 @@ fn spatial_effects_serde_defaults_to_empty() {
     assert!(layer.spatial_effects.is_empty());
     assert!(!layer.has_spatial_effects());
 }
+
+#[test]
+fn footage_serde_defaults_to_empty() {
+    // A pre-footage layer (no `footage` field, no `kind`) loads as a Solid with
+    // an empty footage block, so old projects are unaffected.
+    let json = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(json).unwrap();
+    assert_eq!(layer.kind, LayerKind::Solid);
+    assert!(!layer.footage.is_set());
+    assert!(!layer.has_footage());
+}
+
+#[test]
+fn footage_layer_serde_round_trips() {
+    // A fully-configured footage layer (sequence source + alpha / fps / loop)
+    // survives a JSON round-trip byte-for-value, including the FootageSource and
+    // the new LayerKind::Footage variant.
+    let mut layer = PulseLayer::of_kind(LayerKind::Footage, "Plate", [0.5, 0.5, 0.5, 1.0]);
+    layer.footage.source = Some(FootageSource::Sequence {
+        pattern: "shot/img_{}.png".to_string(),
+        pad: 4,
+        start: 1,
+        count: 240,
+    });
+    layer.footage.alpha = AlphaMode::Premultiplied;
+    layer.footage.fps = Some(24.0);
+    layer.footage.looping = true;
+    layer.footage.hold_last = false;
+
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.kind, LayerKind::Footage);
+    assert!(back.has_footage());
+    assert_eq!(back.footage.alpha, AlphaMode::Premultiplied);
+    assert_eq!(back.footage.fps, Some(24.0));
+    assert!(back.footage.looping);
+    assert!(!back.footage.hold_last);
+    assert_eq!(back.footage.source, layer.footage.source);
+}
+
+#[test]
+fn footage_hold_last_serde_defaults_true() {
+    // A footage block missing `hold_last` (and most fields) loads with the
+    // sensible default (hold the last frame), per the field's serde default.
+    let json = r#"{"name":"F","kind":"Footage","color":[0.5,0.5,0.5,1.0],"visible":true,
+        "footage":{"source":null},
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(json).unwrap();
+    assert_eq!(layer.kind, LayerKind::Footage);
+    assert!(layer.footage.hold_last, "hold_last serde-defaults to true");
+    assert!(!layer.footage.looping);
+    assert_eq!(layer.footage.fps, None);
+}

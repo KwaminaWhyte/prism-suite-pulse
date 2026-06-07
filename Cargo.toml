@@ -16,6 +16,9 @@ anyhow = "1"
 
 # Shared foundation crate from the sibling Pigment app (the suite's common core).
 prism-core = { path = "../prism-suite-prism/crates/prism-core" }
+# Shared file<->pixels crate: footage layers decode stills / image sequences
+# through `prism_io::load_image` (8-bit sRGB RGBA). Reused as-is; no FFmpeg/video.
+prism-io = { path = "../prism-suite-prism/crates/prism-io" }
 
 # `prism-core` declares `[lints] workspace = true`, which resolves against
 # whichever workspace builds it. Mirror Pigment's lint config so building from

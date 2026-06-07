@@ -4,7 +4,8 @@
 
 use super::{over, Geom, Lin};
 use crate::comp::{
-    apply_effects, apply_spatial_effects, mask_stack_coverage, Affine2, Comp, MatteMode, PulseLayer,
+    apply_effects, apply_spatial_effects, mask_stack_coverage, Affine2, Comp, DecodedFrame,
+    MatteMode, PulseLayer,
 };
 use prism_core::color::srgb_to_linear;
 
@@ -127,6 +128,86 @@ pub(super) fn composite_text(
     }
 }
 
+/// Rasterize a **footage layer**'s decoded image into the (assumed-clear)
+/// isolated `out` buffer, in the compositor's premultiplied linear-light form.
+///
+/// `frame` is the already-decoded footage frame for this comp time `t` (straight
+/// linear-light RGBA, fetched from the [`FrameCache`](crate::comp::FrameCache) by
+/// the caller). The footage fills the layer's base quad (the same
+/// `±half_w/±half_h` extents a solid uses), so the layer's transform / anchor /
+/// scale / rotation position it exactly like every other layer kind. Each
+/// candidate comp pixel is inverse-mapped into local space, converted to a UV
+/// over the quad, and the frame is bilinearly sampled; the straight linear RGBA
+/// is run through the layer's effect stack (so color grading applies per pixel,
+/// the footage analogue of the solid's single-color grade), scaled by the
+/// layer's `opacity`, and composited source-over. A singular `world` (zero scale)
+/// or empty frame leaves the buffer clear.
+pub(super) fn composite_footage(
+    out: &mut [Lin],
+    geom: &Geom,
+    world: Affine2,
+    layer: &PulseLayer,
+    frame: &DecodedFrame,
+    t: f32,
+) {
+    let &Geom {
+        w,
+        cx,
+        cy,
+        half_w,
+        half_h,
+        ..
+    } = geom;
+    let tf = layer.transform(t);
+    if tf.opacity <= 0.0 || frame.width == 0 || frame.height == 0 {
+        return;
+    }
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+    // The footage fills the base quad; bound the pixel loop to that quad's
+    // transformed comp-space AABB exactly like the solid path.
+    let Some((x0, x1, y0, y1)) = geom.quad_bounds(world) else {
+        return;
+    };
+    let has_effects = !layer.effects.is_empty();
+
+    for py in y0..=y1 {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in x0..=x1 {
+            let comp_x = px as f32 + 0.5 - cx;
+            let (lx, ly) = inv.apply(comp_x, comp_y);
+            if lx.abs() > half_w || ly.abs() > half_h {
+                continue;
+            }
+            // Local quad -> UV (top-left origin): u over x, v over y.
+            let u = (lx + half_w) / (2.0 * half_w);
+            let v = (ly + half_h) / (2.0 * half_h);
+            let mut texel = frame.sample(u, v); // straight linear RGBA
+            if texel[3] <= 0.0 {
+                continue;
+            }
+            // The layer's effect stack grades the (linear, straight) footage color
+            // per pixel — the footage twin of the solid's constant-color grade.
+            if has_effects {
+                texel = apply_effects(&layer.effects, texel);
+            }
+            let cov = texel[3].clamp(0.0, 1.0) * tf.opacity;
+            if cov <= 0.0 {
+                continue;
+            }
+            let src = Lin {
+                r: texel[0],
+                g: texel[1],
+                b: texel[2],
+                a: cov,
+            };
+            let idx = (py as u32 * w + px as u32) as usize;
+            out[idx] = over(src, out[idx]);
+        }
+    }
+}
+
 /// Render motion-blurred solid layer `idx` into an isolated `out` buffer
 /// (assumed clear) as the average of sub-frame snapshots across the shutter.
 ///
@@ -138,7 +219,14 @@ pub(super) fn composite_text(
 /// color into the transparent samples. The result is left in the same
 /// premultiplied representation `composite_layer` produces, so the caller
 /// composites it over the accumulator identically to a crisp matte buffer.
-pub(super) fn composite_motion_blur(out: &mut [Lin], geom: &Geom, comp: &Comp, idx: usize, t: f32) {
+pub(super) fn composite_motion_blur(
+    out: &mut [Lin],
+    geom: &Geom,
+    comp: &Comp,
+    idx: usize,
+    cache: &mut crate::comp::FrameCache,
+    t: f32,
+) {
     let Some(layer) = comp.layers.get(idx) else {
         return;
     };
@@ -152,12 +240,22 @@ pub(super) fn composite_motion_blur(out: &mut [Lin], geom: &Geom, comp: &Comp, i
         let world = comp.world_matrix(idx, st);
         // `scratch` is cleared each sample, so each pixel is the snapshot's
         // premultiplied (color·coverage, coverage) output; accumulate it
-        // directly. Shape and text layers rasterize their vector content; any
-        // other pixel-drawing layer (a solid) rasterizes its quad.
+        // directly. Shape and text layers rasterize their vector content; footage
+        // samples its decoded frame; any other pixel-drawing layer (a solid)
+        // rasterizes its quad. The footage frame is sampled at each sub-frame
+        // time `st`, so a sequence that advances across the shutter blurs across
+        // its own frames too.
         if layer.has_shape() {
             composite_shape(&mut scratch, geom, world, layer, st);
         } else if layer.has_text() {
             composite_text(&mut scratch, geom, world, layer, st);
+        } else if layer.has_footage() {
+            if let Some(path) = layer.footage.path_at(st, comp.fps) {
+                if let Some(frame) = cache.get(&path, layer.footage.alpha) {
+                    let frame = frame.clone();
+                    composite_footage(&mut scratch, geom, world, layer, &frame, st);
+                }
+            }
         } else {
             composite_layer(&mut scratch, geom, world, layer, st);
         }
@@ -333,6 +431,7 @@ pub(super) fn apply_track_matte(
     geom: &Geom,
     comp: &Comp,
     src_idx: usize,
+    cache: &mut crate::comp::FrameCache,
     mode: MatteMode,
     t: f32,
 ) {
@@ -345,6 +444,13 @@ pub(super) fn apply_track_matte(
             composite_shape(&mut matte, geom, src_world, src_layer, t);
         } else if src_layer.has_text() {
             composite_text(&mut matte, geom, src_world, src_layer, t);
+        } else if src_layer.has_footage() {
+            if let Some(path) = src_layer.footage.path_at(t, comp.fps) {
+                if let Some(frame) = cache.get(&path, src_layer.footage.alpha) {
+                    let frame = frame.clone();
+                    composite_footage(&mut matte, geom, src_world, src_layer, &frame, t);
+                }
+            }
         } else {
             composite_layer(&mut matte, geom, src_world, src_layer, t);
         }

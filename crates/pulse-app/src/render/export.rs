@@ -1,8 +1,8 @@
 //! The PNG image-sequence exporter: frame counting/timing/paths and the IO
 //! shell that drives [`render_frame`] across a comp.
 
-use super::{render_frame, Frame};
-use crate::comp::Comp;
+use super::{render_frame_cached, Frame};
+use crate::comp::{Comp, FrameCache};
 use std::path::{Path, PathBuf};
 
 /// The frame count of a render: every frame on the comp's `[0, duration]`
@@ -39,9 +39,12 @@ pub struct ExportSummary {
 pub fn export_sequence(comp: &Comp, dir: &Path, stem: &str) -> std::io::Result<ExportSummary> {
     std::fs::create_dir_all(dir)?;
     let total = frame_count(comp);
+    // One footage cache for the whole export: a sequence's source frames decode
+    // at most once each (and a still decodes once) instead of per comp frame.
+    let mut cache = FrameCache::new();
     for i in 0..total {
         let t = frame_time(comp, i);
-        let frame = render_frame(comp, t);
+        let frame = render_frame_cached(comp, t, &mut cache);
         let path = frame_path(dir, stem, i, total);
         write_png(&path, &frame)?;
     }

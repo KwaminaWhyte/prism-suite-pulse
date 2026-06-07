@@ -4,8 +4,9 @@
 
 use super::PulseApp;
 use crate::comp::{
-    blend_label, BlendMode, Ease, Effect, Fill, Interp, LayerBlend, LayerKind, Mask, MaskMode,
-    MatteMode, Prop, ShapeItem, ShapePrimitive, SpatialEffect, Stroke, TextAlign,
+    blend_label, source_from_path, AlphaMode, BlendMode, Ease, Effect, Fill, FootageSource, Interp,
+    LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem, ShapePrimitive,
+    SpatialEffect, Stroke, TextAlign,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -96,6 +97,14 @@ impl PulseApp {
                         if self.comp.layers[idx].kind == LayerKind::Text {
                             section(ui, ("sec_text", idx), "Text", |ui| {
                                 self.text_section(ui, idx);
+                            });
+                        }
+
+                        // Footage content (still / image-sequence source + alpha /
+                        // fps / loop options), shown only for footage layers.
+                        if self.comp.layers[idx].kind == LayerKind::Footage {
+                            section(ui, ("sec_footage", idx), "Footage", |ui| {
+                                self.footage_section(ui, idx);
                             });
                         }
 
@@ -408,6 +417,123 @@ impl PulseApp {
                 ui.add(egui::Slider::new(&mut stroke.opacity, 0.0..=1.0));
             });
         }
+    }
+
+    /// The layer's **footage** editor: pick a still or an image sequence from
+    /// disk, choose the alpha interpretation, and (for sequences) set an fps
+    /// override and loop / hold-last playback. Picking a numbered file offers to
+    /// detect the whole sequence on disk; otherwise it loads as a single still.
+    fn footage_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let comp_fps = self.comp.fps;
+        let footage = &mut self.comp.layers[idx].footage;
+
+        // Current source summary.
+        match &footage.source {
+            Some(src) => {
+                ui.horizontal(|ui| {
+                    ui.label(src.kind_label());
+                });
+                ui.add(
+                    egui::Label::new(egui::RichText::new(src.display()).weak().small())
+                        .truncate(),
+                );
+                if let FootageSource::Sequence { count, .. } = src {
+                    ui.weak(format!("{count} frames"));
+                }
+            }
+            None => {
+                ui.weak("No source. Import a still or image sequence.");
+            }
+        }
+
+        // Import buttons: a single still, or a sequence (auto-detected from a
+        // numbered file the user picks).
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{}  Still…", icons::ADD_LAYER))
+                .on_hover_text("Pick a single image file")
+                .clicked()
+            {
+                if let Some(path) = footage_pick_dialog("Import still image") {
+                    footage.source = Some(FootageSource::still(path));
+                }
+            }
+            if ui
+                .button(format!("{}  Sequence…", icons::ADD_LAYER))
+                .on_hover_text("Pick any frame of a numbered image sequence")
+                .clicked()
+            {
+                if let Some(path) = footage_pick_dialog("Import image sequence (pick any frame)") {
+                    footage.source = Some(source_from_path(&path));
+                }
+            }
+        });
+        if footage.source.is_some()
+            && ui
+                .button(format!("{}  Clear", icons::TRASH))
+                .on_hover_text("Remove this footage source")
+                .clicked()
+        {
+            footage.source = None;
+        }
+
+        ui.separator();
+
+        // Alpha interpretation.
+        ui.horizontal(|ui| {
+            ui.label("Alpha");
+            egui::ComboBox::from_id_salt(("footage_alpha", idx))
+                .selected_text(footage.alpha.label())
+                .show_ui(ui, |ui| {
+                    for a in AlphaMode::ALL {
+                        if ui
+                            .selectable_label(footage.alpha == a, a.label())
+                            .clicked()
+                        {
+                            footage.alpha = a;
+                        }
+                    }
+                });
+        });
+
+        // Sequence playback: fps override + loop / hold (only meaningful for a
+        // multi-frame sequence, but shown whenever a source is set).
+        let is_seq = matches!(footage.source, Some(FootageSource::Sequence { .. }));
+        ui.add_enabled_ui(is_seq, |ui| {
+            ui.horizontal(|ui| {
+                let mut override_on = footage.fps.is_some();
+                if ui
+                    .checkbox(&mut override_on, "FPS override")
+                    .on_hover_text("Play the sequence at a custom rate (else the comp's fps)")
+                    .changed()
+                {
+                    footage.fps = override_on.then_some(comp_fps);
+                }
+                if let Some(fps) = footage.fps.as_mut() {
+                    ui.add(egui::DragValue::new(fps).range(0.1..=240.0).suffix(" fps"));
+                } else {
+                    ui.weak(format!("comp: {comp_fps:.0} fps"));
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut footage.looping, "Loop")
+                    .on_hover_text("Wrap back to the first frame past the end")
+                    .changed()
+                    && footage.looping
+                {
+                    footage.hold_last = false;
+                }
+                if ui
+                    .checkbox(&mut footage.hold_last, "Hold last")
+                    .on_hover_text("Freeze on the last frame past the end")
+                    .changed()
+                    && footage.hold_last
+                {
+                    footage.looping = false;
+                }
+            });
+        });
     }
 
     /// The layer's **effect stack** editor: an "Add effect" menu, then each
@@ -1069,6 +1195,15 @@ fn shape_item_params(ui: &mut egui::Ui, idx: usize, si: usize, item: &mut ShapeI
         slider(ui, "Stroke width", &mut stroke.width, 0.0, 80.0, " px");
         slider(ui, "Stroke opacity", &mut stroke.opacity, 0.0, 1.0, "");
     }
+}
+
+/// Pop a native file picker filtered to the image formats `prism-io` decodes,
+/// returning the chosen path (or `None` if cancelled).
+fn footage_pick_dialog(title: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter("Images", prism_io::SUPPORTED_EXTENSIONS)
+        .pick_file()
 }
 
 /// A collapsible Properties section (Affinity-style Studio panel): a titled
