@@ -58,7 +58,7 @@ pub use matte::MatteMode;
 pub use motion_blur::{MotionBlur, Prop};
 pub use precomp::{PrecompLayer, Project};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
-pub use spatial::{apply_spatial_effects, SpatialEffect};
+pub use spatial::{apply_spatial_effects, RadialKind, SpatialEffect};
 pub use text::{TextAlign, TextLayer};
 pub use time_remap::TimeRemap;
 pub use transform::{Affine2, Transform};
@@ -96,7 +96,7 @@ pub struct PulseLayer {
     #[serde(default)]
     pub effects: Vec<Effect>,
     /// Non-destructive, ordered **spatial effect stack** (whole-buffer passes:
-    /// Gaussian Blur, Drop Shadow, Glow). Applied to the layer's isolated
+    /// Gaussian / Box / Directional / Radial Blur, Drop Shadow, Glow). Applied to the layer's isolated
     /// rendered buffer *after* its per-pixel color-correction stack, masks, and
     /// track matte. `serde`-defaulted to empty so pre-spatial-effect `.pulse`
     /// files still load.

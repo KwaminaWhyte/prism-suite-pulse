@@ -835,7 +835,7 @@ fn mask_rides_layer_transform() {
 
 // --- Spatial effects ----------------------------------------------------
 
-use crate::comp::SpatialEffect;
+use crate::comp::{RadialKind, SpatialEffect};
 
 #[test]
 fn gaussian_blur_softens_the_layer_edge() {
@@ -935,6 +935,85 @@ fn spatial_effect_routes_layer_through_isolated_buffer() {
     let base = render_frame(&solid([0.3, 0.6, 0.9, 1.0]), 0.0);
     let routed = render_frame(&c, 0.0);
     assert_eq!(base.pixels, routed.pixels);
+}
+
+#[test]
+fn box_blur_softens_the_layer_edge() {
+    // A box blur, like the Gaussian, adds partial-alpha edge pixels along the
+    // center row vs. the crisp render — and composites into the buffer.
+    let partial_count = |radius: f32| {
+        let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+        if radius > 0.0 {
+            c.layers[0].spatial_effects.push(SpatialEffect::BoxBlur {
+                radius,
+                iterations: 3,
+                repeat_edge: false,
+            });
+        }
+        let f = render_frame(&c, 0.0);
+        (0..f.width)
+            .filter(|&x| {
+                let a = f.pixel(x, 32)[3];
+                a > 0 && a < 255
+            })
+            .count()
+    };
+    assert!(
+        partial_count(5.0) > partial_count(0.0),
+        "box blur should add partial-coverage edge pixels"
+    );
+}
+
+#[test]
+fn directional_blur_smears_into_the_composite() {
+    // A horizontal directional blur on a centered solid extends partial-coverage
+    // along the center row past the crisp edge, but leaves a vertical column off
+    // the layer crisp (no off-axis smear) — proving the angle drives the streak in
+    // the real render path.
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0]
+        .spatial_effects
+        .push(SpatialEffect::DirectionalBlur {
+            angle: 0.0,
+            length: 12.0,
+        });
+    let crisp = render_frame(&solid([1.0, 1.0, 1.0, 1.0]), 0.0);
+    let smeared = render_frame(&c, 0.0);
+    assert_ne!(crisp.pixels, smeared.pixels, "directional blur must change the frame");
+    // Partial-coverage pixels appear along the center row (the smear axis).
+    let row_partial = |f: &Frame| {
+        (0..f.width)
+            .filter(|&x| {
+                let a = f.pixel(x, 32)[3];
+                a > 0 && a < 255
+            })
+            .count()
+    };
+    assert!(
+        row_partial(&smeared) > row_partial(&crisp),
+        "horizontal smear adds partial coverage along the row"
+    );
+}
+
+#[test]
+fn radial_blur_changes_the_frame_and_is_deterministic() {
+    // A spin radial blur about the centre warps a wide solid (rotational smear);
+    // render-path smoke + determinism.
+    let mut c = solid([0.8, 0.4, 0.2, 1.0]);
+    c.layers[0].scale.set_key(0.0, 2.0); // a wide quad so the sweep has content
+    let crisp = {
+        let mut b = solid([0.8, 0.4, 0.2, 1.0]);
+        b.layers[0].scale.set_key(0.0, 2.0);
+        render_frame(&b, 0.0)
+    };
+    c.layers[0].spatial_effects.push(SpatialEffect::RadialBlur {
+        center: [0.5, 0.5],
+        kind: RadialKind::Spin,
+        amount: 30.0,
+    });
+    let warped = render_frame(&c, 0.0);
+    assert_ne!(crisp.pixels, warped.pixels, "radial blur must change the frame");
+    assert_eq!(warped.pixels, render_frame(&c, 0.0).pixels, "deterministic");
 }
 
 // --- Distort effects ----------------------------------------------------

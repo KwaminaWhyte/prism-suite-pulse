@@ -6,8 +6,8 @@ use super::PulseApp;
 use crate::comp::{
     blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, DistortEffect, Ease,
     Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, KeyEffect, LayerBlend,
-    LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RampShape, ShapeItem,
-    ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
+    LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RadialKind, RampShape,
+    ShapeItem, ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -1953,6 +1953,59 @@ fn spatial_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut 
                 ui.checkbox(repeat_edge, "Repeat edge pixels")
                     .on_hover_text("Clamp the kernel to the edge instead of fading to transparent");
             });
+        }
+        SpatialEffect::BoxBlur {
+            radius,
+            iterations,
+            repeat_edge,
+        } => {
+            slider(ui, "Radius", radius, 0.0, 100.0, " px");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Iterations");
+                ui.add(egui::Slider::new(iterations, 1..=8))
+                    .on_hover_text("~3 box passes approximate a Gaussian");
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(repeat_edge, "Repeat edge pixels")
+                    .on_hover_text("Clamp the kernel to the edge instead of fading to transparent");
+            });
+        }
+        SpatialEffect::DirectionalBlur { angle, length } => {
+            slider(ui, "Direction", angle, -180.0, 180.0, "°");
+            slider(ui, "Length", length, 0.0, 200.0, " px");
+        }
+        SpatialEffect::RadialBlur {
+            center,
+            kind,
+            amount,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Center");
+                ui.add(egui::DragValue::new(&mut center[0]).speed(0.005).range(-1.0..=2.0));
+                ui.add(egui::DragValue::new(&mut center[1]).speed(0.005).range(-1.0..=2.0));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Type");
+                egui::ComboBox::from_id_salt(("radial_kind", idx, ei))
+                    .selected_text(kind.label())
+                    .show_ui(ui, |ui| {
+                        for k in RadialKind::ALL {
+                            if ui.selectable_label(*kind == k, k.label()).clicked() {
+                                *kind = k;
+                            }
+                        }
+                    });
+            });
+            // Spin's amount is a swept angle in degrees; Zoom's is a fractional
+            // radius span — so the slider range tracks the mode.
+            match kind {
+                RadialKind::Spin => slider(ui, "Amount", amount, 0.0, 90.0, "°"),
+                RadialKind::Zoom => slider(ui, "Amount", amount, 0.0, 1.0, ""),
+            }
         }
         SpatialEffect::DropShadow {
             color,

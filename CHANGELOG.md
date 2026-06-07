@@ -45,6 +45,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Blur & Sharpen family — Box Blur / Directional Blur / Radial Blur** (After
+  Effects' *Blur & Sharpen ▸ Box Blur / Directional Blur / Radial Blur*; PLAN
+  Phase 3 *Blur & sharpen*) — three new **spatial** (whole-buffer) blurs added to
+  the existing Gaussian-blur stack, built to mirror it exactly: new
+  `SpatialEffect` variants + their `apply` passes + a Properties *Blur* editor +
+  the *Effects & Presets* browser's *Blur & Sharpen* folder. Each runs on the
+  layer's **isolated premultiplied linear-light** buffer in `finish_layer` (after
+  masks / track matte / keying, with the other spatial passes), so they compose
+  with opacity / blend / masks / track-mattes / keying / distort / motion-blur in
+  both the offline render and the live render-preview. All pure (no time / IO /
+  RNG) and deterministic.
+  - **Box Blur** (`SpatialEffect::BoxBlur`) — a **separable** moving-average box
+    convolution of half-`radius` (comp px) run `iterations` times (clamped
+    `1..=8`); one pass is a flat uniform average, ~**three** passes approximate a
+    Gaussian (central-limit) at a fraction of the cost. `repeat_edge` clamps to the
+    edge pixel ("Repeat Edge Pixels"); otherwise off-buffer taps read transparent
+    and are excluded from the divisor (a true average of the in-bounds taps,
+    matching the Gaussian path).
+  - **Directional Blur** (`SpatialEffect::DirectionalBlur`) — a 1-D box average of
+    half-`length` (comp px) taken **along** `angle` (degrees, 0° = +x), the classic
+    motion streak: it smears one axis and leaves the perpendicular crisp, sampling
+    sub-pixel taps bilinearly so the streak stays smooth; off-buffer taps fade
+    transparent at the frame border.
+  - **Radial Blur** (`SpatialEffect::RadialBlur`) — blur **about** a `center`
+    (normalized buffer space) in **Spin** mode (samples swept ±`amount/2` degrees
+    around the centre — a rotational motion blur) or **Zoom** mode (samples swept
+    ±`amount` fractional radius along the ray from the centre — a dolly-zoom
+    streak). Symmetric taps keep the centre sharp; the blur grows with radius.
+  - Wired through the model (`PulseLayer::spatial_effects` already routes these
+    through `has_spatial_effects` / `apply_spatial`), the *Effects & Presets*
+    registry (four blurs now live under the *Blur & Sharpen* folder), and the
+    Properties spatial-effects section (per-variant sliders + a Spin/Zoom mode
+    picker for Radial).
+  - Tests: box-blur separability / normalization / flat-window average / iteration
+    smoothing / mass conservation / no-colour-bleed; directional smear along the
+    angle only (horizontal vs vertical); radial spin (tangential) vs zoom (radial)
+    directionality; per-blur determinism and empty-buffer no-op; render-path tests
+    that composite each into the buffer (box softens the edge, directional smears
+    along the row, radial warps + is byte-deterministic). 473 passing (was 454).
+
 - **Keying effect family — Color Key / Luma Key / Chroma Key / Spill Suppression
   / Matte Choke** (After-Effects *Keying ▸ Color Key / Luma Key / Keylight-style
   chroma key / Spill Suppressor / Matte Choker*; PLAN Phase 3 *Keying*) — the

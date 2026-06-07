@@ -207,17 +207,38 @@ pub const REGISTRY: &[BrowserEntry] = &[
         keywords: &["blur", "soften", "defocus", "smooth"],
     },
     BrowserEntry {
+        name: "Box Blur",
+        category: Category::Blur,
+        stack: Stack::Spatial,
+        default_index: 1,
+        keywords: &["box", "blur", "average", "soften", "fast", "iterations"],
+    },
+    BrowserEntry {
+        name: "Directional Blur",
+        category: Category::Blur,
+        stack: Stack::Spatial,
+        default_index: 2,
+        keywords: &["directional", "motion", "blur", "streak", "smear", "angle"],
+    },
+    BrowserEntry {
+        name: "Radial Blur",
+        category: Category::Blur,
+        stack: Stack::Spatial,
+        default_index: 3,
+        keywords: &["radial", "blur", "spin", "zoom", "rotate", "circular", "twirl"],
+    },
+    BrowserEntry {
         name: "Drop Shadow",
         category: Category::Perspective,
         stack: Stack::Spatial,
-        default_index: 1,
+        default_index: 4,
         keywords: &["shadow", "cast", "depth"],
     },
     BrowserEntry {
         name: "Glow",
         category: Category::Stylize,
         stack: Stack::Spatial,
-        default_index: 2,
+        default_index: 5,
         keywords: &["bloom", "bright", "halo", "light"],
     },
     // --- Generate (GenerateEffect::defaults() order) ------------------------
@@ -683,6 +704,33 @@ mod tests {
     }
 
     #[test]
+    fn blur_family_is_findable() {
+        // Each blur is reachable by name and a synonym, and groups under the Blur
+        // & Sharpen category.
+        for (name, queries) in [
+            ("Gaussian Blur", ["gaussian", "soften"]),
+            ("Box Blur", ["box", "average"]),
+            ("Directional Blur", ["directional", "motion"]),
+            ("Radial Blur", ["radial", "spin"]),
+        ] {
+            for q in queries {
+                let hits = filter(q);
+                assert!(
+                    hits.iter().any(|h| h.entry.name == name),
+                    "querying {q:?} should find {name}"
+                );
+            }
+        }
+        // The Blur folder holds all four blurs on an empty query.
+        let groups = filter_grouped("");
+        let blur = groups
+            .iter()
+            .find(|(c, _)| *c == Category::Blur)
+            .expect("Blur folder present");
+        assert_eq!(blur.1.len(), 4, "four blurs in the Blur & Sharpen folder");
+    }
+
+    #[test]
     fn keying_family_is_findable() {
         // Each keyer is reachable by name and a synonym, and groups under the
         // Keying category.
@@ -729,10 +777,16 @@ mod tests {
 
     #[test]
     fn name_substring_filters() {
-        // "blur" hits only Gaussian Blur (the one effect with "blur" in name/kw).
+        // "blur" hits the whole Blur & Sharpen family (Gaussian / Box /
+        // Directional / Radial all carry "blur" in name/keywords).
         let hits = filter("blur");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.name, "Gaussian Blur");
+        let names: Vec<&str> = hits.iter().map(|h| h.entry.name).collect();
+        assert!(names.contains(&"Gaussian Blur"));
+        assert!(names.contains(&"Box Blur"));
+        assert!(names.contains(&"Directional Blur"));
+        assert!(names.contains(&"Radial Blur"));
+        // Every hit is in the Blur category.
+        assert!(hits.iter().all(|h| h.entry.category == Category::Blur));
     }
 
     #[test]
@@ -826,11 +880,12 @@ mod tests {
 
     #[test]
     fn grouped_drops_empty_categories() {
-        // "blur" only hits the Blur category → exactly one group.
+        // "blur" only hits the Blur category → exactly one group, holding the
+        // whole Gaussian / Box / Directional / Radial family.
         let groups = filter_grouped("blur");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, Category::Blur);
-        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1.len(), 4);
     }
 
     #[test]
