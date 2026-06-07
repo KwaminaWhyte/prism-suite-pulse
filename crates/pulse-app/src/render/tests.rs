@@ -11,6 +11,8 @@ fn solid(color: [f32; 4]) -> Comp {
         fps: 30.0,
         motion_blur: MotionBlur::default(),
         layers: Vec::new(),
+        id: 0,
+        name: String::new(),
     };
     c.layers.push(PulseLayer::new("L", color));
     c
@@ -34,6 +36,8 @@ fn empty_comp_is_transparent() {
         fps: 30.0,
         motion_blur: MotionBlur::default(),
         layers: Vec::new(),
+        id: 0,
+        name: String::new(),
     };
     let f = render_frame(&c, 0.0);
     assert!(f.pixels.iter().all(|&b| b == 0));
@@ -247,6 +251,8 @@ fn parented_child_follows_parent_offset() {
         fps: 30.0,
         motion_blur: MotionBlur::default(),
         layers: Vec::new(),
+        id: 0,
+        name: String::new(),
     };
     c.layers
         .push(PulseLayer::new("parent", [0.0, 0.0, 0.0, 0.0])); // invisible-ish parent
@@ -324,6 +330,8 @@ fn adjustment_layer_draws_no_pixels_of_its_own() {
         fps: 30.0,
         motion_blur: MotionBlur::default(),
         layers: Vec::new(),
+        id: 0,
+        name: String::new(),
     };
     let mut adj = PulseLayer::of_kind(crate::comp::LayerKind::Adjustment, "adj", [1.0; 4]);
     adj.scale.set_key(0.0, 3.0);
@@ -371,6 +379,8 @@ fn matte_pair(base: [f32; 4], source: [f32; 4], src_scale: f32) -> Comp {
         fps: 30.0,
         motion_blur: MotionBlur::default(),
         layers: Vec::new(),
+        id: 0,
+        name: String::new(),
     };
     let mut b = PulseLayer::new("base", base);
     b.scale.set_key(0.0, 3.0); // cover the whole frame
@@ -1318,4 +1328,186 @@ fn unset_footage_renders_nothing() {
     c.layers[0].kind = LayerKind::Footage; // no source set
     let f = render_frame(&c, 0.0);
     assert!(f.pixels.iter().all(|&b| b == 0), "no source => empty frame");
+}
+
+// --- Precomps (nested compositions) -------------------------------------
+
+/// A full-frame solid comp of the given id and color (covers the whole frame so
+/// a precomp sampling it sees the color edge-to-edge).
+fn full_frame_comp(id: u64, color: [f32; 4]) -> Comp {
+    let mut c = solid(color);
+    c.id = id;
+    c.layers[0].scale.set_key(0.0, 3.0); // cover the whole frame
+    c
+}
+
+#[test]
+fn precomp_renders_the_referenced_comps_content() {
+    use crate::comp::{LayerKind, PrecompLayer};
+    // Comp B: a full-frame green solid (id 2).
+    let nested = full_frame_comp(2, [0.0, 1.0, 0.0, 1.0]);
+    // Comp A (id 1): a single precomp layer referencing B, scaled to cover the
+    // frame so its quad fills it.
+    let mut host = solid([1.0, 1.0, 1.0, 1.0]);
+    host.id = 1;
+    host.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5, 0.5, 0.5, 1.0]);
+        l.precomp = PrecompLayer::to(2);
+        l.scale.set_key(0.0, 3.0); // cover the whole frame
+        l
+    };
+    let comps = [host, nested];
+
+    let mut cache = crate::comp::FrameCache::new();
+    let f = render_frame_in_project(&comps, 1, 0.0, &mut cache);
+    let [r, g, b, a] = f.pixel(32, 32);
+    assert_eq!(a, 255, "precomp center should be opaque (nested comp covers it)");
+    assert!(g > 250, "nested green should show, got g={g}");
+    assert!(r < 8 && b < 8, "center should be green, got ({r},{g},{b})");
+}
+
+#[test]
+fn precomp_honors_time_offset() {
+    use crate::comp::{Interp, LayerKind, PrecompLayer, Prop};
+    // Comp B (id 2): a full-frame solid whose opacity ramps 0 -> 1 over [0,1].
+    let mut nested = full_frame_comp(2, [1.0, 0.0, 0.0, 1.0]);
+    nested.layers[0].track_mut(Prop::Opacity).set_key(0.0, 0.0);
+    nested.layers[0].track_mut(Prop::Opacity).set_key(1.0, 1.0);
+    nested.layers[0]
+        .track_mut(Prop::Opacity)
+        .set_interp(0.0, Interp::Linear);
+
+    // Host precomp at t=0 with a +1.0s offset samples B at its end (opacity 1).
+    let mut host = solid([1.0, 1.0, 1.0, 1.0]);
+    host.id = 1;
+    host.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+        l.precomp = PrecompLayer {
+            source: Some(2),
+            time_offset: 1.0,
+        };
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let comps = [host, nested];
+    let mut cache = crate::comp::FrameCache::new();
+    let f = render_frame_in_project(&comps, 1, 0.0, &mut cache);
+    let a = f.pixel(32, 32)[3];
+    assert!(a > 250, "offset to B's end => opaque, got a={a}");
+}
+
+#[test]
+fn precomp_cycle_guard_terminates() {
+    use crate::comp::{LayerKind, PrecompLayer};
+    // A -> B -> A: each comp is a precomp pointing at the other. Rendering must
+    // terminate (the cycle guard refuses to re-enter a comp on the stack) rather
+    // than recurse forever / overflow the stack.
+    let mut a = solid([1.0, 1.0, 1.0, 1.0]);
+    a.id = 1;
+    a.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "A->B", [0.5; 4]);
+        l.precomp = PrecompLayer::to(2);
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let mut b = solid([1.0, 1.0, 1.0, 1.0]);
+    b.id = 2;
+    b.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "B->A", [0.5; 4]);
+        l.precomp = PrecompLayer::to(1);
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let comps = [a, b];
+    let mut cache = crate::comp::FrameCache::new();
+    // The assertion that matters is *that this returns* (no infinite recursion).
+    let f = render_frame_in_project(&comps, 1, 0.0, &mut cache);
+    // A renders B; B renders A which is on the stack -> guard breaks it (nothing).
+    assert!(
+        f.pixels.iter().all(|&px| px == 0),
+        "a cyclic precomp pair should render nothing"
+    );
+}
+
+#[test]
+fn self_referential_precomp_renders_nothing() {
+    use crate::comp::{LayerKind, PrecompLayer};
+    // A comp whose only layer is a precomp pointing at itself: the cycle guard
+    // (the comp is already on the stack) makes it render nothing.
+    let mut a = solid([1.0, 1.0, 1.0, 1.0]);
+    a.id = 1;
+    a.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "self", [0.5; 4]);
+        l.precomp = PrecompLayer::to(1);
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let comps = [a];
+    let mut cache = crate::comp::FrameCache::new();
+    let f = render_frame_in_project(&comps, 1, 0.0, &mut cache);
+    assert!(f.pixels.iter().all(|&px| px == 0));
+}
+
+#[test]
+fn precomp_missing_target_renders_nothing() {
+    use crate::comp::{LayerKind, PrecompLayer};
+    let mut host = solid([1.0, 1.0, 1.0, 1.0]);
+    host.id = 1;
+    host.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+        l.precomp = PrecompLayer::to(99); // no such comp
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let comps = [host];
+    let mut cache = crate::comp::FrameCache::new();
+    let f = render_frame_in_project(&comps, 1, 0.0, &mut cache);
+    assert!(f.pixels.iter().all(|&px| px == 0));
+}
+
+#[test]
+fn precomp_nests_two_levels_deep() {
+    use crate::comp::{LayerKind, PrecompLayer};
+    // C (id 3) is a green full-frame solid; B (id 2) is a precomp of C; A (id 1)
+    // is a precomp of B. Rendering A should show C's green two levels down.
+    let c = full_frame_comp(3, [0.0, 1.0, 0.0, 1.0]);
+    let mut b = solid([1.0, 1.0, 1.0, 1.0]);
+    b.id = 2;
+    b.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "B->C", [0.5; 4]);
+        l.precomp = PrecompLayer::to(3);
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let mut a = solid([1.0, 1.0, 1.0, 1.0]);
+    a.id = 1;
+    a.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "A->B", [0.5; 4]);
+        l.precomp = PrecompLayer::to(2);
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let comps = [a, b, c];
+    let mut cache = crate::comp::FrameCache::new();
+    let f = render_frame_in_project(&comps, 1, 0.0, &mut cache);
+    let [r, g, bch, alpha] = f.pixel(32, 32);
+    assert_eq!(alpha, 255);
+    assert!(g > 250 && r < 8 && bch < 8, "deep nest green, got ({r},{g},{bch})");
+}
+
+#[test]
+fn single_comp_render_ignores_precomp() {
+    use crate::comp::{LayerKind, PrecompLayer};
+    // The single-comp `render_frame` entry has no project to resolve against, so
+    // a precomp layer in it draws nothing (and doesn't panic / recurse).
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.id = 1;
+    c.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+        l.precomp = PrecompLayer::to(2); // a sibling that isn't visible here
+        l.scale.set_key(0.0, 3.0);
+        l
+    };
+    let f = render_frame(&c, 0.0);
+    assert!(f.pixels.iter().all(|&px| px == 0));
 }

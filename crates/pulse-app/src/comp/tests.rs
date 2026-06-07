@@ -363,6 +363,8 @@ fn parented_comp() -> Comp {
         fps: 30.0,
         motion_blur: MotionBlur::default(),
         layers: Vec::new(),
+        id: 0,
+        name: String::new(),
     };
     c.layers.push(PulseLayer::new("parent", [1.0; 4])); // 0
     c.layers.push(PulseLayer::new("child", [1.0; 4])); // 1
@@ -1401,4 +1403,140 @@ fn footage_hold_last_serde_defaults_true() {
     assert!(layer.footage.hold_last, "hold_last serde-defaults to true");
     assert!(!layer.footage.looping);
     assert_eq!(layer.footage.fps, None);
+}
+
+// --- Precomps (nested compositions) -------------------------------------
+
+#[test]
+fn precomp_layer_serde_round_trips() {
+    // A precomp layer (target comp id + time offset) survives a JSON round-trip,
+    // including the new LayerKind::Precomp variant and its PrecompLayer block.
+    let mut layer = PulseLayer::of_kind(LayerKind::Precomp, "Nested", [0.5, 0.5, 0.5, 1.0]);
+    layer.precomp = PrecompLayer {
+        source: Some(7),
+        time_offset: -0.5,
+    };
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.kind, LayerKind::Precomp);
+    assert!(back.has_precomp());
+    assert_eq!(back.precomp.source, Some(7));
+    assert!((back.precomp.time_offset - (-0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn precomp_serde_defaults_for_old_files() {
+    // A layer block from a pre-precomp `.pulse` (no `precomp` field, no `kind`)
+    // loads as a solid with an unwired precomp (source None, offset 0).
+    let json = r#"{"name":"L","color":[1.0,0.0,0.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(json).unwrap();
+    assert_eq!(layer.kind, LayerKind::Solid);
+    assert_eq!(layer.precomp.source, None);
+    assert_eq!(layer.precomp.time_offset, 0.0);
+    assert!(!layer.has_precomp());
+}
+
+#[test]
+fn old_single_comp_json_loads_as_comp() {
+    // An old single-comp `.pulse` (a bare Comp, no `id`/`name`) still deserializes
+    // into a Comp directly, with id/name serde-defaulted.
+    let json = r#"{"width":640,"height":480,"duration":2.0,"fps":24.0,"layers":[]}"#;
+    let comp: Comp = serde_json::from_str(json).unwrap();
+    assert_eq!(comp.id, 0);
+    assert!(comp.name.is_empty());
+    assert_eq!(comp.width, 640);
+    assert_eq!(comp.fps, 24.0);
+    // And wraps cleanly into a one-comp project with a minted id.
+    let project = Project::from_comp(comp);
+    assert_eq!(project.comps.len(), 1);
+    assert_eq!(project.comps[0].id, 1, "from_comp mints an id for an id-less comp");
+}
+
+#[test]
+fn project_serde_round_trips_with_precomp() {
+    // A two-comp project — comp A holding a precomp layer referencing comp B —
+    // round-trips through JSON: both comps and the reference survive.
+    let mut a = Comp::empty_like("A", &Comp::new());
+    a.id = 1;
+    let mut pc = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+    pc.precomp = PrecompLayer::to(2);
+    a.layers.push(pc);
+    let mut b = Comp::empty_like("B", &Comp::new());
+    b.id = 2;
+
+    let project = Project {
+        comps: vec![a, b],
+        active: 0,
+        next_id: 3,
+    };
+    let json = serde_json::to_string(&project).unwrap();
+    let back: Project = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.comps.len(), 2);
+    assert_eq!(back.comps[0].layers[0].precomp.source, Some(2));
+    assert_eq!(back.comp_by_id(2).map(|c| c.name.clone()), Some("B".to_string()));
+}
+
+#[test]
+fn project_mints_unique_ids() {
+    // mint_id never reuses or collides with a live comp id, even when next_id
+    // lags behind (e.g. a hand-edited file).
+    let mut p = Project::new(); // comp id 1, next_id 2
+    let id_a = p.mint_id();
+    let id_b = p.mint_id();
+    assert_ne!(id_a, id_b);
+    assert!(id_a >= 2 && id_b > id_a);
+    // Force next_id to lag behind a live id, then mint: it must skip past it.
+    p.next_id = 1;
+    p.comps.push({
+        let mut c = Comp::empty_like("X", &Comp::new());
+        c.id = 50;
+        c
+    });
+    let id_c = p.mint_id();
+    assert!(id_c > 50, "mint_id skips past the highest live id, got {id_c}");
+}
+
+#[test]
+fn push_comp_assigns_a_fresh_id() {
+    let mut p = Project::new();
+    let id = p.push_comp(Comp::empty_like("New", &Comp::new()));
+    assert!(id >= 2);
+    assert_eq!(p.comps.last().unwrap().id, id);
+    assert!(p.comp_by_id(id).is_some());
+    // The active comp (index 0) is unchanged and distinct.
+    assert_ne!(p.active().id, id);
+}
+
+#[test]
+fn precompose_wraps_layer_into_new_comp() {
+    // Model-level analogue of the app's pre-compose: a project starts with one
+    // comp holding a content layer; pre-compose moves that layer into a new comp
+    // and replaces it in the host with a precomp referencing the new comp.
+    let mut p = Project::new();
+    let host_id = p.active().id;
+    // The content layer we'll wrap (index 0 of the active comp's demo).
+    let content_name = p.comps[0].layers[0].name.clone();
+
+    // Build the nested comp and move the layer into it.
+    let mut nested = Comp::empty_like(format!("{content_name} Comp"), &p.comps[0]);
+    let wrapped = p.comps[0].layers[0].clone();
+    nested.layers.push(wrapped);
+    let new_id = p.push_comp(nested);
+
+    // Replace the host layer with a precomp referencing the new comp.
+    let mut precomp = PulseLayer::of_kind(LayerKind::Precomp, content_name.clone(), [0.5; 4]);
+    precomp.precomp = PrecompLayer::to(new_id);
+    p.comps[0].layers[0] = precomp;
+
+    // The host's layer is now a precomp pointing at the new comp...
+    let host = p.comp_by_id(host_id).unwrap();
+    assert_eq!(host.layers[0].kind, LayerKind::Precomp);
+    assert_eq!(host.layers[0].precomp.source, Some(new_id));
+    // ...and the new comp holds the original content.
+    let made = p.comp_by_id(new_id).unwrap();
+    assert_eq!(made.layers.len(), 1);
+    assert_eq!(made.layers[0].name, content_name);
+    assert_ne!(new_id, host_id, "the precomp target is a distinct comp");
 }

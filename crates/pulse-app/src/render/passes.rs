@@ -2,7 +2,7 @@
 //! coverage, motion-blur snapshot averaging, adjustment-layer regrade, track
 //! mattes, mask carving, and the spatial-effect bridge.
 
-use super::{over, Geom, Lin};
+use super::{over, render_comp, Geom, Lin, RenderCtx};
 use crate::comp::{
     apply_effects, apply_spatial_effects, mask_stack_coverage, Affine2, Comp, DecodedFrame,
     MatteMode, PulseLayer,
@@ -208,6 +208,118 @@ pub(super) fn composite_footage(
     }
 }
 
+/// Render a **precomp layer**'s referenced (nested) comp into the (assumed-clear)
+/// isolated `out` buffer, in the compositor's premultiplied-free linear-light
+/// form.
+///
+/// The layer's [`PrecompLayer`](crate::comp::PrecompLayer) names a target comp
+/// id; `ctx` resolves it against the project's comps (and refuses a reference
+/// **cycle** — a target already on the render stack — yielding nothing). The
+/// target comp is rendered **recursively** via [`render_comp`] at the
+/// time-offset–mapped time, producing a native-resolution sRGB frame; that frame
+/// fills the layer's base quad (the same `±half_w/±half_h` extents footage uses),
+/// so the layer's transform / anchor / scale / rotation position the nested comp
+/// exactly like any other layer kind. Each candidate comp pixel is inverse-mapped
+/// into local space, converted to a UV over the quad, the rendered frame is
+/// nearest-sampled there, its straight sRGB → linear color (alpha carried) is run
+/// through the layer's effect stack and scaled by `opacity`, and composited
+/// source-over. An unset reference, a cycle, or a singular `world` (zero scale)
+/// leaves the buffer clear.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn composite_precomp(
+    out: &mut [Lin],
+    geom: &Geom,
+    world: Affine2,
+    layer: &PulseLayer,
+    cache: &mut crate::comp::FrameCache,
+    t: f32,
+    ctx: RenderCtx,
+) {
+    let &Geom {
+        w,
+        cx,
+        cy,
+        half_w,
+        half_h,
+        ..
+    } = geom;
+    let tf = layer.transform(t);
+    if tf.opacity <= 0.0 {
+        return;
+    }
+    let Some(src_id) = layer.precomp.source else {
+        return;
+    };
+    // Resolve the target comp; `resolve` returns `None` for a missing target or a
+    // reference cycle (the comp is already on the render stack) — either way the
+    // precomp simply draws nothing, so it can't recurse forever.
+    let Some(nested) = ctx.resolve(src_id) else {
+        return;
+    };
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+    // Render the nested comp recursively at the mapped time. `render_comp` pushes
+    // the nested comp's id onto the visited stack, so a precomp inside it that
+    // points back at an ancestor is caught by the same guard.
+    let nt = layer.precomp.nested_time(t);
+    let frame = render_comp(nested, nt, cache, ctx);
+    if frame.width == 0 || frame.height == 0 {
+        return;
+    }
+    let Some((x0, x1, y0, y1)) = geom.quad_bounds(world) else {
+        return;
+    };
+    let has_effects = !layer.effects.is_empty();
+    let fw = frame.width as f32;
+    let fh = frame.height as f32;
+
+    for py in y0..=y1 {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in x0..=x1 {
+            let comp_x = px as f32 + 0.5 - cx;
+            let (lx, ly) = inv.apply(comp_x, comp_y);
+            if lx.abs() > half_w || ly.abs() > half_h {
+                continue;
+            }
+            // Local quad -> UV (top-left origin), then nearest-sample the rendered
+            // nested frame.
+            let u = (lx + half_w) / (2.0 * half_w);
+            let v = (ly + half_h) / (2.0 * half_h);
+            let sx = ((u * fw) as i32).clamp(0, frame.width as i32 - 1) as u32;
+            let sy = ((v * fh) as i32).clamp(0, frame.height as i32 - 1) as u32;
+            let texel = frame.pixel(sx, sy); // straight sRGB 8-bit RGBA
+            let a = texel[3] as f32 / 255.0;
+            if a <= 0.0 {
+                continue;
+            }
+            // sRGB byte -> linear straight RGBA (alpha is already straight
+            // coverage). Match the footage path's color boundary.
+            let mut lin = [
+                srgb_to_linear(texel[0] as f32 / 255.0),
+                srgb_to_linear(texel[1] as f32 / 255.0),
+                srgb_to_linear(texel[2] as f32 / 255.0),
+                a,
+            ];
+            if has_effects {
+                lin = apply_effects(&layer.effects, lin);
+            }
+            let cov = lin[3].clamp(0.0, 1.0) * tf.opacity;
+            if cov <= 0.0 {
+                continue;
+            }
+            let src = Lin {
+                r: lin[0],
+                g: lin[1],
+                b: lin[2],
+                a: cov,
+            };
+            let idx = (py as u32 * w + px as u32) as usize;
+            out[idx] = over(src, out[idx]);
+        }
+    }
+}
+
 /// Render motion-blurred solid layer `idx` into an isolated `out` buffer
 /// (assumed clear) as the average of sub-frame snapshots across the shutter.
 ///
@@ -226,6 +338,7 @@ pub(super) fn composite_motion_blur(
     idx: usize,
     cache: &mut crate::comp::FrameCache,
     t: f32,
+    ctx: RenderCtx,
 ) {
     let Some(layer) = comp.layers.get(idx) else {
         return;
@@ -256,6 +369,11 @@ pub(super) fn composite_motion_blur(
                     composite_footage(&mut scratch, geom, world, layer, &frame, st);
                 }
             }
+        } else if layer.has_precomp() {
+            // Re-render the nested comp at each sub-frame time, so a moving
+            // precomp blurs across the shutter (and the nested comp's own
+            // animation advances across it too).
+            composite_precomp(&mut scratch, geom, world, layer, cache, st, ctx);
         } else {
             composite_layer(&mut scratch, geom, world, layer, st);
         }
@@ -426,6 +544,7 @@ pub(super) fn apply_adjustment(
 /// multiplies the corresponding `layer_buf` pixel's alpha. Color is untouched —
 /// only coverage changes — so the subsequent source-over honors the matte. The
 /// matte source's own transform / parent chain / effects are respected.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_track_matte(
     layer_buf: &mut [Lin],
     geom: &Geom,
@@ -434,6 +553,7 @@ pub(super) fn apply_track_matte(
     cache: &mut crate::comp::FrameCache,
     mode: MatteMode,
     t: f32,
+    ctx: RenderCtx,
 ) {
     // Render the matte source into its own isolated buffer (so its alpha/luma is
     // measured in isolation, not on top of anything below it).
@@ -451,6 +571,8 @@ pub(super) fn apply_track_matte(
                     composite_footage(&mut matte, geom, src_world, src_layer, &frame, t);
                 }
             }
+        } else if src_layer.has_precomp() {
+            composite_precomp(&mut matte, geom, src_world, src_layer, cache, t, ctx);
         } else {
             composite_layer(&mut matte, geom, src_world, src_layer, t);
         }

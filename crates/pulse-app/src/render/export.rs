@@ -1,7 +1,7 @@
 //! The PNG image-sequence exporter: frame counting/timing/paths and the IO
 //! shell that drives [`render_frame`] across a comp.
 
-use super::{render_frame_cached, Frame};
+use super::{render_frame_cached, render_frame_in_project, Frame};
 use crate::comp::{Comp, FrameCache};
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,11 @@ pub struct ExportSummary {
 /// Render every frame of `comp` and write the PNG image sequence to `dir`,
 /// naming files `<stem>_0000.png`, `<stem>_0001.png`, …. Creates `dir` if it
 /// does not exist. Returns a summary, or the first IO/encode error.
+///
+/// The single-comp exporter: precomp layers in `comp` resolve against nothing
+/// (they render empty). The app exports through [`export_sequence_in_project`]
+/// instead; this entry is retained for single-comp callers / tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn export_sequence(comp: &Comp, dir: &Path, stem: &str) -> std::io::Result<ExportSummary> {
     std::fs::create_dir_all(dir)?;
     let total = frame_count(comp);
@@ -45,6 +50,38 @@ pub fn export_sequence(comp: &Comp, dir: &Path, stem: &str) -> std::io::Result<E
     for i in 0..total {
         let t = frame_time(comp, i);
         let frame = render_frame_cached(comp, t, &mut cache);
+        let path = frame_path(dir, stem, i, total);
+        write_png(&path, &frame)?;
+    }
+    Ok(ExportSummary {
+        frames: total,
+        dir: dir.to_path_buf(),
+    })
+}
+
+/// Render every frame of comp `id` (within `comps`) and write the PNG image
+/// sequence to `dir`, resolving any **precomp** layers against the project's
+/// sibling comps (and breaking reference cycles). The project-aware twin of
+/// [`export_sequence`]; identical framing/timing/naming, but a precomp in the
+/// exported comp renders its nested comp recursively instead of nothing.
+pub fn export_sequence_in_project(
+    comps: &[Comp],
+    id: u64,
+    dir: &Path,
+    stem: &str,
+) -> std::io::Result<ExportSummary> {
+    let Some(comp) = comps.iter().find(|c| c.id == id) else {
+        return Ok(ExportSummary {
+            frames: 0,
+            dir: dir.to_path_buf(),
+        });
+    };
+    std::fs::create_dir_all(dir)?;
+    let total = frame_count(comp);
+    let mut cache = FrameCache::new();
+    for i in 0..total {
+        let t = frame_time(comp, i);
+        let frame = render_frame_in_project(comps, id, t, &mut cache);
         let path = frame_path(dir, stem, i, total);
         write_png(&path, &frame)?;
     }

@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 ///   field), sampled at comp time `t` and rasterized into the layer's quad.
 ///   Matches AE's footage layer (stills + sequences; real video decode is
 ///   deferred to the shared `prism-media` crate).
+/// - [`LayerKind::Precomp`] — draws a **nested composition**: it references
+///   another [`Comp`](super::Comp) by id (its
+///   [`precomp`](super::PulseLayer::precomp) field) and, at comp time `t`, that
+///   referenced comp is rendered recursively (through the same render path, at a
+///   time-offset mapping) into the layer's quad, then composited like footage.
+///   Reference cycles are detected and broken by the renderer's visited-set
+///   guard. Matches AE's precomp / nested composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerKind {
     #[default]
@@ -35,15 +42,17 @@ pub enum LayerKind {
     Shape,
     Text,
     Footage,
+    Precomp,
 }
 
 impl LayerKind {
     /// All kinds, in menu order.
-    pub const ALL: [LayerKind; 6] = [
+    pub const ALL: [LayerKind; 7] = [
         LayerKind::Solid,
         LayerKind::Text,
         LayerKind::Shape,
         LayerKind::Footage,
+        LayerKind::Precomp,
         LayerKind::Null,
         LayerKind::Adjustment,
     ];
@@ -56,16 +65,22 @@ impl LayerKind {
             LayerKind::Shape => "Shape",
             LayerKind::Text => "Text",
             LayerKind::Footage => "Footage",
+            LayerKind::Precomp => "Precomp",
         }
     }
 
     /// Whether a layer of this kind draws its own pixels. A null draws nothing;
     /// an adjustment draws nothing of its own (it only re-processes the layers
-    /// beneath it). A solid, a shape, text, and footage all draw their own pixels.
+    /// beneath it). A solid, a shape, text, footage, and a precomp all draw their
+    /// own pixels (a precomp draws the rendered nested comp).
     pub fn draws_own_pixels(self) -> bool {
         matches!(
             self,
-            LayerKind::Solid | LayerKind::Shape | LayerKind::Text | LayerKind::Footage
+            LayerKind::Solid
+                | LayerKind::Shape
+                | LayerKind::Text
+                | LayerKind::Footage
+                | LayerKind::Precomp
         )
     }
 }

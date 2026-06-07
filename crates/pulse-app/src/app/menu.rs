@@ -57,6 +57,20 @@ impl PulseApp {
                             ui.close_menu();
                         }
                     });
+                    ui.separator();
+                    ui.add_enabled_ui(self.selected.is_some(), |ui| {
+                        if ui
+                            .button(format!("{}  Pre-compose", icons::ADD_LAYER))
+                            .on_hover_text(
+                                "Wrap the selected layer into a new comp and replace it \
+                                 with a precomp layer referencing it",
+                            )
+                            .clicked()
+                        {
+                            self.precompose_selected();
+                            ui.close_menu();
+                        }
+                    });
                 });
                 ui.menu_button("Comp", |ui| {
                     self.motion_blur_menu(ui);

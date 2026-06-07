@@ -25,11 +25,53 @@ use prism_core::color::linear_to_srgb;
 mod export;
 mod passes;
 
+pub use export::export_sequence_in_project;
+#[cfg(test)]
 pub use export::export_sequence;
 use passes::{
     apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_footage,
-    composite_layer, composite_motion_blur, composite_shape, composite_text,
+    composite_layer, composite_motion_blur, composite_precomp, composite_shape, composite_text,
 };
+
+/// Per-render context for resolving **precomps**: the project's comps (so a
+/// precomp layer can find the comp it references by id) and the visited-set of
+/// comp ids currently on the render stack (so a reference cycle A → B → A is
+/// detected and broken rather than recursing forever).
+///
+/// Copied (cheaply — it borrows the comp slice and the visited stack) into each
+/// nested render call; pushing a comp id before recursing and the borrow ending
+/// after keeps the visited set scoped to the active recursion path.
+#[derive(Clone, Copy)]
+pub(crate) struct RenderCtx<'a> {
+    /// All comps in the project, addressed by [`Comp::id`].
+    comps: &'a [Comp],
+    /// Comp ids currently being rendered (the recursion stack), for cycle
+    /// detection.
+    visited: &'a [u64],
+}
+
+impl<'a> RenderCtx<'a> {
+    /// A context over a single comp (no project) — the legacy/test universe where
+    /// the only renderable comp is the one passed to [`render_frame`]. A precomp
+    /// in such a comp can only resolve if the lone comp's id matches (which the
+    /// cycle guard then refuses), so precomps render nothing here.
+    fn lone(comp: &'a [Comp]) -> Self {
+        Self {
+            comps: comp,
+            visited: &[],
+        }
+    }
+
+    /// Look up a comp by id, unless rendering it would close a cycle (it is
+    /// already on the render stack). Returns `None` (render nothing) for a
+    /// missing target or a cyclic one.
+    fn resolve(&self, id: u64) -> Option<&'a Comp> {
+        if self.visited.contains(&id) {
+            return None; // cycle guard: refuse to re-enter a comp on the stack
+        }
+        self.comps.iter().find(|c| c.id == id)
+    }
+}
 
 /// The half-extent of a layer's base quad as a fraction of the comp size. Must
 /// match [`preview`](crate::preview)'s `half_w`/`half_h` so the offline render
@@ -47,8 +89,8 @@ pub struct Frame {
 
 impl Frame {
     /// Read the RGBA bytes of pixel `(x, y)`; panics if out of bounds.
-    /// (A pixel accessor for callers/tests inspecting a rendered frame.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// (A pixel accessor for callers/tests inspecting a rendered frame, and for
+    /// the precomp pass sampling a nested comp's rendered frame.)
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.width + x) * 4) as usize;
         [
@@ -140,7 +182,52 @@ pub fn render_frame(comp: &Comp, t: f32) -> Frame {
 /// The comp backdrop is fully transparent black; visible layers are composited
 /// back-to-front (index 0 first / behind). Coordinates follow the preview:
 /// the comp origin is its center, `+y` is downward (screen space).
+///
+/// This single-comp entry treats `comp` as the only renderable comp, so any
+/// **precomp** layer it contains has nothing to resolve (it draws nothing). Use
+/// [`render_frame_in_project`] to render a comp whose precomps reference sibling
+/// comps.
 pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame {
+    let comps = std::slice::from_ref(comp);
+    render_comp(comp, t, cache, RenderCtx::lone(comps))
+}
+
+/// Render comp `id` (within `comps`) at time `t`, resolving any **precomp**
+/// layers against its sibling comps and breaking reference cycles.
+///
+/// The project-aware entry: a precomp layer in the rendered comp (or, recursively,
+/// in any comp it nests) resolves its target through `comps` and is rendered into
+/// its quad, with a visited-set guard so a cycle A → B → A terminates (the cyclic
+/// precomp renders nothing). Returns an empty/transparent frame if `id` is not
+/// found.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn render_frame_in_project(comps: &[Comp], id: u64, t: f32, cache: &mut FrameCache) -> Frame {
+    let Some(comp) = comps.iter().find(|c| c.id == id) else {
+        return Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+        };
+    };
+    render_comp(comp, t, cache, RenderCtx::lone(comps))
+}
+
+/// Core compositor: render `comp` at time `t` under render context `ctx`.
+///
+/// `ctx` carries the project's comps and the visited-set of comp ids on the
+/// render stack; `comp`'s own id is pushed onto that stack before its precomp
+/// layers recurse, so a precomp that points back at an ancestor comp is detected
+/// and skipped.
+pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: RenderCtx) -> Frame {
+    // Push this comp's id onto the recursion stack so nested precomps can detect
+    // a cycle back to it. (A zero/duplicate id is harmless — it only ever causes
+    // the guard to skip rendering, never to recurse.)
+    let mut stack = ctx.visited.to_vec();
+    stack.push(comp.id);
+    let ctx = RenderCtx {
+        comps: ctx.comps,
+        visited: &stack,
+    };
     let w = comp.width.max(1);
     let h = comp.height.max(1);
     let mut acc = vec![
@@ -183,16 +270,21 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
-            // A motion-blurred pixel-drawing layer (solid / shape / text) is
-            // rendered into an isolated buffer as the average of sub-frame
-            // snapshots, then mask-carved, matte-clipped, spatially filtered, and
-            // composited over the accumulator. `composite_motion_blur` dispatches
-            // to the right rasterizer per sub-frame.
-            LayerKind::Solid | LayerKind::Shape | LayerKind::Text | LayerKind::Footage
+            // A motion-blurred pixel-drawing layer (solid / shape / text /
+            // footage / precomp) is rendered into an isolated buffer as the
+            // average of sub-frame snapshots, then mask-carved, matte-clipped,
+            // spatially filtered, and composited over the accumulator.
+            // `composite_motion_blur` dispatches to the right rasterizer per
+            // sub-frame (precomps recurse through `ctx`).
+            LayerKind::Solid
+            | LayerKind::Shape
+            | LayerKind::Text
+            | LayerKind::Footage
+            | LayerKind::Precomp
                 if blurred =>
             {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_motion_blur(&mut layer_buf, &geom, comp, i, cache, t);
+                composite_motion_blur(&mut layer_buf, &geom, comp, i, cache, t, ctx);
                 finish_layer(
                     &mut acc,
                     &mut layer_buf,
@@ -205,6 +297,7 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
                     spatial,
                     matte_src,
                     t,
+                    ctx,
                 );
             }
             // A crisp shape layer rasterizes its vector content into an isolated
@@ -226,6 +319,7 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
                     spatial,
                     matte_src,
                     t,
+                    ctx,
                 );
             }
             // A crisp text layer rasterizes its glyph strokes into an isolated
@@ -246,6 +340,7 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
                     spatial,
                     matte_src,
                     t,
+                    ctx,
                 );
             }
             // A footage layer decodes its source frame for time `t` (through the
@@ -272,6 +367,31 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
                     spatial,
                     matte_src,
                     t,
+                    ctx,
+                );
+            }
+            // A precomp layer renders its referenced comp recursively (through
+            // `ctx`, which carries the project's comps + a cycle guard) at the
+            // mapped time, then samples that rendered frame into an isolated buffer
+            // (filling the layer's quad like footage). A missing reference or a
+            // reference cycle yields nothing (the buffer stays clear). Mask /
+            // matte / spatial passes then apply before it is composited.
+            LayerKind::Precomp => {
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                composite_precomp(&mut layer_buf, &geom, world, layer, cache, t, ctx);
+                finish_layer(
+                    &mut acc,
+                    &mut layer_buf,
+                    &geom,
+                    comp,
+                    cache,
+                    world,
+                    layer,
+                    masked,
+                    spatial,
+                    matte_src,
+                    t,
+                    ctx,
                 );
             }
             // A crisp solid draws its own colored quad (processed by its effect
@@ -297,6 +417,7 @@ pub fn render_frame_cached(comp: &Comp, t: f32, cache: &mut FrameCache) -> Frame
                         spatial,
                         matte_src,
                         t,
+                        ctx,
                     );
                 } else {
                     composite_layer(&mut acc, &geom, world, layer, t);
@@ -345,12 +466,13 @@ fn finish_layer(
     spatial: bool,
     matte_src: Option<usize>,
     t: f32,
+    ctx: RenderCtx,
 ) {
     if masked {
         apply_masks(layer_buf, geom, world, layer);
     }
     if let Some(src_idx) = matte_src {
-        apply_track_matte(layer_buf, geom, comp, src_idx, cache, layer.matte, t);
+        apply_track_matte(layer_buf, geom, comp, src_idx, cache, layer.matte, t, ctx);
     }
     if spatial {
         apply_spatial(layer_buf, geom, layer);

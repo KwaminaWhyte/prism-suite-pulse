@@ -29,6 +29,7 @@ mod keyframe;
 mod mask;
 mod matte;
 mod motion_blur;
+mod precomp;
 mod shape;
 mod spatial;
 mod text;
@@ -44,6 +45,7 @@ pub use keyframe::{Ease, Handle, Interp, Track};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
 pub use matte::MatteMode;
 pub use motion_blur::{MotionBlur, Prop};
+pub use precomp::{PrecompLayer, Project};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, SpatialEffect};
 pub use text::{TextAlign, TextLayer};
@@ -122,6 +124,13 @@ pub struct PulseLayer {
     /// `serde`-defaulted so pre-footage `.pulse` files still load with no source.
     #[serde(default)]
     pub footage: FootageLayer,
+    /// **Precomp** reference (target comp id + a time-offset shift), drawn only
+    /// when [`kind`](Self::kind) is [`LayerKind::Precomp`]: the referenced comp is
+    /// rendered recursively at the mapped time and composited into this layer's
+    /// quad. `serde`-defaulted so pre-precomp `.pulse` files still load with no
+    /// reference.
+    #[serde(default)]
+    pub precomp: PrecompLayer,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -154,6 +163,7 @@ impl PulseLayer {
             shape: ShapeLayer::default(),
             text: TextLayer::default(),
             footage: FootageLayer::default(),
+            precomp: PrecompLayer::default(),
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -250,11 +260,29 @@ impl PulseLayer {
     pub fn has_footage(&self) -> bool {
         self.kind == LayerKind::Footage && self.footage.is_set()
     }
+
+    /// Whether this layer is a [`LayerKind::Precomp`] with a comp referenced.
+    pub fn has_precomp(&self) -> bool {
+        self.kind == LayerKind::Precomp && self.precomp.is_set()
+    }
 }
 
-/// The whole motion document: a sized, timed canvas and its layer stack.
+/// One composition: a sized, timed canvas and its layer stack. A document is a
+/// [`Project`] of these; a [`LayerKind::Precomp`] layer references another comp
+/// in the same project by [`id`](Self::id).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Comp {
+    /// Stable identifier within the project — the target a
+    /// [`PrecompLayer`](precomp::PrecompLayer) references. `serde`-defaulted to
+    /// `0` so old single-comp `.pulse` files (no id) load; the project assigns a
+    /// real id on import (see [`Project::from_comp`]).
+    #[serde(default)]
+    pub id: u64,
+    /// A short display name for the comp (shown in the precomp picker / comp
+    /// list). `serde`-defaulted so old `.pulse` files load with an empty name
+    /// (the UI falls back to a generated label).
+    #[serde(default)]
+    pub name: String,
     pub width: u32,
     pub height: u32,
     pub duration: f32,
@@ -271,6 +299,8 @@ impl Comp {
     /// A fresh 1280x720, 5-second, 30fps composition with a parented demo pair.
     pub fn new() -> Self {
         let mut c = Self {
+            id: 0,
+            name: "Comp 1".to_string(),
             width: 1280,
             height: 720,
             duration: 5.0,
@@ -396,6 +426,33 @@ impl Comp {
         });
         c.layers.push(grade); // index 4
         c
+    }
+
+    /// An empty comp with the given name and canvas/timeline matching `like`
+    /// (size, duration, fps) but no layers and no demo content — the container a
+    /// **pre-compose** drops the wrapped layers into. Its `id` is `0` until the
+    /// project assigns one on [`Project::push_comp`].
+    pub fn empty_like(name: impl Into<String>, like: &Comp) -> Self {
+        Self {
+            id: 0,
+            name: name.into(),
+            width: like.width,
+            height: like.height,
+            duration: like.duration,
+            fps: like.fps,
+            motion_blur: MotionBlur::default(),
+            layers: Vec::new(),
+        }
+    }
+
+    /// A short label for the comp: its `name`, or a generated `Comp <id>` when
+    /// unnamed (old files / freshly minted comps).
+    pub fn display_name(&self) -> String {
+        if self.name.is_empty() {
+            format!("Comp {}", self.id)
+        } else {
+            self.name.clone()
+        }
     }
 }
 

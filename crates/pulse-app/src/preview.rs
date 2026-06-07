@@ -372,6 +372,18 @@ fn paint_layer(
                 Stroke::new(1.0, theme::muted().gamma_multiply(0.8)),
             ));
         }
+        LayerKind::Precomp => {
+            // Precomp layers paint a flat placeholder quad in the layer's swatch
+            // (the nested comp is rendered recursively only in the offline render /
+            // export, not the coarse preview), with a thin outline so the precomp's
+            // source quad reads and stays selectable.
+            let fill = to_color32(layer.color, opacity);
+            painter.add(egui::Shape::convex_polygon(
+                corners.clone(),
+                fill,
+                Stroke::new(1.0, theme::accent().gamma_multiply(0.7)),
+            ));
+        }
         LayerKind::Adjustment => {
             // Adjustment layers don't paint pixels (the regrade is render-only);
             // show a dashed bounds outline so they stay visible & selectable.

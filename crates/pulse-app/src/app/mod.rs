@@ -2,7 +2,9 @@
 //! menus, and the per-frame loop tying the motion model to the preview and
 //! timeline.
 
-use crate::comp::{source_from_path, Comp, LayerKind, PulseLayer, ShapeItem, ShapePrimitive};
+use crate::comp::{
+    source_from_path, Comp, LayerKind, PrecompLayer, Project, PulseLayer, ShapeItem, ShapePrimitive,
+};
 use crate::graph::GraphState;
 use crate::{icons, render, theme};
 
@@ -25,7 +27,18 @@ enum EditorMode {
 }
 
 pub struct PulseApp {
+    /// The comp currently being edited (the active project comp, kept inline so
+    /// every panel edits it directly). The rest of the project lives in
+    /// [`others`](Self::others); [`comps`](Self::comps) merges them for rendering
+    /// and saving.
     comp: Comp,
+    /// The project's **other** comps (everything except the active
+    /// [`comp`](Self::comp)) — the pool a [`LayerKind::Precomp`] layer references
+    /// by id, and the comps a precomp render resolves recursively against.
+    others: Vec<Comp>,
+    /// Next comp id to mint (monotonic; never reused), so a new precompose target
+    /// can't collide with an existing comp.
+    next_id: u64,
     /// Current playhead position in seconds.
     time: f32,
     playing: bool,
@@ -72,8 +85,12 @@ impl PulseApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
         icons::install(&cc.egui_ctx);
+        let mut comp = Comp::new();
+        comp.id = 1;
         Self {
-            comp: Comp::new(),
+            comp,
+            others: Vec::new(),
+            next_id: 2,
             time: 0.0,
             playing: false,
             selected: Some(0),
@@ -91,11 +108,86 @@ impl PulseApp {
     // --- Commands -----------------------------------------------------------
 
     fn new_comp(&mut self) {
-        self.comp = Comp::new();
+        let mut comp = Comp::new();
+        comp.id = 1;
+        self.comp = comp;
+        self.others = Vec::new();
+        self.next_id = 2;
         self.time = 0.0;
         self.playing = false;
         self.selected = Some(0);
         self.graph = GraphState::default();
+    }
+
+    /// Mint a fresh, never-reused comp id (defensive against any live id, so a
+    /// loaded project whose `next_id` lags can't hand out a colliding id).
+    fn mint_id(&mut self) -> u64 {
+        let highest = std::iter::once(self.comp.id)
+            .chain(self.others.iter().map(|c| c.id))
+            .max()
+            .unwrap_or(0);
+        let id = self.next_id.max(highest + 1).max(1);
+        self.next_id = id + 1;
+        id
+    }
+
+    /// The whole project's comps (the active [`comp`](Self::comp) plus the
+    /// [`others`](Self::others)), for project-aware rendering / export / save.
+    fn project_comps(&self) -> Vec<Comp> {
+        let mut comps = Vec::with_capacity(self.others.len() + 1);
+        comps.push(self.comp.clone());
+        comps.extend(self.others.iter().cloned());
+        comps
+    }
+
+    /// **Pre-compose** the selected layer into a new comp and replace it with a
+    /// [`LayerKind::Precomp`] layer referencing it (the classic After Effects
+    /// workflow, single-layer slice). The new comp inherits the host comp's size
+    /// / duration / fps; the wrapped layer keeps its content but its transform is
+    /// reset on the precomp layer (the wrapped layer is re-centered inside the new
+    /// comp, "leave all attributes" style). No-op if nothing is selected.
+    ///
+    /// Multi-layer pre-compose (wrapping a selection set, preserving inter-layer
+    /// parenting) is a documented gap — see `PLAN.md`.
+    fn precompose_selected(&mut self) {
+        let Some(idx) = self.selected else {
+            return;
+        };
+        if idx >= self.comp.layers.len() {
+            return;
+        }
+        // Build the nested comp from the host's canvas/timeline and move the
+        // selected layer into it (re-centered: its transform tracks are dropped so
+        // it sits at the new comp's center, the common "move all attributes into
+        // the new comp" result for a single layer).
+        let id = self.mint_id();
+        let inner_name = self.comp.layers[idx].name.clone();
+        let mut nested = Comp::empty_like(format!("{inner_name} Comp"), &self.comp);
+        nested.id = id;
+        let mut wrapped = self.comp.layers[idx].clone();
+        // The wrapped layer is now top-level inside the nested comp: it has no
+        // parent there, and its transform resets to identity (centered).
+        wrapped.parent = None;
+        wrapped.anchor_x = Default::default();
+        wrapped.anchor_y = Default::default();
+        wrapped.x = Default::default();
+        wrapped.y = Default::default();
+        wrapped.scale = Default::default();
+        wrapped.rotation = Default::default();
+        wrapped.opacity = Default::default();
+        nested.layers.push(wrapped);
+        self.others.push(nested);
+
+        // Replace the selected layer in place with a precomp referencing the new
+        // comp (so it keeps its stacking position and any children parented to it
+        // still point at the same index).
+        let precomp = {
+            let mut l = PulseLayer::of_kind(LayerKind::Precomp, inner_name, [0.5, 0.5, 0.5, 1.0]);
+            l.precomp = PrecompLayer::to(id);
+            l
+        };
+        self.comp.layers[idx] = precomp;
+        self.selected = Some(idx);
     }
 
     /// A pseudo-random vivid color for a new layer.
@@ -127,6 +219,7 @@ impl PulseApp {
             LayerKind::Shape => (format!("Shape {n}"), self.next_color()),
             LayerKind::Text => (format!("Text {n}"), self.next_color()),
             LayerKind::Footage => (format!("Footage {n}"), [0.5, 0.5, 0.5, 1.0]),
+            LayerKind::Precomp => (format!("Precomp {n}"), [0.5, 0.5, 0.5, 1.0]),
         };
         let mut layer = PulseLayer::of_kind(kind, name, color);
         match kind {
@@ -153,6 +246,13 @@ impl PulseApp {
                     fill.color = [color[0], color[1], color[2]];
                 }
                 layer.shape.items.push(item);
+            }
+            LayerKind::Precomp => {
+                // Wire a new precomp to an existing other comp out of the box, if
+                // any (else leave it unwired for the user to pick in Properties).
+                if let Some(first) = self.others.first() {
+                    layer.precomp = PrecompLayer::to(first.id);
+                }
             }
             _ => {}
         }
@@ -237,20 +337,35 @@ impl PulseApp {
         }
     }
 
+    /// Assemble the whole project (active comp + others) into a [`Project`] for
+    /// saving, with the active comp at its current index.
+    fn to_project(&self) -> Project {
+        // `project_comps` puts the active comp first, so the active index is 0.
+        Project {
+            comps: self.project_comps(),
+            active: 0,
+            next_id: self.next_id,
+        }
+    }
+
     fn save_dialog(&self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Pulse composition", &["pulse", "json"])
+            .add_filter("Pulse project", &["pulse", "json"])
             .set_file_name("untitled.pulse")
             .save_file()
         {
-            match serde_json::to_string_pretty(&self.comp) {
+            // Save the whole **project** (every comp + precomp references), so a
+            // project with precomps round-trips. Old single-comp `.pulse` files
+            // remain loadable via the back-compat loader.
+            let project = self.to_project();
+            match serde_json::to_string_pretty(&project) {
                 Ok(json) => {
                     if let Err(e) = std::fs::write(&path, json) {
                         log::error!("save failed: {e}");
                     } else {
                         log::info!(
-                            "saved comp ({} layers) to {}",
-                            self.comp.layers.len(),
+                            "saved project ({} comps) to {}",
+                            project.comps.len(),
                             path.display()
                         );
                     }
@@ -275,7 +390,11 @@ impl PulseApp {
             return;
         };
         let stem = "comp";
-        match render::export_sequence(&self.comp, &dir, stem) {
+        // Project-aware export so any precomp layers in the active comp render
+        // their nested comps recursively.
+        let comps = self.project_comps();
+        let id = self.comp.id;
+        match render::export_sequence_in_project(&comps, id, &dir, stem) {
             Ok(summary) => {
                 let msg = format!(
                     "Exported {} frames → {}",

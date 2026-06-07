@@ -10,6 +10,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Precomps / nested compositions** (After-Effects *precomp* parity, Phase 2
+  *Precomps*) — a new layer kind that **nests another composition**: a precomp
+  layer references a sibling comp by id and, at comp time, that referenced comp is
+  rendered **recursively** (through the same render path) into the layer's buffer
+  and composited like any other layer — honouring its transform / anchor /
+  parenting / opacity / blend mode / masks / track matte / effects / motion blur.
+  This is the first layer whose pixels are *another whole comp*, so the document
+  graduates from a single comp to a **project of comps**.
+  - **`LayerKind::Precomp`** — joins Solid / Shape / Text / Footage / Null /
+    Adjustment. A precomp layer carries a [`PrecompLayer`] (a `serde`-defaulted
+    `precomp` field on every layer, so pre-precomp `.pulse` files still load with
+    no reference) — the target [`Comp::id`] plus a scalar **time offset** (seconds
+    added to the host time before the nested comp is sampled — a deliberately
+    minimal stand-in for full time-remap: a shift, not a curve).
+  - **Project model** (`comp/precomp.rs`) — precomps need more than one comp to
+    point at, so the document becomes a [`Project`]: an id-keyed set of comps with
+    one marked **active** for editing. Each [`Comp`] gains a stable `id` and a
+    display `name` (both `serde`-defaulted, so an old single-comp `.pulse` — a bare
+    `Comp` — still deserializes and wraps cleanly via `Project::from_comp`, which
+    mints an id). IDs are minted monotonically and defensively (never reused, never
+    colliding with a live id even if a hand-edited `next_id` lags).
+  - **Recursive render + cycle guard** (`render/`) — the software compositor
+    resolves a precomp's target against the project's comps and renders it
+    recursively, sampling the rendered nested frame into the layer's quad (sRGB →
+    linear at the gamma boundary, then the layer's effect stack) exactly like
+    footage, before the same **masks / track matte / spatial-effect / motion-blur**
+    passes a footage layer runs. A per-render **visited-set of comp ids** carries
+    the recursion stack: rendering refuses to re-enter a comp already on the stack,
+    so a reference **cycle** (A → B → A) or a self-reference simply renders nothing
+    — a corrupt or self-referential project can never infinite-loop or overflow the
+    stack. New project-aware entries `render_frame_in_project` /
+    `export_sequence_in_project` resolve precomps; the single-comp
+    `render_frame` / `export_sequence` keep working (a precomp there draws nothing,
+    having no project to resolve against).
+  - **UI** — a new **Precomp** section in the Properties panel (a **source-comp**
+    picker over the project's other comps, the active comp flagged as a
+    self-reference, plus a **time-offset** drag), shown for precomp layers; *Layer
+    ▸ New ▸ Precomp* (auto-wires to an existing comp if any); and **Layer ▸
+    Pre-compose**, the classic AE workflow — it wraps the selected layer into a
+    new comp (sized to the host) and replaces it in place with a precomp layer
+    referencing the new comp. The coarse vector preview shows a precomp as a
+    placeholder quad (its nested comp renders in the offline render / export);
+    save now serialises the whole **project** so precomp references round-trip.
+  - **Pure + tested** (+14 tests, 288 total) — the precomp render path is
+    integration-tested (a precomp renders its referenced comp's content; the time
+    offset samples the nested comp at the shifted time; **the cycle guard
+    terminates** for A → B → A and for a self-reference, rendering nothing; a
+    missing target renders nothing; a precomp nests two levels deep; the
+    single-comp entry ignores precomps), and the model is unit-tested (precomp
+    layer + project serde round-trips, pre-precomp/old single-comp back-compat via
+    serde defaults, unique-id minting, `push_comp`, and a model-level pre-compose
+    that wraps + references correctly).
+  - **Deferred** — multi-layer pre-compose (wrapping a *selection set* preserving
+    inter-layer parenting), full **time-remapping** (a remap curve, time-stretch,
+    reverse, freeze-frame), **collapse transformations**, a comp navigator / tab
+    UI, and rendering the nested comp live in the coarse preview — all noted in
+    PLAN.md Phase 2 / Phase 4.
+
 - **Footage layers** (After-Effects footage-layer parity, Phase 2 *Footage
   layers*) — a new layer kind that draws **decoded image footage** — a single
   **still** or a numbered **image sequence** — sampled at comp time, the first

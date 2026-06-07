@@ -108,6 +108,14 @@ impl PulseApp {
                             });
                         }
 
+                        // Precomp reference (target comp + time offset), shown only
+                        // for precomp layers.
+                        if self.comp.layers[idx].kind == LayerKind::Precomp {
+                            section(ui, ("sec_precomp", idx), "Precomp", |ui| {
+                                self.precomp_section(ui, idx);
+                            });
+                        }
+
                         // Parent pick-whip: a child inherits this layer's transform.
                         self.parent_row(ui, idx);
 
@@ -534,6 +542,84 @@ impl PulseApp {
                 }
             });
         });
+    }
+
+    /// The layer's **precomp** editor: pick which comp this layer nests (from the
+    /// project's other comps) and set a time-offset shift. The referenced comp is
+    /// rendered recursively at render/export time.
+    ///
+    /// Self-reference and cycles are allowed in the picker (the renderer's cycle
+    /// guard breaks them — a cyclic precomp simply renders nothing) but the active
+    /// comp is flagged in the list so the user knows it would loop.
+    fn precomp_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let active_id = self.comp.id;
+        let current = self.comp.layers[idx].precomp.source;
+        // Build the list of selectable comps: every *other* comp in the project,
+        // plus the active comp itself (flagged — it self-references).
+        let others: Vec<(u64, String)> = self
+            .others
+            .iter()
+            .map(|c| (c.id, c.display_name()))
+            .collect();
+        let current_label = match current {
+            Some(id) if id == active_id => format!("{} (self)", self.comp.display_name()),
+            Some(id) => others
+                .iter()
+                .find(|(cid, _)| *cid == id)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| format!("Comp {id} (missing)")),
+            None => "None".to_owned(),
+        };
+
+        let mut chosen: Option<Option<u64>> = None;
+        ui.horizontal(|ui| {
+            ui.label("Source comp");
+            egui::ComboBox::from_id_salt(("precomp_src", idx))
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_none(), "None").clicked() {
+                        chosen = Some(None);
+                    }
+                    for (cid, name) in &others {
+                        if ui
+                            .selectable_label(current == Some(*cid), name)
+                            .clicked()
+                        {
+                            chosen = Some(Some(*cid));
+                        }
+                    }
+                    // The active comp itself (self-reference): allowed, but the
+                    // cycle guard renders it as nothing.
+                    let self_label = format!("{} (self — renders nothing)", self.comp.display_name());
+                    if ui
+                        .selectable_label(current == Some(active_id), self_label)
+                        .clicked()
+                    {
+                        chosen = Some(Some(active_id));
+                    }
+                });
+        });
+        if let Some(next) = chosen {
+            self.comp.layers[idx].precomp.source = next;
+        }
+
+        if others.is_empty() && current != Some(active_id) {
+            ui.weak("No other comps yet. Use Layer ▸ Pre-compose to create one.");
+        }
+
+        // Time offset (seconds added to the host time before sampling the nested
+        // comp — a minimal time-remap shift).
+        ui.horizontal(|ui| {
+            ui.label("Time offset");
+            ui.add(
+                egui::DragValue::new(&mut self.comp.layers[idx].precomp.time_offset)
+                    .speed(0.01)
+                    .suffix(" s"),
+            )
+            .on_hover_text("Shift the nested comp earlier/later on this timeline");
+        });
+
+        ui.weak("Nested comp renders at export; the preview shows a placeholder quad.");
     }
 
     /// The layer's **effect stack** editor: an "Add effect" menu, then each
