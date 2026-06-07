@@ -78,6 +78,12 @@ pub const SEARCH: &str = ph::MAGNIFYING_GLASS;
 pub const CLEAR: &str = ph::X_CIRCLE;
 /// An effect (the Effects & Presets browser badge).
 pub const EFFECT: &str = ph::SPARKLE;
+/// Add a marker at the playhead.
+pub const MARKER: &str = ph::MAP_PIN_PLUS;
+/// Jump to the previous marker.
+pub const MARKER_PREV: &str = ph::CARET_DOUBLE_LEFT;
+/// Jump to the next marker.
+pub const MARKER_NEXT: &str = ph::CARET_DOUBLE_RIGHT;
 
 // --- Keyframe interpolation -------------------------------------------------
 

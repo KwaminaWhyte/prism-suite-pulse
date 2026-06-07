@@ -45,6 +45,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Markers + work area** (After-Effects *Composition/Layer markers* + *Work
+  Area*, Phase 4 *Markers*) — the timeline can now carry labelled **markers** to
+  call out beats, and a **work area** sub-range that bounds playback, with
+  transport **time-navigation** to jump between markers. Pure timeline metadata —
+  no pixels, no compositor changes.
+  - **Model** (`comp/marker.rs`, new `Marker` + `WorkArea`) — a [`Marker`] is a
+    `time` + optional `duration` (0 = a point marker) + `label` + sRGB `color`
+    (default AE green); a [`WorkArea`] is a `[start, end]` range with `clamped` /
+    `length` / `contains` / `is_full` helpers that keep it ordered and inside the
+    comp. Pure `next_marker_time` / `prev_marker_time` find the nearest marker
+    ahead/behind a time (order-independent). `Comp` gains `markers` + `work_area`
+    fields and `PulseLayer` gains `markers`, all `serde`-defaulted (empty / full)
+    so pre-marker `.pulse` files load unchanged; `clamped_work_area` **self-heals**
+    the serde-default empty `[0,0]` range to the whole timeline so an old project
+    loops its full length. Comp-level `next_marker` / `prev_marker` span the
+    comp's own markers **and** the selected layer's (AE's jump-to-marker scope).
+  - **Playback loops the work area** — the transport now advances within the
+    clamped work area and wraps back to its start at the end (a full work area
+    degrades to looping the whole `[0, duration]` timeline exactly as before); the
+    RAM-preview cache (whole timeline) covers it, so the gate is unchanged.
+  - **Timeline UI** (`timeline.rs`) — comp markers draw as tinted house-shaped
+    tabs (with labels) just below the ruler ticks; layer markers ride the bottom
+    edge of each lane; a durationed marker draws a faint band. A trimmed work area
+    shows as an accent band + end caps on the ruler, and the playhead **dims** when
+    it sits outside the work area (so "won't loop here" reads at a glance).
+  - **Transport + menus + shortcuts** — the timeline transport gains
+    **prev-marker / add-comp-marker / next-marker** buttons; a **Comp ▸ Work area**
+    submenu (set start/end to playhead, reset to whole comp) and a **Comp ▸
+    Markers** submenu (add comp/layer marker, jump prev/next, disabled when none
+    in that direction); and AE-style keys **`B`** / **`N`** (trim work-area
+    start/end) + **`M`** (drop a comp marker), suppressed while a text field has
+    focus. A new **Markers** section in the Properties panel edits the selected
+    layer's markers (time / label / duration / color, add at playhead, go-to,
+    remove, kept time-sorted). The launch demo ships a comp marker at 2.5 s.
+  - **Pure + tested** (+16 tests, 346 total) — marker model (point/durationed
+    end, default color), work-area clamping / length / containment / is-full /
+    full-vs-default, marker navigation (nearest ahead/behind, strict, unsorted,
+    empty), comp-level navigation (spans comp + selected-layer markers, ignores
+    other layers'), comp work-area clamp staying inside the timeline + fresh comp
+    full, and serde round-trip + pre-marker back-compat (defaults to empty / full).
+  - **Deferred** — rendering / exporting the **work-area range only** (export
+    still renders the full timeline), marker-snapping while scrubbing, and
+    dragging markers on the timeline (today they're edited in Properties).
+
 - **RAM-preview cache + parallel render pool** (After Effects' *RAM Preview* /
   green cache bar; PLAN Phase 6 *Caching* + *Multi-frame rendering*) — the preview
   is now a **frame cache**: each comp frame is rendered through the offline

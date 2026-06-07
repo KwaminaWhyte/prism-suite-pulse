@@ -44,6 +44,37 @@ impl PulseApp {
                         self.playing = false;
                     }
                     ui.separator();
+                    // Marker navigation + add (After Effects' marker keys): jump
+                    // to the previous / next marker (comp + selected layer), and
+                    // drop a comp marker at the playhead.
+                    if ui
+                        .button(icons::MARKER_PREV)
+                        .on_hover_text("Previous marker")
+                        .clicked()
+                    {
+                        if let Some(t) = self.comp.prev_marker(self.time, self.selected) {
+                            self.time = t;
+                            self.playing = false;
+                        }
+                    }
+                    if ui
+                        .button(icons::MARKER)
+                        .on_hover_text("Add a comp marker at the playhead")
+                        .clicked()
+                    {
+                        self.add_comp_marker();
+                    }
+                    if ui
+                        .button(icons::MARKER_NEXT)
+                        .on_hover_text("Next marker")
+                        .clicked()
+                    {
+                        if let Some(t) = self.comp.next_marker(self.time, self.selected) {
+                            self.time = t;
+                            self.playing = false;
+                        }
+                    }
+                    ui.separator();
                     let frame = (self.time * self.comp.fps).round() as i32;
                     ui.monospace(format!("{:>6.2}s   frame {:>4}", self.time, frame));
 

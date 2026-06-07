@@ -362,6 +362,8 @@ fn parented_comp() -> Comp {
         duration: 1.0,
         fps: 30.0,
         motion_blur: MotionBlur::default(),
+        markers: Vec::new(),
+        work_area: WorkArea::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -1682,4 +1684,98 @@ fn comp_layer_source_time_follows_active_remap() {
     for &t in &[0.0, 1.0, 2.5, 5.0] {
         assert!((comp.layer_source_time(0, t) - (dur - t)).abs() < 1e-4, "t={t}");
     }
+}
+
+// --- Markers / work area -----------------------------------------------------
+
+#[test]
+fn comp_navigation_spans_comp_and_layer_markers() {
+    // next/prev consider both the comp's own markers and the selected layer's.
+    let mut comp = Comp::new();
+    comp.markers = vec![Marker::at(1.0), Marker::at(4.0)];
+    comp.layers[0].markers = vec![Marker::at(2.0)];
+    // With layer 0 selected, the layer marker at 2.0 is in the set.
+    assert_eq!(comp.next_marker(0.5, Some(0)), Some(1.0));
+    assert_eq!(comp.next_marker(1.0, Some(0)), Some(2.0)); // the layer marker
+    assert_eq!(comp.prev_marker(3.0, Some(0)), Some(2.0));
+    assert_eq!(comp.next_marker(4.0, Some(0)), None);
+    // With no layer selected, only comp markers count (the 2.0 layer marker is gone).
+    assert_eq!(comp.next_marker(1.0, None), Some(4.0));
+    assert_eq!(comp.prev_marker(3.0, None), Some(1.0));
+}
+
+#[test]
+fn comp_navigation_ignores_other_layers_markers() {
+    // Only the *selected* layer's markers join the comp's; another layer's don't.
+    let mut comp = Comp::new();
+    comp.markers.clear(); // drop the demo's comp marker to isolate layer markers
+    comp.layers[0].markers = vec![Marker::at(1.0)];
+    comp.layers[1].markers = vec![Marker::at(2.0)];
+    assert_eq!(comp.next_marker(0.0, Some(0)), Some(1.0));
+    // Selecting layer 0, layer 1's marker at 2.0 is not in the nav set.
+    assert_eq!(comp.next_marker(1.0, Some(0)), None);
+    // Selecting layer 1 instead surfaces its 2.0 marker.
+    assert_eq!(comp.next_marker(1.0, Some(1)), Some(2.0));
+}
+
+#[test]
+fn comp_clamped_work_area_stays_inside_timeline() {
+    // A hand-edited / inverted work area is clamped to the comp's [0, duration].
+    let mut comp = Comp::new();
+    comp.duration = 5.0;
+    comp.work_area = WorkArea { start: -2.0, end: 99.0 };
+    let wa = comp.clamped_work_area();
+    assert_eq!(wa, WorkArea { start: 0.0, end: 5.0 });
+    // An inverted range collapses to an ordered (zero-length) area, never escapes.
+    comp.work_area = WorkArea { start: 4.0, end: 1.0 };
+    let wa = comp.clamped_work_area();
+    assert_eq!(wa, WorkArea { start: 4.0, end: 4.0 });
+}
+
+#[test]
+fn fresh_comp_work_area_spans_the_timeline() {
+    let comp = Comp::new();
+    assert!(comp.clamped_work_area().is_full(comp.duration));
+}
+
+#[test]
+fn markers_and_work_area_serde_round_trip() {
+    let mut comp = Comp::new();
+    comp.markers = vec![{
+        let mut m = Marker::at(1.5);
+        m.label = "intro".to_string();
+        m.duration = 0.5;
+        m.color = [0.1, 0.2, 0.3];
+        m
+    }];
+    comp.layers[0].markers = vec![Marker::at(2.0)];
+    comp.work_area = WorkArea { start: 1.0, end: 3.0 };
+    let json = serde_json::to_string(&comp).unwrap();
+    let back: Comp = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.markers.len(), 1);
+    assert_eq!(back.markers[0].label, "intro");
+    assert!((back.markers[0].time - 1.5).abs() < 1e-6);
+    assert!((back.markers[0].duration - 0.5).abs() < 1e-6);
+    assert_eq!(back.markers[0].color, [0.1, 0.2, 0.3]);
+    assert_eq!(back.layers[0].markers.len(), 1);
+    assert_eq!(back.work_area, WorkArea { start: 1.0, end: 3.0 });
+}
+
+#[test]
+fn markers_serde_default_to_empty_for_old_files() {
+    // A pre-marker comp (no `markers` / `work_area` fields) loads with no markers
+    // and an empty (full-on-clamp) work area.
+    let json = r#"{"width":16,"height":16,"duration":2.0,"fps":30.0,
+        "layers":[{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}]}"#;
+    let comp: Comp = serde_json::from_str(json).unwrap();
+    assert!(comp.markers.is_empty());
+    assert!(comp.layers[0].markers.is_empty());
+    // The stored serde-default WorkArea is the empty [0,0] range, but
+    // `clamped_work_area` self-heals it to the whole timeline so a pre-work-area
+    // project loops its full length (rather than a degenerate zero range).
+    assert_eq!(comp.work_area, WorkArea { start: 0.0, end: 0.0 });
+    assert_eq!(comp.clamped_work_area(), WorkArea { start: 0.0, end: 2.0 });
+    assert!(comp.clamped_work_area().is_full(comp.duration));
 }

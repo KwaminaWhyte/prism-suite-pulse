@@ -27,6 +27,7 @@ mod effect_browser;
 mod expr;
 mod footage;
 mod keyframe;
+mod marker;
 mod mask;
 mod matte;
 mod motion_blur;
@@ -45,6 +46,7 @@ pub use footage::{
     source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
 };
 pub use keyframe::{Ease, Handle, Interp, Track};
+pub use marker::{next_marker_time, prev_marker_time, Marker, WorkArea};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
 pub use matte::MatteMode;
 pub use motion_blur::{MotionBlur, Prop};
@@ -143,6 +145,12 @@ pub struct PulseLayer {
     /// pre-time-remap `.pulse` files load and sample their source unchanged.
     #[serde(default)]
     pub time_remap: TimeRemap,
+    /// **Layer markers** (After Effects' layer markers): labelled points/spans
+    /// pinned to this layer's timeline. Pure timeline metadata — drawn on the
+    /// layer's lane and used by time navigation; they carry no pixels.
+    /// `serde`-defaulted to empty so pre-marker `.pulse` files still load.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -177,6 +185,7 @@ impl PulseLayer {
             footage: FootageLayer::default(),
             precomp: PrecompLayer::default(),
             time_remap: TimeRemap::default(),
+            markers: Vec::new(),
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -332,6 +341,19 @@ pub struct Comp {
     /// `.pulse` files still load with motion blur off.
     #[serde(default)]
     pub motion_blur: MotionBlur,
+    /// **Composition markers** (After Effects' comp markers): labelled
+    /// points/spans on the comp timeline, drawn on the ruler and used by time
+    /// navigation. `serde`-defaulted to empty so pre-marker `.pulse` files still
+    /// load.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+    /// The **work area** — the `[start, end]` sub-range of the timeline that
+    /// bounds RAM-preview / playback / render. `serde`-defaulted to the empty full
+    /// range; a loaded comp expands it to its own duration (see [`Comp::new`] and
+    /// the project loader), and the renderer/transport clamp it to the comp every
+    /// use, so a pre-work-area `.pulse` file behaves as the whole timeline.
+    #[serde(default)]
+    pub work_area: WorkArea,
     pub layers: Vec<PulseLayer>,
 }
 
@@ -346,6 +368,8 @@ impl Comp {
             duration: 5.0,
             fps: 30.0,
             motion_blur: MotionBlur::default(),
+            markers: Vec::new(),
+            work_area: WorkArea::full(5.0),
             layers: Vec::new(),
         };
         // Enable comp motion blur so the demo's fast slide/spin reads with a
@@ -470,6 +494,14 @@ impl Comp {
             out_white: 1.0,
         });
         c.layers.push(grade); // index 4
+
+        // A comp marker mid-timeline so markers + time navigation read out of the
+        // box (jump to it with the timeline's marker-nav buttons).
+        c.markers.push({
+            let mut m = Marker::at(2.5);
+            m.label = "Beat".to_string();
+            m
+        });
         c
     }
 
@@ -486,6 +518,8 @@ impl Comp {
             duration: like.duration,
             fps: like.fps,
             motion_blur: MotionBlur::default(),
+            markers: Vec::new(),
+            work_area: WorkArea::full(like.duration),
             layers: Vec::new(),
         }
     }
@@ -630,6 +664,46 @@ impl Comp {
         idx.checked_sub(1)
             .and_then(|below| self.layers.get(below))
             .is_some_and(|below| below.matte.is_active())
+    }
+
+    /// The comp's **work area** clamped to its own `[0, duration]` timeline — the
+    /// range the transport / RAM-preview loop within. Always ordered and inside the
+    /// comp (a hand-edited or stale range can never invert or escape).
+    ///
+    /// As a back-compat / self-heal: the `serde` default empty `[0, 0]` work area
+    /// (an old `.pulse` file with no `work_area` field) on a comp with a real
+    /// duration is treated as the **whole timeline**, so a pre-work-area project
+    /// loops its full length rather than a degenerate zero-length range.
+    pub fn clamped_work_area(&self) -> WorkArea {
+        let wa = self.work_area.clamped(self.duration);
+        if wa == (WorkArea { start: 0.0, end: 0.0 }) && self.duration > 0.0 {
+            return WorkArea::full(self.duration);
+        }
+        wa
+    }
+
+    /// All marker times visible for navigation: the comp's own markers plus —
+    /// when a layer is selected — that layer's markers (After Effects' "jump to
+    /// marker" considers the comp + the active layer's markers). Used by
+    /// [`next_marker`](Self::next_marker) / [`prev_marker`](Self::prev_marker).
+    fn nav_markers(&self, selected: Option<usize>) -> Vec<Marker> {
+        let mut all = self.markers.clone();
+        if let Some(layer) = selected.and_then(|i| self.layers.get(i)) {
+            all.extend(layer.markers.iter().cloned());
+        }
+        all
+    }
+
+    /// The next marker time strictly after `time` (comp markers + the selected
+    /// layer's markers), or `None` when none lies ahead.
+    pub fn next_marker(&self, time: f32, selected: Option<usize>) -> Option<f32> {
+        next_marker_time(&self.nav_markers(selected), time)
+    }
+
+    /// The previous marker time strictly before `time` (comp markers + the
+    /// selected layer's markers), or `None` when none lies behind.
+    pub fn prev_marker(&self, time: f32, selected: Option<usize>) -> Option<f32> {
+        prev_marker_time(&self.nav_markers(selected), time)
     }
 
     /// Whether making `child` a parent of `parent` is legal: a layer can't

@@ -196,6 +196,58 @@ impl PulseApp {
         self.selected = Some(idx);
     }
 
+    /// Drop a **comp marker** at the playhead (After Effects' add-marker key),
+    /// avoiding a duplicate at the same time. Newly added markers are kept sorted
+    /// by time so the timeline and navigation read in order.
+    fn add_comp_marker(&mut self) {
+        let t = self.time.clamp(0.0, self.comp.duration);
+        if self.comp.markers.iter().any(|m| (m.time - t).abs() < 1e-3) {
+            return;
+        }
+        self.comp.markers.push(crate::comp::Marker::at(t));
+        self.comp
+            .markers
+            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    /// Add a **layer marker** at the playhead on the selected layer (avoiding a
+    /// duplicate), kept sorted by time. No-op if nothing is selected.
+    fn add_layer_marker(&mut self) {
+        let Some(idx) = self.selected else { return };
+        let t = self.time.clamp(0.0, self.comp.duration);
+        let Some(layer) = self.comp.layers.get_mut(idx) else {
+            return;
+        };
+        if layer.markers.iter().any(|m| (m.time - t).abs() < 1e-3) {
+            return;
+        }
+        layer.markers.push(crate::comp::Marker::at(t));
+        layer
+            .markers
+            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    /// Set the work-area **start** to the playhead (clamped below the end).
+    fn set_work_area_start(&mut self) {
+        let dur = self.comp.duration;
+        let t = self.time.clamp(0.0, dur);
+        self.comp.work_area.start = t.min(self.comp.work_area.end);
+        self.comp.work_area = self.comp.work_area.clamped(dur);
+    }
+
+    /// Set the work-area **end** to the playhead (clamped above the start).
+    fn set_work_area_end(&mut self) {
+        let dur = self.comp.duration;
+        let t = self.time.clamp(0.0, dur);
+        self.comp.work_area.end = t.max(self.comp.work_area.start);
+        self.comp.work_area = self.comp.work_area.clamped(dur);
+    }
+
+    /// Reset the work area to span the whole `[0, duration]` timeline.
+    fn reset_work_area(&mut self) {
+        self.comp.work_area = crate::comp::WorkArea::full(self.comp.duration);
+    }
+
     /// A pseudo-random vivid color for a new layer.
     fn next_color(&mut self) -> [f32; 4] {
         // xorshift32
@@ -433,10 +485,17 @@ impl eframe::App for PulseApp {
         // straight from RAM. The UI stays responsive throughout (render is off the
         // UI thread); the worker pool renders ahead so the playhead rarely waits.
         if self.playing {
+            // Playback loops within the **work area** (After Effects' RAM-preview
+            // range), not the whole timeline: advance by `dt`, and when the
+            // playhead reaches the work-area end (or the playhead sits outside the
+            // area), wrap back to the work-area start. A full work area degrades to
+            // looping the whole `[0, duration]` timeline exactly as before.
             let dur = self.comp.duration.max(0.001);
+            let wa = self.comp.clamped_work_area();
+            let (lo, hi) = (wa.start, wa.end.max(wa.start + 1e-3).min(dur));
             let mut next = self.time + ctx.input(|i| i.stable_dt).min(0.1);
-            if next >= dur {
-                next %= dur;
+            if next >= hi || self.time < lo {
+                next = lo;
             }
             if self.preview.fully_cached() || self.preview.is_frame_ready(next) {
                 self.time = next;
@@ -447,6 +506,29 @@ impl eframe::App for PulseApp {
         // Spacebar toggles playback.
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.playing = !self.playing;
+        }
+
+        // Marker / work-area keys (After Effects muscle memory), suppressed while
+        // a text field has focus so typing into a label / name doesn't trigger
+        // them. `B` / `N` trim the work-area start / end to the playhead; `M`
+        // drops a comp marker.
+        if !ctx.wants_keyboard_input() {
+            let (b, n, m) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::B),
+                    i.key_pressed(egui::Key::N),
+                    i.key_pressed(egui::Key::M),
+                )
+            });
+            if b {
+                self.set_work_area_start();
+            }
+            if n {
+                self.set_work_area_end();
+            }
+            if m {
+                self.add_comp_marker();
+            }
         }
 
         self.menu_bar(root);

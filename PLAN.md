@@ -181,8 +181,17 @@ authored once and stacks non-destructively per layer.
 - [~] **Time remapping** (M): **done** — a time-based layer (footage image-sequence / precomp) carries an optional, keyframable **time-remap** `Track` (source times in seconds, `serde`-defaulted **disabled** → back-compat) that, when enabled, drives the **source time** it is sampled at instead of the comp time; wired through the footage frame-index/sampling path *and* the precomp recursive-render time (transforms/opacity stay on comp time; fps-override/loop/hold + the precomp `time_offset` honoured at the remapped time; motion-blur sub-frames + footage/precomp matte sources remapped too), so users can **freeze** (constant remap), **reverse** (decreasing remap), and **slow/speed** playback — and via expressions, since the track carries them; enabling seeds AE-style default keys (identity ramp 0→source-duration, eased; single identity key when the duration is unknown); an "Enable Time Remap" toggle + the remap value as a keyframable property in Properties; pure + render-path unit-tested. Still TODO: **time stretch** (a layer-level speed/duration multiplier), and **frame blending** (frame-mix / pixel-motion interpolation) so a slowed/retimed source interpolates between frames rather than stepping — see the Frame-blending item above (the natural follow-on)
 - [ ] **Spatial motion paths** (M): position keys draw an editable Bézier path; auto-orient along path; roving in time
 - [~] **Expressions** (L): per-property `rhai` engine **done** (first slice) — any animatable **scalar** property (anchor/position/scale/rotation/opacity) carries an optional `serde`-defaulted `expression: Option<String>`; at sample time it's evaluated against a context exposing **`time` / `value` / `fps` / `duration` / `index`** plus helpers **`wiggle`** (deterministic per (layer, time) — stable-hash seeded, *not* `Math.random`), **`linear`**, **`clamp`** (and rhai's `sin/cos/abs/floor/…`); the keyframed value is exposed as `value` so expressions offset/drive it; compiled ASTs are cached per string; a parse/eval error **falls back to the keyframed value without panicking** and is surfaced in the UI; wired through the **real compositor + preview** (position/scale/rotation/anchor/opacity, parent chain, motion-blur sub-frames, matte sources); `fx` toggle + per-property expression field with a red error state in the Properties panel; engine + integration + render-path unit-tested. Still TODO: the broader AE library (**`loopOut/In`**, **`ease`**, **`random/seedRandom`**, **`valueAtTime`**, **`thisComp/thisLayer`**), **pick-whip property links**, and expressions on **non-scalar** properties (2D/3D/color/path) + effect/mask params (land with the typed-`Property<T>` rebuild)
-- [ ] **Markers** (S): comp + layer markers, work-area, time navigation
-- [~] Tests: **time-remap sampling done** (identity == no-remap, reverse `t→dur−t`, freeze hold, easing, expression-driven, default-key seeding, serde, render path); expression evaluation parity (scalar slice) done; motion-blur sample count **Planned**
+- [x] **Markers** (S): comp + layer markers, work-area, time navigation — **done**:
+  pure `Marker` (time / duration / label / color) + `WorkArea` (`[start,end]` with
+  clamp / length / contains / is-full) in `comp/marker.rs`; `Comp` carries `markers`
+  + `work_area` and `PulseLayer` carries `markers` (all `serde`-defaulted +
+  self-healing back-compat). **Playback loops the work area**; transport
+  prev/add/next-marker buttons + AE keys `B`/`N`/`M`; Comp ▸ Work area / Markers
+  menus; a Properties **Markers** section; timeline draws comp markers on the ruler,
+  layer markers per lane, the work-area band + a dimmed-outside playhead. Pure +
+  comp-level navigation/clamp/serde unit-tested. Still open: **render/export the
+  work-area range only**, marker-snapping, on-timeline marker dragging
+- [~] Tests: **time-remap sampling done** (identity == no-remap, reverse `t→dur−t`, freeze hold, easing, expression-driven, default-key seeding, serde, render path); expression evaluation parity (scalar slice) done; **markers + work-area done** (marker model, work-area clamp/length/contains/is-full, marker navigation incl. comp+selected-layer scope, serde + back-compat); motion-blur sample count **Planned**
 
 ### Phase 5 — 3D compositing  *(depth, camera, light)*
 - [ ] **3D layers** (L): per-layer Z, 3D position/orientation/rotation, anchor; 2D/3D toggle
@@ -222,7 +231,7 @@ authored once and stacks non-destructively per layer.
 
 | Category | After Effects surface | Status | Phase |
 |---|---|---|---|
-| Comp / timeline / transport | comps, timeline, play/scrub | **Done** basic; precomp/markers/work-area **Planned** | 0,2,4 |
+| Comp / timeline / transport | comps, timeline, play/scrub | **Done** basic + **markers / work-area / time-navigation** (work-area-looped playback); precomp **done** (see Layer types) | 0,2,4 |
 | Properties / transform | anchor + 2D/3D position/scale/rot/opacity | **Partial** (5 linear tracks) → typed `Property<T>` **Planned** | 1 |
 | Keyframe interpolation / graph editor | linear/hold/Bézier/auto, graph editor | **Partial** (linear/hold/Bézier ease + value-curve graph editor w/ draggable keys & handles; auto-Bézier/speed-graph/roving **Planned**) | 1 |
 | Compositor / blend modes | GPU, 18+ modes, 32-bpc, linear | **Partial** (CPU software compositor; **per-layer blend modes** — all 18, reusing `prism-core` — done; GPU/32-bpc **Planned**) | 1 |

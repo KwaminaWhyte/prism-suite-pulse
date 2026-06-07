@@ -1,6 +1,8 @@
 use super::export::{frame_count, frame_path, frame_time};
 use super::*;
-use crate::comp::{BlendMode, Interp, LayerBlend, MatteMode, MotionBlur, Prop, PulseLayer};
+use crate::comp::{
+    BlendMode, Interp, LayerBlend, MatteMode, MotionBlur, Prop, PulseLayer, WorkArea,
+};
 use std::path::Path;
 
 fn solid(color: [f32; 4]) -> Comp {
@@ -10,6 +12,8 @@ fn solid(color: [f32; 4]) -> Comp {
         duration: 1.0,
         fps: 30.0,
         motion_blur: MotionBlur::default(),
+        markers: Vec::new(),
+        work_area: WorkArea::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -35,6 +39,8 @@ fn empty_comp_is_transparent() {
         duration: 1.0,
         fps: 30.0,
         motion_blur: MotionBlur::default(),
+        markers: Vec::new(),
+        work_area: WorkArea::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -250,6 +256,8 @@ fn parented_child_follows_parent_offset() {
         duration: 1.0,
         fps: 30.0,
         motion_blur: MotionBlur::default(),
+        markers: Vec::new(),
+        work_area: WorkArea::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -329,6 +337,8 @@ fn adjustment_layer_draws_no_pixels_of_its_own() {
         duration: 1.0,
         fps: 30.0,
         motion_blur: MotionBlur::default(),
+        markers: Vec::new(),
+        work_area: WorkArea::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -378,6 +388,8 @@ fn matte_pair(base: [f32; 4], source: [f32; 4], src_scale: f32) -> Comp {
         duration: 1.0,
         fps: 30.0,
         motion_blur: MotionBlur::default(),
+        markers: Vec::new(),
+        work_area: WorkArea::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),

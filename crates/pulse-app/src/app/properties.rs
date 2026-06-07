@@ -129,6 +129,14 @@ impl PulseApp {
                             });
                         }
 
+                        // Layer markers: labelled points/spans on this layer's
+                        // timeline (time / label / duration / color, add at the
+                        // playhead, remove).
+                        let t = self.time;
+                        section(ui, ("sec_markers", idx), "Markers", |ui| {
+                            self.markers_section(ui, idx, t);
+                        });
+
                         // Parent pick-whip: a child inherits this layer's transform.
                         self.parent_row(ui, idx);
 
@@ -714,6 +722,96 @@ impl PulseApp {
             }
             _ => None,
         }
+    }
+
+    /// The layer's **markers** editor: an "Add marker" button (drops one at the
+    /// playhead) plus, per marker, an editable time / label / duration / color and
+    /// a "go to" / remove control. Markers are kept sorted by time so the timeline
+    /// reads in order.
+    fn markers_section(&mut self, ui: &mut egui::Ui, idx: usize, t: f32) {
+        let comp_duration = self.comp.duration;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!("{}  Add", icons::ADD_KEY))
+                    .on_hover_text("Add a layer marker at the playhead")
+                    .clicked()
+                {
+                    self.add_layer_marker();
+                }
+            });
+        });
+
+        let markers = &mut self.comp.layers[idx].markers;
+        if markers.is_empty() {
+            ui.weak("No layer markers.");
+            return;
+        }
+
+        let mut remove: Option<usize> = None;
+        let mut goto: Option<f32> = None;
+        let mut resort = false;
+        for (m_idx, m) in markers.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                rgb_button(ui, (idx, m_idx, 0), &mut m.color);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut m.time)
+                            .speed(0.01)
+                            .range(0.0..=comp_duration)
+                            .suffix(" s"),
+                    )
+                    .on_hover_text("Marker time")
+                    .changed()
+                {
+                    resort = true;
+                }
+                if ui
+                    .small_button(icons::TO_END)
+                    .on_hover_text("Move the playhead to this marker")
+                    .clicked()
+                {
+                    goto = Some(m.time);
+                }
+                if ui
+                    .small_button(icons::TRASH)
+                    .on_hover_text("Remove this marker")
+                    .clicked()
+                {
+                    remove = Some(m_idx);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Label");
+                ui.text_edit_singleline(&mut m.label);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Duration");
+                ui.add(
+                    egui::DragValue::new(&mut m.duration)
+                        .speed(0.01)
+                        .range(0.0..=comp_duration)
+                        .suffix(" s"),
+                )
+                .on_hover_text("Span length (0 = a point marker)");
+            });
+            ui.separator();
+        }
+        if let Some(r) = remove {
+            self.comp.layers[idx].markers.remove(r);
+        } else if resort {
+            self.comp.layers[idx].markers.sort_by(|a, b| {
+                a.time
+                    .partial_cmp(&b.time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        if let Some(t_goto) = goto {
+            self.time = t_goto.clamp(0.0, comp_duration);
+        }
+        // `t` is currently unused beyond range context, but kept so a future
+        // "marker at playhead" highlight can compare against it.
+        let _ = t;
     }
 
     /// The layer's **effect stack** editor: an "Add effect" menu, then each

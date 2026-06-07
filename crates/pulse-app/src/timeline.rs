@@ -2,7 +2,7 @@
 //! draggable playhead. Drawn into the bottom panel through egui's painter, with
 //! click/drag scrubbing on the ruler and the lane area.
 
-use crate::comp::{Comp, Interp, Prop};
+use crate::comp::{Comp, Interp, Marker, Prop};
 use crate::theme;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -74,6 +74,38 @@ pub fn show(ui: &mut Ui, comp: &Comp, time: f32, selected: Option<usize>) -> Tim
         );
     }
 
+    // --- Work area band ------------------------------------------------------
+    // A tinted bar across the ruler marking the [start, end] work area (the
+    // render/preview range). Drawn only when the area is trimmed from the full
+    // timeline, so a fresh comp's ruler stays clean.
+    let wa = comp.clamped_work_area();
+    if !wa.is_full(comp.duration) {
+        let wx0 = time_to_x(wa.start);
+        let wx1 = time_to_x(wa.end);
+        let band = Rect::from_min_max(
+            Pos2::new(wx0, ruler_rect.bottom() - 4.0),
+            Pos2::new(wx1, ruler_rect.bottom()),
+        );
+        painter.rect_filled(band, 0.0, theme::accent().gamma_multiply(0.5));
+        // End caps so a zero/short area still reads.
+        for x in [wx0, wx1] {
+            painter.line_segment(
+                [
+                    Pos2::new(x, ruler_rect.top() + 2.0),
+                    Pos2::new(x, ruler_rect.bottom()),
+                ],
+                Stroke::new(1.5, theme::accent()),
+            );
+        }
+    }
+
+    // --- Composition markers -------------------------------------------------
+    // Comp markers sit just below the ruler ticks (After Effects' comp-marker
+    // strip): a small tab + label per marker, a band for a durationed marker.
+    for m in &comp.markers {
+        draw_marker(&painter, m, ruler_rect.bottom() - 2.0, time_to_x, true);
+    }
+
     // --- Layer lanes + keyframe diamonds ------------------------------------
     for (i, layer) in comp.layers.iter().enumerate() {
         let lane_top = rect.top() + RULER_H + i as f32 * LANE_H;
@@ -133,13 +165,27 @@ pub fn show(ui: &mut Ui, comp: &Comp, time: f32, selected: Option<usize>) -> Tim
                 keyframe_marker(&painter, Pos2::new(x, cy), 4.0, theme::accent(), k.interp);
             }
         }
+
+        // Layer markers ride the bottom edge of the lane (tinted tabs / bands),
+        // distinct from the keyframe diamonds that ride the lane's center line.
+        for m in &layer.markers {
+            draw_marker(&painter, m, lane_top + LANE_H - 2.0, time_to_x, false);
+        }
     }
 
     // --- Playhead ------------------------------------------------------------
+    // Dim the playhead when it sits outside a trimmed work area, so it reads that
+    // the current frame won't loop in playback (which loops the work area).
+    let in_work_area = wa.is_full(comp.duration) || wa.contains(time, comp.duration);
+    let playhead_color = if in_work_area {
+        theme::accent()
+    } else {
+        theme::accent().gamma_multiply(0.45)
+    };
     let px = time_to_x(time);
     painter.line_segment(
         [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
-        Stroke::new(1.5, theme::accent()),
+        Stroke::new(1.5, playhead_color),
     );
     // Playhead handle (triangle) at the top.
     painter.add(egui::Shape::convex_polygon(
@@ -148,7 +194,7 @@ pub fn show(ui: &mut Ui, comp: &Comp, time: f32, selected: Option<usize>) -> Tim
             Pos2::new(px + 5.0, rect.top()),
             Pos2::new(px, rect.top() + 7.0),
         ],
-        theme::accent(),
+        playhead_color,
         Stroke::NONE,
     ));
 
@@ -208,6 +254,61 @@ fn keyframe_marker(painter: &egui::Painter, c: Pos2, r: f32, color: Color32, int
             painter.circle(c, r, color, outline);
         }
     }
+}
+
+/// Draw one marker as a small pentagon tab at its baseline, a band if it has a
+/// duration, and (for comp markers) its label beside it. `baseline` is the y the
+/// tab points down to; `time_to_x` maps a comp time to screen x.
+fn draw_marker(
+    painter: &egui::Painter,
+    m: &Marker,
+    baseline: f32,
+    time_to_x: impl Fn(f32) -> f32,
+    with_label: bool,
+) {
+    let color = marker_color(m.color);
+    let x = time_to_x(m.time);
+    // A durationed marker draws a faint band from start to end.
+    if m.duration > 0.0 {
+        let x1 = time_to_x(m.end());
+        let band = Rect::from_min_max(
+            Pos2::new(x, baseline - 5.0),
+            Pos2::new(x1.max(x + 1.0), baseline),
+        );
+        painter.rect_filled(band, 0.0, color.gamma_multiply(0.4));
+    }
+    // The tab: a house-shaped pentagon pointing down to the baseline.
+    let w = 4.0;
+    let h = 7.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(x - w, baseline - h),
+            Pos2::new(x + w, baseline - h),
+            Pos2::new(x + w, baseline - h * 0.45),
+            Pos2::new(x, baseline),
+            Pos2::new(x - w, baseline - h * 0.45),
+        ],
+        color,
+        Stroke::new(1.0, Color32::from_rgb(0x10, 0x11, 0x13)),
+    ));
+    if with_label && !m.label.is_empty() {
+        painter.text(
+            Pos2::new(x + w + 2.0, baseline - h),
+            Align2::LEFT_BOTTOM,
+            &m.label,
+            FontId::proportional(10.0),
+            color,
+        );
+    }
+}
+
+/// An egui color for a marker's sRGB `[f32; 3]` tint (alpha ignored).
+fn marker_color(c: [f32; 3]) -> Color32 {
+    Color32::from_rgb(
+        (c[0].clamp(0.0, 1.0) * 255.0) as u8,
+        (c[1].clamp(0.0, 1.0) * 255.0) as u8,
+        (c[2].clamp(0.0, 1.0) * 255.0) as u8,
+    )
 }
 
 /// A solid egui color for a layer's swatch dot (alpha ignored).

@@ -74,6 +74,10 @@ impl PulseApp {
                 });
                 ui.menu_button("Comp", |ui| {
                     self.motion_blur_menu(ui);
+                    ui.separator();
+                    self.work_area_menu(ui);
+                    ui.separator();
+                    self.marker_menu(ui);
                 });
                 ui.menu_button("View", |ui| {
                     self.onion_menu(ui);
@@ -124,6 +128,103 @@ impl PulseApp {
             ui.add(egui::Slider::new(&mut mb.samples, 1..=64).text("Samples"))
                 .on_hover_text("Sub-frame snapshots integrated across the shutter");
         });
+    }
+
+    /// The comp **Work area** controls (After Effects' `B` / `N` work-area keys):
+    /// set the work-area start / end to the playhead, or reset to the whole
+    /// timeline. The work area bounds playback (the loop range) and shows on the
+    /// timeline ruler when trimmed. The reset is disabled when already full.
+    fn work_area_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Work area").strong());
+        let dur = self.comp.duration;
+        let wa = self.comp.clamped_work_area();
+        ui.label(format!(
+            "[{:.2}s – {:.2}s]  ({:.2}s)",
+            wa.start,
+            wa.end,
+            wa.length(dur)
+        ));
+        if ui
+            .button("Set start to playhead (B)")
+            .on_hover_text("Trim the work-area start to the current time")
+            .clicked()
+        {
+            self.set_work_area_start();
+            ui.close_menu();
+        }
+        if ui
+            .button("Set end to playhead (N)")
+            .on_hover_text("Trim the work-area end to the current time")
+            .clicked()
+        {
+            self.set_work_area_end();
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(
+                !wa.is_full(dur),
+                egui::Button::new("Reset to whole comp"),
+            )
+            .on_hover_text("Span the work area across the whole timeline")
+            .clicked()
+        {
+            self.reset_work_area();
+            ui.close_menu();
+        }
+    }
+
+    /// The comp **Markers** controls: add a comp marker at the playhead and jump
+    /// to the previous / next marker (comp + selected layer). Mirrors the timeline
+    /// transport's marker buttons; the navigation entries are disabled when there's
+    /// no marker in that direction.
+    fn marker_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Markers").strong());
+        if ui
+            .button(format!("{}  Add comp marker", icons::MARKER))
+            .on_hover_text("Drop a marker at the playhead")
+            .clicked()
+        {
+            self.add_comp_marker();
+            ui.close_menu();
+        }
+        ui.add_enabled_ui(self.selected.is_some(), |ui| {
+            if ui
+                .button(format!("{}  Add layer marker", icons::MARKER))
+                .on_hover_text("Drop a marker on the selected layer at the playhead")
+                .clicked()
+            {
+                self.add_layer_marker();
+                ui.close_menu();
+            }
+        });
+        let prev = self.comp.prev_marker(self.time, self.selected);
+        let next = self.comp.next_marker(self.time, self.selected);
+        if ui
+            .add_enabled(
+                prev.is_some(),
+                egui::Button::new(format!("{}  Previous marker", icons::MARKER_PREV)),
+            )
+            .clicked()
+        {
+            if let Some(t) = prev {
+                self.time = t;
+                self.playing = false;
+            }
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(
+                next.is_some(),
+                egui::Button::new(format!("{}  Next marker", icons::MARKER_NEXT)),
+            )
+            .clicked()
+        {
+            if let Some(t) = next {
+                self.time = t;
+                self.playing = false;
+            }
+            ui.close_menu();
+        }
     }
 
     /// The **View ▸ Onion Skinning** controls: a master enable plus how many
