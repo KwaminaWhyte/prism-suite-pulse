@@ -352,7 +352,10 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             // failed-to-decode source draws nothing (the buffer stays clear).
             LayerKind::Footage => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                if let Some(path) = layer.footage.path_at(t, comp.fps) {
+                // Time remap (if enabled) drives the *source* time the footage is
+                // sampled at; transforms/opacity stay on the comp time `t`.
+                let src_t = comp.layer_source_time(i, t);
+                if let Some(path) = layer.footage.path_at(src_t, comp.fps) {
                     if let Some(frame) = cache.get(&path, layer.footage.alpha) {
                         let frame = frame.clone();
                         composite_footage(&mut layer_buf, &geom, world, layer, &frame, opacity);
@@ -381,7 +384,11 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             // matte / spatial passes then apply before it is composited.
             LayerKind::Precomp => {
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
-                composite_precomp(&mut layer_buf, &geom, world, layer, cache, t, opacity, ctx);
+                // Time remap (if enabled) drives the host time fed to the nested
+                // comp (the `time_offset` shift still applies on top); transforms
+                // and opacity stay on the comp time `t`.
+                let src_t = comp.layer_source_time(i, t);
+                composite_precomp(&mut layer_buf, &geom, world, layer, cache, src_t, opacity, ctx);
                 finish_layer(
                     &mut acc,
                     &mut layer_buf,

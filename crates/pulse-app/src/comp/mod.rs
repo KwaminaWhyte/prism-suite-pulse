@@ -34,6 +34,7 @@ mod precomp;
 mod shape;
 mod spatial;
 mod text;
+mod time_remap;
 mod transform;
 
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
@@ -51,6 +52,7 @@ pub use precomp::{PrecompLayer, Project};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, SpatialEffect};
 pub use text::{TextAlign, TextLayer};
+pub use time_remap::TimeRemap;
 pub use transform::{Affine2, Transform};
 
 /// One animated layer: a solid color rect transformed by its tracks, optionally
@@ -133,6 +135,14 @@ pub struct PulseLayer {
     /// reference.
     #[serde(default)]
     pub precomp: PrecompLayer,
+    /// **Time remap** (After Effects' *Enable Time Remap*): an optional enable
+    /// switch + a keyframable scalar track of *source* times. When enabled on a
+    /// time-based layer (footage image-sequence / precomp), the source is sampled
+    /// at the remapped time instead of the comp time — letting the user freeze /
+    /// reverse / retime playback. `serde`-defaulted to disabled (empty track) so
+    /// pre-time-remap `.pulse` files load and sample their source unchanged.
+    #[serde(default)]
+    pub time_remap: TimeRemap,
     // Animated properties. An empty track means "use the default constant".
     /// Anchor-point offset from the layer's geometric center (comp px). The
     /// pivot for scale/rotation and the local point aligned to `(x, y)`.
@@ -166,6 +176,7 @@ impl PulseLayer {
             text: TextLayer::default(),
             footage: FootageLayer::default(),
             precomp: PrecompLayer::default(),
+            time_remap: TimeRemap::default(),
             anchor_x: Track::default(),
             anchor_y: Track::default(),
             x: Track::default(),
@@ -565,6 +576,21 @@ impl Comp {
             return 0.0;
         }
         self.layer_transform(idx, t).opacity
+    }
+
+    /// The **source time** layer `idx` should sample its time-based source at,
+    /// given comp time `t`. When the layer's [`TimeRemap`] is active this is the
+    /// remap track's (expression-aware) value at `t`; otherwise it is `t`
+    /// unchanged (identity — every non-remapped layer behaves exactly as before).
+    ///
+    /// The renderer routes footage frame-indexing and precomp recursion through
+    /// this so an enabled remap freezes / reverses / retimes the source. A missing
+    /// layer returns `t` (identity).
+    pub fn layer_source_time(&self, idx: usize, t: f32) -> f32 {
+        match self.layers.get(idx) {
+            Some(layer) => layer.time_remap.source_time_ctx(self.expr_ctx(idx, t)),
+            None => t,
+        }
     }
 
     /// Sample layer `idx`'s property `prop` at time `t`, expression-aware. Used by

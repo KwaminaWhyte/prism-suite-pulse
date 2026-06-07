@@ -4,9 +4,9 @@
 
 use super::PulseApp;
 use crate::comp::{
-    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, Ease, Effect, Fill,
-    FootageSource, Interp, LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
-    ShapePrimitive, SpatialEffect, Stroke, TextAlign,
+    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, Ease, Effect, ExprCtx,
+    Fill, FootageSource, Interp, LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
+    ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -113,6 +113,19 @@ impl PulseApp {
                         if self.comp.layers[idx].kind == LayerKind::Precomp {
                             section(ui, ("sec_precomp", idx), "Precomp", |ui| {
                                 self.precomp_section(ui, idx);
+                            });
+                        }
+
+                        // Time remap (enable toggle + keyframable source-time
+                        // track), shown only for time-based layers (footage /
+                        // precomp) — the sources whose playback it can retime.
+                        if matches!(
+                            self.comp.layers[idx].kind,
+                            LayerKind::Footage | LayerKind::Precomp
+                        ) {
+                            let t = self.time;
+                            section(ui, ("sec_time_remap", idx), "Time remap", |ui| {
+                                self.time_remap_section(ui, idx, t);
                             });
                         }
 
@@ -622,6 +635,87 @@ impl PulseApp {
         ui.weak("Nested comp renders at export; the preview shows a placeholder quad.");
     }
 
+    /// The layer's **time-remap** editor (After Effects' *Enable Time Remap*): an
+    /// enable toggle that seeds AE-style default keys, then the remap *source
+    /// time* shown as a keyframable property (reusing the same value slider +
+    /// keyframe + `fx` expression UI as the transform rows). When enabled on a
+    /// time-based layer the source is sampled at this remapped time instead of the
+    /// comp time, letting the user freeze / reverse / retime playback.
+    fn time_remap_section(&mut self, ui: &mut egui::Ui, idx: usize, t: f32) {
+        let comp_duration = self.comp.duration;
+        let comp_fps = self.comp.fps;
+        // The source's natural duration (seconds), used to seed an identity ramp
+        // when the user enables the remap: footage = frames / fps; precomp = the
+        // referenced comp's duration. `None` (a still / unknown) seeds a single
+        // identity key instead.
+        let source_duration = self.source_duration_for(idx, comp_fps);
+
+        // Enable toggle. Switching it on seeds AE-style default keys (an identity
+        // ramp 0 → source_duration over the comp span, or a single identity key
+        // when the duration is unknown); switching it off keeps the keys so the
+        // user can re-enable without losing a hand-tuned curve.
+        let mut enabled = self.comp.layers[idx].time_remap.enabled;
+        if ui
+            .checkbox(&mut enabled, "Enable Time Remap")
+            .on_hover_text("Drive this layer's source time with a keyframable curve")
+            .changed()
+        {
+            self.comp.layers[idx].time_remap.enabled = enabled;
+            if enabled {
+                self.comp.layers[idx]
+                    .time_remap
+                    .seed_default(comp_duration, source_duration);
+            }
+        }
+
+        if !self.comp.layers[idx].time_remap.enabled {
+            ui.weak("Off — the source plays at the comp time (1:1).");
+            return;
+        }
+
+        // Reuse the generic keyframable-track row (value slider + add-key + fx
+        // expression + interpolation) for the remap's source-time track.
+        self.track_row(
+            ui,
+            ("time_remap", idx),
+            "Remap value",
+            " s",
+            0.0..=comp_duration.max(1.0),
+            t,
+            |layer| &layer.time_remap.track,
+            |layer| &mut layer.time_remap.track,
+        );
+    }
+
+    /// The source's natural duration (seconds) for layer `idx`, used to seed the
+    /// time-remap identity ramp: a footage **sequence** is `frames / fps` (fps
+    /// override or comp fps), a **still** has none, and a **precomp** is its
+    /// referenced comp's duration. `None` when there's nothing meaningful to ramp
+    /// to (a still, an unwired/missing reference).
+    fn source_duration_for(&self, idx: usize, comp_fps: f32) -> Option<f32> {
+        let layer = self.comp.layers.get(idx)?;
+        match layer.kind {
+            LayerKind::Footage => match layer.footage.source.as_ref()? {
+                FootageSource::Sequence { count, .. } => {
+                    let fps = layer.footage.fps.unwrap_or(comp_fps).max(0.1);
+                    Some(*count as f32 / fps)
+                }
+                FootageSource::Still { .. } => None,
+            },
+            LayerKind::Precomp => {
+                let id = layer.precomp.source?;
+                // The referenced comp is either the active comp (self) or one of
+                // the project's other comps.
+                if id == self.comp.id {
+                    Some(self.comp.duration)
+                } else {
+                    self.others.iter().find(|c| c.id == id).map(|c| c.duration)
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// The layer's **effect stack** editor: an "Add effect" menu, then each
     /// effect with reorder / remove controls and per-parameter sliders. Effects
     /// process the layer's own color (solid) or the layers below (adjustment).
@@ -982,6 +1076,121 @@ impl PulseApp {
                 if let Some(next) = chosen {
                     if next != current {
                         layer.track_mut(prop).set_interp(t, next);
+                    }
+                }
+            });
+        }
+        ui.add_space(2.0);
+    }
+
+    /// A generic **keyframable-track row** for a non-[`Prop`] track (the
+    /// time-remap source-time curve): the same value slider + add-key + `fx`
+    /// expression + interpolation UI `property_row` gives transform properties,
+    /// but driven by `get`/`get_mut` accessors so it can edit any [`Track`] on the
+    /// layer. `id` salts the widgets; `label`/`suffix`/`range` style the slider.
+    #[allow(clippy::too_many_arguments)]
+    fn track_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: (&'static str, usize),
+        label: &str,
+        suffix: &str,
+        range: std::ops::RangeInclusive<f32>,
+        t: f32,
+        get: impl Fn(&crate::comp::PulseLayer) -> &Track,
+        get_mut: impl Fn(&mut crate::comp::PulseLayer) -> &mut Track,
+    ) {
+        let layer = &mut self.comp.layers[id.1];
+        let key_count = get(layer).keys.len();
+        let mut value = get(layer).sample(t, 0.0);
+        // Expression-resolved value for the live read-out (the track may carry an
+        // expression that offsets/drives the keyframed value).
+        let has_expr = get(layer).has_expression();
+        let resolved = get(layer).sample_expr(
+            t,
+            0.0,
+            ExprCtx {
+                time: t,
+                value: 0.0,
+                fps: self.comp.fps,
+                duration: self.comp.duration,
+                index: id.1,
+            },
+        );
+        let layer = &mut self.comp.layers[id.1];
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let fx = ui
+                    .selectable_label(has_expr, "fx")
+                    .on_hover_text("Toggle an expression on this property");
+                if fx.clicked() {
+                    let track = get_mut(layer);
+                    track.expression = if has_expr {
+                        None
+                    } else {
+                        Some("value".to_string())
+                    };
+                }
+                ui.weak(format!("{key_count} {}", icons::KEYFRAME));
+            });
+        });
+
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::Slider::new(&mut value, range)
+                    .suffix(suffix.to_owned())
+                    .clamping(egui::SliderClamping::Never),
+            );
+            if resp.changed() {
+                get_mut(layer).set_key(t, value);
+            }
+            if ui
+                .button(icons::ADD_KEY)
+                .on_hover_text("Add keyframe @ playhead")
+                .clicked()
+            {
+                get_mut(layer).set_key(t, value);
+            }
+        });
+
+        // Expression editor (shown while fx is on).
+        if let Some(expr) = get_mut(layer).expression.as_mut() {
+            let errored = !expr.trim().is_empty() && expr_last_error(expr);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let mut edit = egui::TextEdit::singleline(expr)
+                    .id_salt(("expr", id.0, id.1))
+                    .hint_text("time * 0.5")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Monospace);
+                if errored {
+                    edit = edit.text_color(egui::Color32::from_rgb(0xE0, 0x5A, 0x5A));
+                }
+                ui.add(edit);
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if errored {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xE0, 0x5A, 0x5A),
+                        "expression error — using keyframed value",
+                    );
+                } else {
+                    ui.weak(format!("= {resolved:.2}{suffix}"));
+                }
+            });
+        }
+
+        // Interpolation selector — only when the playhead sits on a key.
+        if let Some(current) = get(layer).interp_at(t) {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.weak(current.label());
+                if let Some(next) = interp_picker(ui, current) {
+                    if next != current {
+                        get_mut(layer).set_interp(t, next);
                     }
                 }
             });

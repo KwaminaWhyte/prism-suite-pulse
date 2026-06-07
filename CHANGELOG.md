@@ -10,6 +10,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Time remapping** (After-Effects' *Enable Time Remap*, Phase 4 *Time
+  remapping*) — a time-based layer (a **footage image-sequence** or a **precomp**)
+  can now carry an optional, keyframable **time-remap** curve that drives the
+  **source time** it is sampled at, instead of the comp time. This lets the user
+  **freeze** (a constant remap holds one source frame), **reverse** (a decreasing
+  remap plays the source backwards), and **slow / speed up** footage and precomp
+  playback via keyframes — and, since the remap is a normal `Track`, via
+  expressions too (`time * 0.5` for half-speed).
+  - **Model** (`comp/time_remap.rs`, new `TimeRemap`) — an `enabled` switch plus a
+    scalar `Track` of *source* times (seconds) keyed against comp time. A
+    `TimeRemap` field is added to `PulseLayer`, `serde`-defaulted to **disabled
+    with an empty track** so every pre-time-remap `.pulse` file (and layer kind)
+    loads and samples its source unchanged — the remap is a pure no-op until
+    switched on. `source_time` / `source_time_ctx` return the remapped source time
+    when the remap is **active** (enabled *and* keyed) and the identity comp time
+    otherwise, so an "on but unconfigured" remap can never collapse the source to
+    time 0. A comp-level `layer_source_time` threads the expression context
+    (fps/duration/index) so an expressioned remap drives source time too.
+  - **Sampling integration** — the footage frame-index/sampling path and the
+    precomp recursive-render time (both previously on comp time `t`) now route
+    their *source* time through `layer_source_time` (transforms/opacity stay on
+    `t` — only the sampled content is retimed). The footage **fps-override / loop /
+    hold-last** behaviour is honoured at the remapped time, and the precomp's
+    `time_offset` shift still applies on top of the remap. Motion-blur sub-frames
+    and footage/precomp track-matte sources are remapped too, so a retimed source
+    blurs and mattes at the remapped rate.
+  - **Default keyframes** — enabling the remap seeds **AE-style default keys**: an
+    identity ramp from source time `0` at comp time `0` to the source's natural
+    duration at the comp's end (footage = `frames / fps`, precomp = the referenced
+    comp's duration), eased like AE's time-remap default — so freshly enabling it
+    plays the source 1:1, then the user reshapes the curve. A source with no usable
+    duration (a still, an unwired reference) seeds a single identity key (a hold at
+    source start). Disabling keeps the keys, so re-enabling never clobbers a
+    hand-tuned curve.
+  - **UI** (`app/properties.rs`) — time-based layers gain a **Time remap**
+    section with an **"Enable Time Remap"** toggle and the remap value shown as a
+    **keyframable property** (a new generic `track_row` reusing the same value
+    slider + add-key + `fx` expression + interpolation UI as the transform rows).
+  - **Pure + tested** (+16 tests, 320 total) — model unit tests (disabled /
+    enabled-but-empty remap is the identity; an identity-seed matches no remap; a
+    reverse remap maps `t → dur − t`; a constant remap freezes one source time; an
+    eased remap samples monotonically; an expression drives the remap; seeding is
+    idempotent on a non-empty track and falls back to a single identity key without
+    a duration), comp-level samplers (`layer_source_time` is the identity when off
+    and follows an active reversing remap), serde (an enabled, keyed remap layer
+    round-trips; a missing `time_remap` field defaults to disabled), and the
+    **render path** (an identity remap on a precomp renders byte-identically to no
+    remap; a reverse remap samples the nested comp backwards; a freeze remap holds
+    one source frame across host time).
 - **Expressions on properties** (After-Effects *expression* parity, Phase 4
   *Expressions* — first slice) — any animatable scalar property (anchor X/Y,
   position X/Y, scale, rotation, opacity) can now carry an optional **expression**

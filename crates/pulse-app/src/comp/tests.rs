@@ -1626,3 +1626,60 @@ fn comp_layer_value_is_expression_aware() {
     let op = comp.layer_opacity(0, 0.0);
     assert!((0.0..=1.0).contains(&op));
 }
+
+// --- Time remapping ----------------------------------------------------
+
+#[test]
+fn time_remap_serde_defaults_to_disabled() {
+    // A pre-time-remap layer (no `time_remap` field) loads with the remap off and
+    // an empty track, so old projects sample their source at the comp time.
+    let json = r#"{"name":"F","kind":"Footage","color":[0.5,0.5,0.5,1.0],"visible":true,
+        "footage":{"source":null},
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(json).unwrap();
+    assert!(!layer.time_remap.enabled);
+    assert!(!layer.time_remap.is_active());
+    assert!(layer.time_remap.track.keys.is_empty());
+}
+
+#[test]
+fn enabled_time_remap_layer_serde_round_trips() {
+    // A footage layer with an enabled, keyed time-remap curve survives a JSON
+    // round-trip (enable flag + the remap track's keys).
+    let mut layer = PulseLayer::of_kind(LayerKind::Footage, "Plate", [0.5, 0.5, 0.5, 1.0]);
+    layer.time_remap.enabled = true;
+    layer.time_remap.track.set_key(0.0, 4.0);
+    layer.time_remap.track.set_key(4.0, 0.0); // reverse ramp
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert!(back.time_remap.enabled);
+    assert!(back.time_remap.is_active());
+    assert_eq!(back.time_remap.track.keys.len(), 2);
+    assert!((back.time_remap.track.sample(1.0, 1.0) - 3.0).abs() < 1e-4);
+}
+
+#[test]
+fn comp_layer_source_time_identity_when_off() {
+    // With no remap, the comp's source-time sampler is the identity: source time
+    // == comp time, so footage/precomp sampling is unchanged.
+    let mut comp = Comp::new();
+    comp.layers[0].kind = LayerKind::Footage; // any layer; remap off by default
+    for &t in &[0.0, 1.0, 2.5, 5.0] {
+        assert!((comp.layer_source_time(0, t) - t).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn comp_layer_source_time_follows_active_remap() {
+    // An active reversing remap drives the comp-level source time: r(t) = dur - t.
+    let dur = 5.0_f32;
+    let mut comp = Comp::new();
+    comp.layers[0].kind = LayerKind::Footage;
+    comp.layers[0].time_remap.enabled = true;
+    comp.layers[0].time_remap.track.set_key(0.0, dur);
+    comp.layers[0].time_remap.track.set_key(dur, 0.0);
+    for &t in &[0.0, 1.0, 2.5, 5.0] {
+        assert!((comp.layer_source_time(0, t) - (dur - t)).abs() < 1e-4, "t={t}");
+    }
+}

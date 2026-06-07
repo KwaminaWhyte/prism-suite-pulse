@@ -1548,3 +1548,119 @@ fn malformed_render_expression_does_not_crash() {
     let f = render_frame(&c, 0.0);
     assert_eq!(f.pixel(32, 32)[3], 255, "falls back to keyframed X (center)");
 }
+
+// --- Time remapping (render path) --------------------------------------
+
+#[test]
+fn precomp_identity_time_remap_matches_no_remap() {
+    use crate::comp::{Interp, LayerKind, PrecompLayer, Prop};
+    // Nested comp B (id 2): full-frame solid whose opacity ramps 0 -> 1 over [0,1].
+    let make_nested = || {
+        let mut nested = full_frame_comp(2, [1.0, 0.0, 0.0, 1.0]);
+        nested.layers[0].track_mut(Prop::Opacity).set_key(0.0, 0.0);
+        nested.layers[0].track_mut(Prop::Opacity).set_key(1.0, 1.0);
+        nested.layers[0]
+            .track_mut(Prop::Opacity)
+            .set_interp(0.0, Interp::Linear);
+        nested
+    };
+    let make_host = || {
+        let mut host = solid([1.0, 1.0, 1.0, 1.0]);
+        host.id = 1;
+        host.duration = 1.0;
+        host.layers[0] = {
+            let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+            l.precomp = PrecompLayer::to(2);
+            l.scale.set_key(0.0, 3.0);
+            l
+        };
+        host
+    };
+
+    // Baseline: no remap.
+    let plain = [make_host(), make_nested()];
+    // Identity remap: r(t) = t (a 0 -> 1 ramp over [0,1]).
+    let mut host_remap = make_host();
+    host_remap.layers[0].time_remap.enabled = true;
+    host_remap.layers[0].time_remap.track.set_key(0.0, 0.0);
+    host_remap.layers[0].time_remap.track.set_key(1.0, 1.0);
+    host_remap.layers[0]
+        .time_remap
+        .track
+        .set_interp(0.0, Interp::Linear);
+    let remapped = [host_remap, make_nested()];
+
+    for &t in &[0.0, 0.5, 1.0] {
+        let mut c1 = crate::comp::FrameCache::new();
+        let mut c2 = crate::comp::FrameCache::new();
+        let a = render_frame_in_project(&plain, 1, t, &mut c1).pixel(32, 32);
+        let b = render_frame_in_project(&remapped, 1, t, &mut c2).pixel(32, 32);
+        assert_eq!(a, b, "identity remap must match no-remap at t={t}");
+    }
+}
+
+#[test]
+fn precomp_reverse_time_remap_samples_backwards() {
+    use crate::comp::{Interp, LayerKind, PrecompLayer, Prop};
+    // Nested comp B (id 2): opacity ramps 0 -> 1 over [0,1].
+    let mut nested = full_frame_comp(2, [1.0, 0.0, 0.0, 1.0]);
+    nested.layers[0].track_mut(Prop::Opacity).set_key(0.0, 0.0);
+    nested.layers[0].track_mut(Prop::Opacity).set_key(1.0, 1.0);
+    nested.layers[0]
+        .track_mut(Prop::Opacity)
+        .set_interp(0.0, Interp::Linear);
+
+    // Host precomp with a reversing remap r(t) = 1 - t over [0,1]: at host t=0 the
+    // source is sampled at 1.0 (B fully opaque), at host t=1 at 0.0 (transparent).
+    let mut host = solid([1.0, 1.0, 1.0, 1.0]);
+    host.id = 1;
+    host.duration = 1.0;
+    host.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+        l.precomp = PrecompLayer::to(2);
+        l.scale.set_key(0.0, 3.0);
+        l.time_remap.enabled = true;
+        l.time_remap.track.set_key(0.0, 1.0);
+        l.time_remap.track.set_key(1.0, 0.0);
+        l.time_remap.track.set_interp(0.0, Interp::Linear);
+        l
+    };
+    let comps = [host, nested];
+    let mut cache = crate::comp::FrameCache::new();
+    let a0 = render_frame_in_project(&comps, 1, 0.0, &mut cache).pixel(32, 32)[3];
+    let a1 = render_frame_in_project(&comps, 1, 1.0, &mut cache).pixel(32, 32)[3];
+    assert!(a0 > 250, "reverse remap @ t=0 => B's end (opaque), got {a0}");
+    assert!(a1 < 5, "reverse remap @ t=1 => B's start (transparent), got {a1}");
+}
+
+#[test]
+fn precomp_freeze_time_remap_holds_one_source_frame() {
+    use crate::comp::{Interp, LayerKind, PrecompLayer, Prop};
+    // Nested comp B opacity ramps 0 -> 1 over [0,1]; a constant remap freezes it.
+    let mut nested = full_frame_comp(2, [1.0, 0.0, 0.0, 1.0]);
+    nested.layers[0].track_mut(Prop::Opacity).set_key(0.0, 0.0);
+    nested.layers[0].track_mut(Prop::Opacity).set_key(1.0, 1.0);
+    nested.layers[0]
+        .track_mut(Prop::Opacity)
+        .set_interp(0.0, Interp::Linear);
+
+    // A single constant remap key at source time 1.0: B is frozen fully opaque
+    // regardless of host time.
+    let mut host = solid([1.0, 1.0, 1.0, 1.0]);
+    host.id = 1;
+    host.duration = 2.0;
+    host.layers[0] = {
+        let mut l = PulseLayer::of_kind(LayerKind::Precomp, "PC", [0.5; 4]);
+        l.precomp = PrecompLayer::to(2);
+        l.scale.set_key(0.0, 3.0);
+        l.time_remap.enabled = true;
+        l.time_remap.track.set_key(0.0, 1.0); // freeze at source end
+        l
+    };
+    let comps = [host, nested];
+    for &t in &[0.0, 0.5, 1.5] {
+        let mut cache = crate::comp::FrameCache::new();
+        let a = render_frame_in_project(&comps, 1, t, &mut cache).pixel(32, 32)[3];
+        assert!(a > 250, "freeze remap holds B opaque at host t={t}, got {a}");
+    }
+}

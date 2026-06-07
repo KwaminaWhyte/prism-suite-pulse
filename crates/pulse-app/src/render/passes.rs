@@ -213,7 +213,9 @@ pub(super) fn composite_footage(
 /// id; `ctx` resolves it against the project's comps (and refuses a reference
 /// **cycle** — a target already on the render stack — yielding nothing). The
 /// target comp is rendered **recursively** via [`render_comp`] at the
-/// time-offset–mapped time, producing a native-resolution sRGB frame; that frame
+/// time-offset–mapped time (`t` here is the host time, already time-remapped by
+/// the caller when the layer's [`TimeRemap`](crate::comp::TimeRemap) is enabled),
+/// producing a native-resolution sRGB frame; that frame
 /// fills the layer's base quad (the same `±half_w/±half_h` extents footage uses),
 /// so the layer's transform / anchor / scale / rotation position the nested comp
 /// exactly like any other layer kind. Each candidate comp pixel is inverse-mapped
@@ -363,7 +365,10 @@ pub(super) fn composite_motion_blur(
         } else if layer.has_text() {
             composite_text(&mut scratch, geom, world, layer, op);
         } else if layer.has_footage() {
-            if let Some(path) = layer.footage.path_at(st, comp.fps) {
+            // The source time is time-remapped per sub-frame (if enabled), so a
+            // retimed sequence advances across the shutter at the remapped rate.
+            let src_t = comp.layer_source_time(idx, st);
+            if let Some(path) = layer.footage.path_at(src_t, comp.fps) {
                 if let Some(frame) = cache.get(&path, layer.footage.alpha) {
                     let frame = frame.clone();
                     composite_footage(&mut scratch, geom, world, layer, &frame, op);
@@ -372,8 +377,10 @@ pub(super) fn composite_motion_blur(
         } else if layer.has_precomp() {
             // Re-render the nested comp at each sub-frame time, so a moving
             // precomp blurs across the shutter (and the nested comp's own
-            // animation advances across it too).
-            composite_precomp(&mut scratch, geom, world, layer, cache, st, op, ctx);
+            // animation advances across it too). The host time is time-remapped
+            // per sub-frame when the remap is enabled.
+            let src_t = comp.layer_source_time(idx, st);
+            composite_precomp(&mut scratch, geom, world, layer, cache, src_t, op, ctx);
         } else {
             composite_layer(&mut scratch, geom, world, layer, op);
         }
@@ -564,14 +571,17 @@ pub(super) fn apply_track_matte(
         } else if src_layer.has_text() {
             composite_text(&mut matte, geom, src_world, src_layer, src_op);
         } else if src_layer.has_footage() {
-            if let Some(path) = src_layer.footage.path_at(t, comp.fps) {
+            // A footage matte source honours its own time remap too.
+            let src_t = comp.layer_source_time(src_idx, t);
+            if let Some(path) = src_layer.footage.path_at(src_t, comp.fps) {
                 if let Some(frame) = cache.get(&path, src_layer.footage.alpha) {
                     let frame = frame.clone();
                     composite_footage(&mut matte, geom, src_world, src_layer, &frame, src_op);
                 }
             }
         } else if src_layer.has_precomp() {
-            composite_precomp(&mut matte, geom, src_world, src_layer, cache, t, src_op, ctx);
+            let src_t = comp.layer_source_time(src_idx, t);
+            composite_precomp(&mut matte, geom, src_world, src_layer, cache, src_t, src_op, ctx);
         } else {
             composite_layer(&mut matte, geom, src_world, src_layer, src_op);
         }
