@@ -61,6 +61,11 @@ pub struct PulseApp {
     effect_query: String,
     /// Last save/export status, surfaced briefly in the menu bar.
     status: Option<String>,
+    /// The user's export render-range choice (After Effects' *Render: Work Area /
+    /// Full Comp*). `None` = **auto**: follow the comp via
+    /// [`RenderRange::default_for`] (work area when it's a real sub-range, else
+    /// full). `Some(_)` pins an explicit choice the user picked in the File menu.
+    export_range: Option<crate::render::RenderRange>,
     /// The interactive **render preview**: caches the comp rendered (through the
     /// real offline compositor) to a capped-res egui texture, re-rendering only
     /// when the frame's fingerprint changes, and holds a persistent footage
@@ -107,6 +112,7 @@ impl PulseApp {
             onion: crate::onion::OnionSkin::default(),
             effect_query: String::new(),
             status: None,
+            export_range: None,
             preview: crate::preview::PreviewRenderer::default(),
         }
     }
@@ -433,12 +439,25 @@ impl PulseApp {
         }
     }
 
-    /// Render the whole comp to a PNG image sequence in a chosen folder.
+    /// The render range an export will use: the user's pinned choice
+    /// ([`export_range`](Self::export_range)) if any, else the auto default for
+    /// the active comp (After Effects-style — the **work area** when it is a real
+    /// sub-range, else the **full comp**).
+    pub(super) fn effective_export_range(&self) -> crate::render::RenderRange {
+        self.export_range
+            .unwrap_or_else(|| crate::render::RenderRange::default_for(&self.comp))
+    }
+
+    /// Render the active comp to a PNG image sequence in a chosen folder.
     ///
     /// Pauses playback (a render is a discrete action), pops a folder picker,
-    /// then writes `<stem>_0000.png`, … one file per frame across the comp's
-    /// `[0, duration]` timeline at its fps. Status (frames written / errors) is
-    /// logged and shown in the menu bar.
+    /// then writes one PNG per frame across the chosen
+    /// [`render range`](Self::effective_export_range) — by default the **work
+    /// area** (in → out) like After Effects, or the full `[0, duration]` timeline
+    /// when chosen. Files are numbered by their **comp frame index**, so a
+    /// work-area render's first file is the work-area start frame (e.g.
+    /// `comp_0030.png`), not `_0000`. Status (frames written / errors) is logged
+    /// and shown in the menu bar.
     fn export_dialog(&mut self) {
         self.playing = false;
         let Some(dir) = rfd::FileDialog::new()
@@ -452,10 +471,15 @@ impl PulseApp {
         // their nested comps recursively.
         let comps = self.project_comps();
         let id = self.comp.id;
-        match render::export_sequence_in_project(&comps, id, &dir, stem) {
+        let range = self.effective_export_range();
+        match render::export_sequence_in_project(&comps, id, &dir, stem, range) {
             Ok(summary) => {
+                let scope = match range {
+                    crate::render::RenderRange::WorkArea => "work area",
+                    crate::render::RenderRange::Full => "full comp",
+                };
                 let msg = format!(
-                    "Exported {} frames → {}",
+                    "Exported {} frames ({scope}) → {}",
                     summary.frames,
                     summary.dir.display()
                 );

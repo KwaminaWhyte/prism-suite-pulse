@@ -45,6 +45,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Export honors the work area** (After-Effects *Render: Work Area / Full Comp*,
+  Phase 4 *Markers* follow-on) — the PNG-sequence export now renders **only the
+  work-area range** (in → out) by default, instead of always rendering the whole
+  `[0, duration]` timeline. The work area already bounded RAM-preview / playback;
+  the render path now respects it too, matching After Effects, where the work
+  area *is* the default render range.
+  - **`RenderRange`** (`render/export.rs`, new enum) — `WorkArea` (render only the
+    clamped work-area frames) vs `Full` (the whole comp). `RenderRange::default_for`
+    is the AE-style default: the **work area** when it is a real sub-range, else the
+    **full comp** (a full or degenerate / empty work area falls back to full so an
+    export is never empty). New pure `frame_range` returns the inclusive
+    `[first, last]` **comp-frame indices** the range covers (using the existing
+    `clamped_work_area`), and `range_frame_count` its length.
+  - **Range-aware exporters** — `export_sequence` / `export_sequence_in_project`
+    take a `RenderRange` and iterate only `first..=last`. Files are still numbered
+    by their **comp frame index**, so a work-area render's first file is the
+    work-area start frame (e.g. `comp_0030.png`), not `_0000` — the frame numbering
+    and the reported frame count reflect the chosen range correctly (first exported
+    frame = work-area start, padding still over the full count).
+  - **UI** (`app/menu.rs`, `app/mod.rs`) — *File ▸ Render range…* is a new submenu
+    that picks **Work area** vs **Full comp** (each showing its frame count), the
+    radio reflecting (and pinning) the effective choice; left unset, export follows
+    the comp's work area automatically. The export status now names the rendered
+    scope ("Exported 31 frames (work area) → …").
+  - **Playback unchanged** — the transport's work-area loop behaviour is untouched;
+    this only changes what the exporter renders.
+  - **Tested** (+8 tests, 354 total) — `frame_range` for full (`0..=last`) and a
+    trimmed work area (in/out frames, first = start frame), the full-/degenerate-/
+    empty-serde-default work area falling back to a full render, `default_for`
+    preferring a trimmed area (else full), and the exporter writing only the in→out
+    frames numbered by comp index (frames outside the work area are not written)
+    while a full render still writes every frame.
+
 - **Markers + work area** (After-Effects *Composition/Layer markers* + *Work
   Area*, Phase 4 *Markers*) — the timeline can now carry labelled **markers** to
   call out beats, and a **work area** sub-range that bounds playback, with
@@ -85,9 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     empty), comp-level navigation (spans comp + selected-layer markers, ignores
     other layers'), comp work-area clamp staying inside the timeline + fresh comp
     full, and serde round-trip + pre-marker back-compat (defaults to empty / full).
-  - **Deferred** — rendering / exporting the **work-area range only** (export
-    still renders the full timeline), marker-snapping while scrubbing, and
-    dragging markers on the timeline (today they're edited in Properties).
+  - **Deferred** — marker-snapping while scrubbing, and dragging markers on the
+    timeline (today they're edited in Properties). *(Rendering / exporting the
+    **work-area range only** has since landed — see "Export honors the work area"
+    above.)*
 
 - **RAM-preview cache + parallel render pool** (After Effects' *RAM Preview* /
   green cache bar; PLAN Phase 6 *Caching* + *Multi-frame rendering*) — the preview

@@ -189,8 +189,11 @@ authored once and stacks non-destructively per layer.
   prev/add/next-marker buttons + AE keys `B`/`N`/`M`; Comp ▸ Work area / Markers
   menus; a Properties **Markers** section; timeline draws comp markers on the ruler,
   layer markers per lane, the work-area band + a dimmed-outside playhead. Pure +
-  comp-level navigation/clamp/serde unit-tested. Still open: **render/export the
-  work-area range only**, marker-snapping, on-timeline marker dragging
+  comp-level navigation/clamp/serde unit-tested. **Export now renders the
+  work-area range only** (After Effects' default render range — `RenderRange`
+  WorkArea/Full + auto-default, files numbered by comp frame index so the first
+  exported frame is the work-area start; *File ▸ Render range…* picker; unit-tested).
+  Still open: marker-snapping, on-timeline marker dragging
 - [~] Tests: **time-remap sampling done** (identity == no-remap, reverse `t→dur−t`, freeze hold, easing, expression-driven, default-key seeding, serde, render path); expression evaluation parity (scalar slice) done; **markers + work-area done** (marker model, work-area clamp/length/contains/is-full, marker navigation incl. comp+selected-layer scope, serde + back-compat); motion-blur sample count **Planned**
 
 ### Phase 5 — 3D compositing  *(depth, camera, light)*
@@ -231,7 +234,7 @@ authored once and stacks non-destructively per layer.
 
 | Category | After Effects surface | Status | Phase |
 |---|---|---|---|
-| Comp / timeline / transport | comps, timeline, play/scrub | **Done** basic + **markers / work-area / time-navigation** (work-area-looped playback); precomp **done** (see Layer types) | 0,2,4 |
+| Comp / timeline / transport | comps, timeline, play/scrub | **Done** basic + **markers / work-area / time-navigation** (work-area-looped playback **and** work-area-range export); precomp **done** (see Layer types) | 0,2,4 |
 | Properties / transform | anchor + 2D/3D position/scale/rot/opacity | **Partial** (5 linear tracks) → typed `Property<T>` **Planned** | 1 |
 | Keyframe interpolation / graph editor | linear/hold/Bézier/auto, graph editor | **Partial** (linear/hold/Bézier ease + value-curve graph editor w/ draggable keys & handles; auto-Bézier/speed-graph/roving **Planned**) | 1 |
 | Compositor / blend modes | GPU, 18+ modes, 32-bpc, linear | **Partial** (CPU software compositor; **per-layer blend modes** — all 18, reusing `prism-core` — done; GPU/32-bpc **Planned**) | 1 |

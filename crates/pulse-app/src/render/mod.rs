@@ -25,7 +25,7 @@ use prism_core::color::linear_to_srgb;
 mod export;
 mod passes;
 
-pub use export::export_sequence_in_project;
+pub use export::{export_sequence_in_project, range_frame_count, RenderRange};
 #[cfg(test)]
 pub use export::export_sequence;
 use passes::{

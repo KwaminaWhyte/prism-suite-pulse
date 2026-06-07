@@ -28,9 +28,12 @@ impl PulseApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    self.render_range_menu(ui);
                     if ui
                         .button(format!("{}  Export PNG sequence…", icons::EXPORT))
-                        .on_hover_text("Render every frame to a PNG image sequence")
+                        .on_hover_text(
+                            "Render the chosen range (work area by default) to a PNG image sequence",
+                        )
                         .clicked()
                     {
                         self.export_dialog();
@@ -127,6 +130,41 @@ impl PulseApp {
             );
             ui.add(egui::Slider::new(&mut mb.samples, 1..=64).text("Samples"))
                 .on_hover_text("Sub-frame snapshots integrated across the shutter");
+        });
+    }
+
+    /// The export **render range** picker (After Effects' *Render: Work Area /
+    /// Full Comp*): choose whether *Export* renders only the work-area frames
+    /// (in → out) or the whole `[0, duration]` comp. Defaults to **work area**
+    /// when it's a real sub-range, else **full comp**; the radio reflects (and
+    /// pins) the effective choice, and the entry shows the resulting frame count.
+    fn render_range_menu(&mut self, ui: &mut egui::Ui) {
+        use crate::render::{range_frame_count, RenderRange};
+        let effective = self.effective_export_range();
+        ui.menu_button(format!("{}  Render range…", icons::EXPORT), |ui| {
+            ui.label(egui::RichText::new("Export renders").strong());
+            let wa_frames = range_frame_count(&self.comp, RenderRange::WorkArea);
+            let full_frames = range_frame_count(&self.comp, RenderRange::Full);
+            let wa = ui
+                .radio(
+                    effective == RenderRange::WorkArea,
+                    format!("Work area  ({wa_frames} frames)"),
+                )
+                .on_hover_text("Render only the work-area range (in → out), like After Effects");
+            if wa.clicked() {
+                self.export_range = Some(RenderRange::WorkArea);
+                ui.close_menu();
+            }
+            let full = ui
+                .radio(
+                    effective == RenderRange::Full,
+                    format!("Full comp  ({full_frames} frames)"),
+                )
+                .on_hover_text("Render the whole [0, duration] timeline");
+            if full.clicked() {
+                self.export_range = Some(RenderRange::Full);
+                ui.close_menu();
+            }
         });
     }
 
