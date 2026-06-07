@@ -16,18 +16,22 @@
 //! selected layer. Keeping the registry and the matcher here (not in the UI)
 //! means the search/ranking logic is unit-testable without an egui context.
 
-use super::{Effect, SpatialEffect};
+use super::{Effect, GenerateEffect, SpatialEffect};
 
 /// Which per-layer stack an effect belongs to. The browser adds a
 /// [`Category::Color`] / generic per-pixel effect to the layer's
-/// [`effects`](super::PulseLayer::effects) vec, and a spatial effect to its
-/// [`spatial_effects`](super::PulseLayer::spatial_effects) vec.
+/// [`effects`](super::PulseLayer::effects) vec, a spatial effect to its
+/// [`spatial_effects`](super::PulseLayer::spatial_effects) vec, and a generate
+/// fill to its [`generate`](super::PulseLayer::generate) slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stack {
     /// A per-pixel colour-correction [`Effect`].
     Color,
     /// A whole-buffer [`SpatialEffect`] (blur / shadow / glow).
     Spatial,
+    /// A whole-buffer [`GenerateEffect`] fill (Fractal Noise) — replaces the
+    /// layer's content rather than reading it.
+    Generate,
 }
 
 /// The browser's top-level grouping (AE's *Effects & Presets* category folders).
@@ -44,15 +48,18 @@ pub enum Category {
     Perspective,
     /// Stylize passes (Glow, …).
     Stylize,
+    /// Generate passes (Fractal Noise, …) — synthesise content into the layer.
+    Generate,
 }
 
 impl Category {
     /// Every category, in the browser's display order.
-    pub const ALL: [Category; 4] = [
+    pub const ALL: [Category; 5] = [
         Category::Color,
         Category::Blur,
         Category::Perspective,
         Category::Stylize,
+        Category::Generate,
     ];
 
     /// The folder label shown in the browser.
@@ -62,6 +69,7 @@ impl Category {
             Category::Blur => "Blur & Sharpen",
             Category::Perspective => "Perspective",
             Category::Stylize => "Stylize",
+            Category::Generate => "Generate",
         }
     }
 }
@@ -93,6 +101,7 @@ impl BrowserEntry {
         match self.stack {
             Stack::Color => NewEffect::Color(Effect::defaults()[self.default_index]),
             Stack::Spatial => NewEffect::Spatial(SpatialEffect::defaults()[self.default_index]),
+            Stack::Generate => NewEffect::Generate(GenerateEffect::defaults()[self.default_index]),
         }
     }
 }
@@ -104,6 +113,7 @@ impl BrowserEntry {
 pub enum NewEffect {
     Color(Effect),
     Spatial(SpatialEffect),
+    Generate(GenerateEffect),
 }
 
 /// The full effect registry — every addable effect across both stacks. The
@@ -188,6 +198,23 @@ pub const REGISTRY: &[BrowserEntry] = &[
         stack: Stack::Spatial,
         default_index: 2,
         keywords: &["bloom", "bright", "halo", "light"],
+    },
+    // --- Generate (GenerateEffect::defaults() order) ------------------------
+    BrowserEntry {
+        name: "Fractal Noise",
+        category: Category::Generate,
+        stack: Stack::Generate,
+        default_index: 0,
+        keywords: &[
+            "fractal",
+            "noise",
+            "turbulent",
+            "perlin",
+            "clouds",
+            "smoke",
+            "fbm",
+            "evolution",
+        ],
     },
 ];
 
@@ -292,6 +319,7 @@ mod tests {
         // stack's defaults() array — and instantiate must return that slot.
         let colors = Effect::defaults();
         let spatials = SpatialEffect::defaults();
+        let generates = GenerateEffect::defaults();
         for entry in REGISTRY {
             match entry.instantiate() {
                 NewEffect::Color(e) => {
@@ -303,6 +331,11 @@ mod tests {
                     assert!(entry.default_index < spatials.len());
                     assert_eq!(e, spatials[entry.default_index]);
                     assert_eq!(entry.stack, Stack::Spatial);
+                }
+                NewEffect::Generate(e) => {
+                    assert!(entry.default_index < generates.len());
+                    assert_eq!(e, generates[entry.default_index]);
+                    assert_eq!(entry.stack, Stack::Generate);
                 }
             }
         }
@@ -316,6 +349,7 @@ mod tests {
             let label = match entry.instantiate() {
                 NewEffect::Color(e) => e.label(),
                 NewEffect::Spatial(e) => e.label(),
+                NewEffect::Generate(e) => e.label(),
             };
             assert_eq!(entry.name, label, "name/label mismatch for {}", entry.name);
         }
@@ -323,7 +357,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_effect() {
-        // Every effect in both defaults() arrays is reachable from the registry,
+        // Every effect in all defaults() arrays is reachable from the registry,
         // so nothing is missing from the browser.
         for (i, _) in Effect::defaults().iter().enumerate() {
             assert!(
@@ -341,6 +375,29 @@ mod tests {
                 "spatial effect {i} missing from registry"
             );
         }
+        for (i, _) in GenerateEffect::defaults().iter().enumerate() {
+            assert!(
+                REGISTRY
+                    .iter()
+                    .any(|e| e.stack == Stack::Generate && e.default_index == i),
+                "generate effect {i} missing from registry"
+            );
+        }
+    }
+
+    #[test]
+    fn fractal_noise_is_findable() {
+        // The generate workhorse is reachable by name and synonyms.
+        for q in ["fractal", "noise", "perlin", "turbulent", "clouds"] {
+            let hits = filter(q);
+            assert!(
+                hits.iter().any(|h| h.entry.name == "Fractal Noise"),
+                "querying {q:?} should find Fractal Noise"
+            );
+        }
+        // And it groups under the Generate category.
+        let groups = filter_grouped("fractal");
+        assert!(groups.iter().any(|(c, _)| *c == Category::Generate));
     }
 
     #[test]

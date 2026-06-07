@@ -45,6 +45,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fractal Noise generator** (After-Effects *Generate ▸ Fractal Noise* — the
+  motion-design workhorse; PLAN Phase 3 *Generate*) — the first **generate**
+  effect: a per-layer fill that *replaces* the layer's pixels with multi-octave
+  gradient (Perlin-style) **fractal noise**, the field that drives smoke, clouds,
+  energy, organic textures, mattes, and displacement maps. Unlike the colour /
+  spatial stacks (which read the layer's pixels), a generate effect synthesises
+  the layer's content from its parameters + the pixel position.
+  - **Deterministic, hash-seeded noise** (`comp/generate.rs`, new
+    [`GenerateEffect`]) — the field is `gradient_noise_3d`: at each integer lattice
+    corner a pseudo-random gradient (a stable **SplitMix64** hash of the corner +
+    seed — the same hash philosophy `wiggle` uses, never `rand` / system entropy /
+    `Math.random`) is dotted with the offset and quintic-fade interpolated, summed
+    over octaves as fBm. The same `(params, evolution, seed, pixel)` **always**
+    yields the same value, so a frame renders identically on every pass (for the
+    RAM-preview cache, the multi-frame render pool, and golden-frame tests).
+  - **Full AE-style params** — **fractal type** (Basic = signed-octave sum,
+    smooth/cloud-like; **Turbulent** = abs-octave sum, billowy/ridged smoke),
+    **contrast** (about mid-grey) + **brightness**, uniform **scale** (feature
+    size in comp px) + per-axis **Scale X / Scale Y**, **complexity** (octave
+    count 1–10), **sub-influence** (persistence) + **sub-scaling** (lacunarity),
+    a random **seed**, and an **overflow** mode (**Clip** / **Wrap** /
+    **Allow HDR**). The field is evaluated in the layer's **local** frame, so it
+    rides the layer's transform (scale zooms it, position/rotation move it).
+  - **Evolution — the key motion knob — is keyframable** — the generate's static
+    params are plain scalars (matching how the colour / spatial effect stacks
+    expose params), but **evolution** (the phase/time input that *flows* the field)
+    gets a full keyframable [`Track`] on the layer (`generate_evolution`,
+    `serde`-defaulted empty). When keyed it overrides the static `evolution` at the
+    sampled time (and is expression-able via the track); empty, the static field is
+    used. `PulseLayer::generate_at(t)` resolves the effect with evolution sampled
+    at `t`.
+  - **Compositor wiring** (`render/`) — a new `composite_generate` pass fills the
+    layer's quad with the grayscale field into the **isolated, premultiplied
+    linear-light** buffer (RGB = value, A = value · generate-opacity ·
+    layer-opacity), the layer's per-pixel colour-correction stack runs on the
+    value, then the same **masks / track-matte / spatial** passes + blend a normal
+    layer runs. It takes precedence over the kind-specific rasterizers (fills any
+    solid / shape / text / footage / precomp quad). The field is static within a
+    frame (no motion-blur snapshot averaging — the motion comes from keyframing
+    evolution), so it shows in the **render-preview** (and exports) like any layer.
+  - **UI** — a new **Generate** section in the Properties panel (a *Fractal Noise*
+    enable toggle, then type / contrast / brightness / scale (+ X/Y) / complexity /
+    sub-influence / sub-scaling / static-evolution / seed / overflow / opacity
+    controls, plus an **Animate** button that seeds a keyframable Evolution track),
+    shown for layers that draw their own pixels; and a **Fractal Noise** entry in
+    the searchable **Effects & Presets** browser under a new **Generate** category
+    (found by *fractal* / *noise* / *perlin* / *turbulent* / *clouds*). The launch
+    demo ships a full-frame Turbulent Fractal Noise layer (Screen-blended, modest
+    opacity) whose **evolution is keyframed 0 → 6** over the comp, so the flowing
+    noise reads out of the box.
+  - **Pure + tested** (+30 tests, 384 total) — the noise logic is unit-tested
+    (determinism across calls, gradient-noise determinism + bound, unit-range under
+    Clip, **evolution** changes the field, **seed** changes the field, **turbulent
+    vs basic** differ, turbulent fbm is non-negative, **complexity** adds detail,
+    one-octave ignores persistence/scaling, contrast pushes from mid-grey,
+    brightness lifts, all three overflow modes, scale changes feature size, zero
+    scale doesn't NaN, opacity clamp, serde round-trip); the comp model
+    (`generate_at` static-vs-track evolution, none-without-fill); the **render
+    path** (generate fills the quad, byte-identical across renders, evolution
+    changes the frame, the evolution **track** flows the field over comp time,
+    colour-correction applies to the field, a cleared generate is inert, the demo
+    comp composites); the effect-browser registry (Fractal Noise findable, grouped
+    under Generate, registry/defaults in lock-step); and serde back-compat (a
+    pre-generate `.pulse` loads with no fill).
+
 - **Export honors the work area** (After-Effects *Render: Work Area / Full Comp*,
   Phase 4 *Markers* follow-on) — the PNG-sequence export now renders **only the
   work-area range** (in → out) by default, instead of always rendering the whole

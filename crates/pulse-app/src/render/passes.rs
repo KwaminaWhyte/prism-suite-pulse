@@ -5,7 +5,7 @@
 use super::{over, render_comp, Geom, Lin, RenderCtx};
 use crate::comp::{
     apply_effects, apply_spatial_effects, mask_stack_coverage, Affine2, Comp, DecodedFrame,
-    MatteMode, PulseLayer,
+    GenerateEffect, MatteMode, PulseLayer,
 };
 use prism_core::color::srgb_to_linear;
 
@@ -471,6 +471,80 @@ pub(super) fn composite_layer(
                     a: src_a,
                 },
                 acc[idx],
+            );
+        }
+    }
+}
+
+/// Fill a layer's quad with its **generate** effect (Fractal Noise) into the
+/// (assumed-clear) isolated `out` buffer, in the compositor's premultiplied-free
+/// linear-light form.
+///
+/// A generate effect *replaces* the layer's pixels: each comp-space pixel in the
+/// layer's quad is inverse-mapped into the layer's local frame, the noise field is
+/// evaluated there (so it rides the layer's transform — `scale` zooms it, the
+/// layer's position/rotation move it), giving a straight **grayscale** value
+/// `[0,1]`. That value fills RGB (so the field reads as a luminance map) and, ×
+/// the generate's `opacity` × the layer's `opacity`, the coverage alpha — so the
+/// field can also drive a matte / displacement. The grayscale is treated as a
+/// *linear-light* value (the noise is authored in `[0,1]`; no sRGB decode), then
+/// the layer's per-pixel colour-correction [`effects`](PulseLayer::effects) stack
+/// runs on it before it's composited. A singular `world` (zero scale) or empty
+/// quad leaves the buffer clear.
+pub(super) fn composite_generate(
+    out: &mut [Lin],
+    geom: &Geom,
+    world: Affine2,
+    layer: &PulseLayer,
+    gen: GenerateEffect,
+    opacity: f32,
+) {
+    let &Geom {
+        w,
+        cx,
+        cy,
+        half_w,
+        half_h,
+        ..
+    } = geom;
+    if opacity <= 0.0 {
+        return;
+    }
+    let gen_opacity = gen.opacity();
+    if gen_opacity <= 0.0 {
+        return;
+    }
+    let Some(inv) = world.inverse() else {
+        return;
+    };
+    let Some((x0, x1, y0, y1)) = geom.quad_bounds(world) else {
+        return;
+    };
+
+    for py in y0..=y1 {
+        let comp_y = py as f32 + 0.5 - cy;
+        for px in x0..=x1 {
+            let comp_x = px as f32 + 0.5 - cx;
+            // Inverse-map the comp-space pixel into the layer's local frame.
+            let (lx, ly) = inv.apply(comp_x, comp_y);
+            if lx.abs() > half_w || ly.abs() > half_h {
+                continue;
+            }
+            // The deterministic grayscale noise value at this local pixel.
+            let v = gen.value_at(lx, ly);
+            let cov = (v * gen_opacity * opacity).clamp(0.0, 1.0);
+            // Grayscale fill (linear-light); run the layer's colour-correction
+            // stack on the straight value before compositing.
+            let [r, g, b, _] = apply_effects(&layer.effects, [v, v, v, 1.0]);
+            let idx = (py as u32 * w + px as u32) as usize;
+            out[idx] = over(
+                Lin {
+                    r,
+                    g,
+                    b,
+                    a: cov,
+                },
+                out[idx],
             );
         }
     }

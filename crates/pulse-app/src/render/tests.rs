@@ -1,3 +1,7 @@
+// `GenerateEffect` has a single variant today, so destructuring it with `let`
+// is irrefutable; the generate tests keep that form so they stay correct when
+// more generate variants are added.
+#![allow(irrefutable_let_patterns)]
 use super::export::{frame_count, frame_path, frame_range, frame_time, range_frame_count};
 use super::*;
 use crate::comp::{
@@ -1800,4 +1804,138 @@ fn precomp_freeze_time_remap_holds_one_source_frame() {
         let a = render_frame_in_project(&comps, 1, t, &mut cache).pixel(32, 32)[3];
         assert!(a > 250, "freeze remap holds B opaque at host t={t}, got {a}");
     }
+}
+
+// --- Generate (Fractal Noise) render-path -----------------------------------
+
+use crate::comp::{FractalType, GenerateEffect, Overflow};
+
+/// A full-opacity default Fractal Noise that always covers (opacity 1, no clip
+/// killing the center). Scale tuned so several features fall inside the quad.
+fn fractal_fill() -> GenerateEffect {
+    GenerateEffect::FractalNoise {
+        fractal_type: FractalType::Basic,
+        contrast: 1.0,
+        brightness: 0.3, // lift so the field is visible (avoids near-black center)
+        scale: 20.0,
+        scale_x: 1.0,
+        scale_y: 1.0,
+        complexity: 6,
+        sub_influence: 0.6,
+        sub_scaling: 2.0,
+        evolution: 0.0,
+        seed: 0,
+        overflow: Overflow::AllowHdr,
+        opacity: 1.0,
+    }
+}
+
+#[test]
+fn generate_fills_the_layer_quad() {
+    // A generate fill replaces the layer's content: the quad's center is covered
+    // (alpha > 0), and a far corner outside the (unit-scale) quad — half-extent
+    // ≈ 0.22·64 ≈ 14 px about the center — stays transparent.
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].generate = Some(fractal_fill());
+    let f = render_frame(&c, 0.0);
+    assert!(f.pixel(32, 32)[3] > 0, "generate fill covers the quad center");
+    assert_eq!(f.pixel(0, 0)[3], 0, "outside the quad stays transparent");
+}
+
+#[test]
+fn generate_render_is_deterministic() {
+    // Same comp, same time → byte-identical frame (the cache / MFR rely on this).
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].scale.set_key(0.0, 3.0);
+    c.layers[0].generate = Some(fractal_fill());
+    let a = render_frame(&c, 0.0);
+    let b = render_frame(&c, 0.0);
+    assert_eq!(a.pixels, b.pixels, "generate render must be deterministic");
+}
+
+#[test]
+fn generate_evolution_changes_the_frame() {
+    // Animating evolution must change the rendered pixels (the motion knob).
+    let mut evolved = fractal_fill();
+    let GenerateEffect::FractalNoise { evolution, .. } = &mut evolved;
+    *evolution = 5.0;
+
+    let mut a = solid([1.0, 1.0, 1.0, 1.0]);
+    a.layers[0].scale.set_key(0.0, 3.0);
+    a.layers[0].generate = Some(fractal_fill());
+    let mut b = a.clone();
+    b.layers[0].generate = Some(evolved);
+    let fa = render_frame(&a, 0.0);
+    let fb = render_frame(&b, 0.0);
+    assert_ne!(
+        fa.pixels, fb.pixels,
+        "evolution should change the rendered frame"
+    );
+}
+
+#[test]
+fn generate_evolution_track_drives_the_field_over_time() {
+    // A keyframed evolution track flows the field over comp time: two different
+    // times render different frames. (The static field is fixed, so the change
+    // comes from the track overriding it per frame.)
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.duration = 2.0;
+    c.layers[0].scale.set_key(0.0, 3.0);
+    c.layers[0].generate = Some(fractal_fill());
+    c.layers[0].generate_evolution.set_key(0.0, 0.0);
+    c.layers[0].generate_evolution.set_key(2.0, 8.0);
+    let f0 = render_frame(&c, 0.0);
+    let f1 = render_frame(&c, 2.0);
+    assert_ne!(
+        f0.pixels, f1.pixels,
+        "a keyframed evolution track should flow the field over time"
+    );
+    // And it's still deterministic at a fixed time.
+    assert_eq!(render_frame(&c, 1.0).pixels, render_frame(&c, 1.0).pixels);
+}
+
+#[test]
+fn generate_color_correction_applies_to_field() {
+    // The layer's per-pixel effect stack runs on the generated grayscale: a Tint
+    // mapping black→red, white→red drives the field red, so the green channel of
+    // a covered pixel drops to ~0.
+    use crate::comp::Effect;
+    let mut c = solid([1.0, 1.0, 1.0, 1.0]);
+    c.layers[0].scale.set_key(0.0, 3.0);
+    c.layers[0].generate = Some(fractal_fill());
+    c.layers[0].effects.push(Effect::Tint {
+        black: [1.0, 0.0, 0.0],
+        white: [1.0, 0.0, 0.0],
+        amount: 1.0,
+    });
+    let f = render_frame(&c, 0.0);
+    let [r, g, b, a] = f.pixel(32, 32);
+    assert!(a > 0, "covered");
+    assert!(r > g && r > b, "tinted red: r={r} g={g} b={b}");
+    assert_eq!(g, 0, "fully red tint zeroes green");
+}
+
+#[test]
+fn demo_comp_with_fractal_noise_renders() {
+    // The launch demo ships a keyframed-evolution Fractal Noise layer; render it
+    // at a couple of times to confirm the full demo composites without panicking
+    // and the noise contributes (the field flows, so two times differ).
+    let c = Comp::new();
+    let f0 = render_frame(&c, 0.0);
+    let f2 = render_frame(&c, 2.5);
+    assert_eq!(f0.pixels.len(), (c.width * c.height * 4) as usize);
+    assert_ne!(f0.pixels, f2.pixels, "the demo evolves over time");
+}
+
+#[test]
+fn generate_on_non_generate_layer_is_inert_when_none() {
+    // A solid without a generate fill renders exactly as before (no regression).
+    let mut with_none = solid([0.2, 0.6, 0.9, 1.0]);
+    with_none.layers[0].scale.set_key(0.0, 2.0);
+    let baseline = render_frame(&with_none, 0.0);
+    // Setting then clearing the generate slot returns to the baseline.
+    with_none.layers[0].generate = Some(fractal_fill());
+    with_none.layers[0].generate = None;
+    let cleared = render_frame(&with_none, 0.0);
+    assert_eq!(baseline.pixels, cleared.pixels, "cleared generate is inert");
 }

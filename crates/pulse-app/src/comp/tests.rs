@@ -1,3 +1,7 @@
+// `GenerateEffect` has a single variant today, so destructuring it with `let`
+// is irrefutable; the generate tests keep that form so they stay correct when
+// more generate variants are added.
+#![allow(irrefutable_let_patterns)]
 use super::effect::{curve_eval, hsl_to_rgb, rgb_to_hsl, smoothstep};
 use super::keyframe::{cubic_bezier, solve_bezier_x};
 use super::mask::{dist_to_polygon, point_in_polygon};
@@ -464,6 +468,75 @@ fn layer_kind_serde_defaults_to_solid() {
     let layer: PulseLayer = serde_json::from_str(json).unwrap();
     assert_eq!(layer.kind, LayerKind::Solid);
     assert!(layer.effects.is_empty());
+}
+
+#[test]
+fn generate_serde_defaults_to_none() {
+    // A pre-generate layer (no `generate` field) loads with an empty generate slot.
+    let json = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(json).unwrap();
+    assert!(layer.generate.is_none());
+}
+
+#[test]
+fn generate_at_uses_static_evolution_when_track_empty() {
+    // No evolution keys → generate_at returns the static field unchanged.
+    let mut gen = GenerateEffect::defaults()[0];
+    let GenerateEffect::FractalNoise { evolution, .. } = &mut gen;
+    *evolution = 3.0;
+    let mut layer = PulseLayer::new("L", [1.0; 4]);
+    layer.generate = Some(gen);
+    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(0.0).unwrap();
+    assert_eq!(evolution, 3.0);
+    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(5.0).unwrap();
+    assert_eq!(evolution, 3.0, "static evolution is constant over time");
+}
+
+#[test]
+fn generate_at_track_overrides_static_evolution() {
+    // A keyed evolution track overrides the static field at the sampled time.
+    let mut layer = PulseLayer::new("L", [1.0; 4]);
+    layer.generate = Some(GenerateEffect::defaults()[0]);
+    layer.generate_evolution.set_key(0.0, 0.0);
+    layer.generate_evolution.set_key(2.0, 10.0);
+    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(0.0).unwrap();
+    assert!((evolution - 0.0).abs() < 1e-5);
+    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(1.0).unwrap();
+    assert!((evolution - 5.0).abs() < 1e-4, "linear interp at midpoint, got {evolution}");
+    let GenerateEffect::FractalNoise { evolution, .. } = layer.generate_at(2.0).unwrap();
+    assert!((evolution - 10.0).abs() < 1e-4);
+}
+
+#[test]
+fn generate_at_none_without_fill() {
+    let layer = PulseLayer::new("L", [1.0; 4]);
+    assert!(layer.generate_at(0.0).is_none());
+}
+
+#[test]
+fn generate_layer_serde_round_trips() {
+    // A layer with a Fractal Noise generate fill round-trips through serde.
+    let mut layer = PulseLayer::new("L", [1.0, 1.0, 1.0, 1.0]);
+    layer.generate = Some(GenerateEffect::FractalNoise {
+        fractal_type: FractalType::Turbulent,
+        contrast: 1.5,
+        brightness: 0.1,
+        scale: 64.0,
+        scale_x: 1.2,
+        scale_y: 0.8,
+        complexity: 4,
+        sub_influence: 0.5,
+        sub_scaling: 2.5,
+        evolution: 3.0,
+        seed: 99,
+        overflow: Overflow::Wrap,
+        opacity: 0.7,
+    });
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(layer.generate, back.generate);
 }
 
 // --- Effects ------------------------------------------------------------

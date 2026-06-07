@@ -27,6 +27,9 @@ impl PulseApp {
         match entry.instantiate() {
             NewEffect::Color(e) => layer.effects.push(e),
             NewEffect::Spatial(e) => layer.spatial_effects.push(e),
+            // A generate fill replaces the layer's content; a layer carries at
+            // most one, so adding sets (overwrites) the slot.
+            NewEffect::Generate(e) => layer.generate = Some(e),
         }
         true
     }
@@ -108,6 +111,7 @@ impl PulseApp {
                                         let stack_tag = match entry.stack {
                                             Stack::Color => "color",
                                             Stack::Spatial => "buffer",
+                                            Stack::Generate => "generate",
                                         };
                                         let resp = ui
                                             .add(egui::Button::new(format!(

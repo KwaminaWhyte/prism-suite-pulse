@@ -5,8 +5,8 @@
 use super::PulseApp;
 use crate::comp::{
     blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, Ease, Effect, ExprCtx,
-    Fill, FootageSource, Interp, LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Prop, ShapeItem,
-    ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
+    Fill, FootageSource, FractalType, GenerateEffect, Interp, LayerBlend, LayerKind, Mask, MaskMode,
+    MatteMode, Overflow, Prop, ShapeItem, ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -172,6 +172,15 @@ impl PulseApp {
                         if self.comp.layers[idx].kind != LayerKind::Null {
                             section(ui, ("sec_effects", idx), "Effects", |ui| {
                                 self.effects_section(ui, idx);
+                            });
+                        }
+
+                        // Generate (Fractal Noise) fills the layer's quad with a
+                        // synthesised field, replacing its content. Only meaningful for
+                        // layers that draw their own pixels.
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            section(ui, ("sec_generate", idx), "Generate", |ui| {
+                                self.generate_section(ui, idx);
                             });
                         }
 
@@ -814,6 +823,94 @@ impl PulseApp {
         let _ = t;
     }
 
+    /// The layer's **generate** fill editor (Fractal Noise): an enable/clear
+    /// toggle, then the noise parameters. A generate fill replaces the layer's
+    /// content with the synthesised field; a layer carries at most one.
+    fn generate_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let has = self.comp.layers[idx].generate.is_some();
+        let gen_label = GenerateEffect::defaults()[0].label();
+        ui.horizontal(|ui| {
+            let mut enabled = has;
+            if ui
+                .checkbox(&mut enabled, gen_label)
+                .on_hover_text("Fill this layer with multi-octave fractal noise")
+                .changed()
+            {
+                self.comp.layers[idx].generate = if enabled {
+                    Some(GenerateEffect::defaults()[0])
+                } else {
+                    None
+                };
+            }
+            if has {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        self.comp.layers[idx].generate = None;
+                    }
+                });
+            }
+        });
+        if self.comp.layers[idx].generate.is_none() {
+            ui.weak("Off. Enable to fill the layer with fractal noise.");
+            return;
+        }
+        // The static (non-animated) noise parameters, including the base evolution.
+        if let Some(gen) = self.comp.layers[idx].generate.as_mut() {
+            generate_params(ui, idx, gen);
+        }
+        ui.separator();
+        // Evolution is the key motion-design knob, so it also gets a full
+        // keyframable track. When the track is **keyed** it overrides the static
+        // `evolution` field above (so the field flows over time); empty, the static
+        // field is used. The "Animate" button seeds the track from the current
+        // static evolution so enabling animation is value-neutral.
+        let evo_keyed = !self.comp.layers[idx].generate_evolution.keys.is_empty();
+        let t = self.time;
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Evolution (animated)").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if evo_keyed {
+                    if ui.button(icons::TRASH).on_hover_text("Clear keys").clicked() {
+                        self.comp.layers[idx].generate_evolution.keys.clear();
+                    }
+                } else if ui
+                    .button("Animate")
+                    .on_hover_text("Seed an evolution keyframe at the playhead")
+                    .clicked()
+                {
+                    let seed_evo = match self.comp.layers[idx].generate {
+                        Some(GenerateEffect::FractalNoise { evolution, .. }) => evolution,
+                        None => 0.0,
+                    };
+                    self.comp.layers[idx]
+                        .generate_evolution
+                        .set_key(t, seed_evo);
+                }
+            });
+        });
+        if evo_keyed {
+            // The keyframable track row (value slider + add-key + fx expression +
+            // interpolation) — the same row the transform / time-remap properties
+            // use — drives the per-frame evolution.
+            self.track_row(
+                ui,
+                ("gen_evolution", idx),
+                "Evolution value",
+                "",
+                -50.0..=50.0,
+                t,
+                |layer| &layer.generate_evolution,
+                |layer| &mut layer.generate_evolution,
+            );
+        } else {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.weak("Static — using the Evolution value above.");
+            });
+        }
+    }
+
     /// The layer's **effect stack** editor: an "Add effect" menu, then each
     /// effect with reorder / remove controls and per-parameter sliders. Effects
     /// process the layer's own color (solid) or the layers below (adjustment).
@@ -1454,6 +1551,93 @@ fn color_balance_range(
                 ui.add(egui::Slider::new(&mut rgb[ch], -1.0..=1.0));
             });
         });
+    }
+}
+
+/// Parameter sliders / pickers for a [`GenerateEffect`] (Fractal Noise), editing
+/// it in place. `idx` salts widget ids. The **evolution** slider is the key
+/// motion-design knob (animate it for flowing noise).
+fn generate_params(ui: &mut egui::Ui, idx: usize, effect: &mut GenerateEffect) {
+    let slider = |ui: &mut egui::Ui,
+                  label: &str,
+                  v: &mut f32,
+                  lo: f32,
+                  hi: f32,
+                  suffix: &str|
+     -> egui::Response {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi).suffix(suffix.to_owned()))
+        })
+        .inner
+    };
+    match effect {
+        GenerateEffect::FractalNoise {
+            fractal_type,
+            contrast,
+            brightness,
+            scale,
+            scale_x,
+            scale_y,
+            complexity,
+            sub_influence,
+            sub_scaling,
+            evolution,
+            seed,
+            overflow,
+            opacity,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Type");
+                egui::ComboBox::from_id_salt(("frac_type", idx))
+                    .selected_text(fractal_type.label())
+                    .show_ui(ui, |ui| {
+                        for ft in FractalType::ALL {
+                            if ui
+                                .selectable_label(*fractal_type == ft, ft.label())
+                                .clicked()
+                            {
+                                *fractal_type = ft;
+                            }
+                        }
+                    });
+            });
+            slider(ui, "Contrast", contrast, 0.0, 4.0, "");
+            slider(ui, "Brightness", brightness, -1.0, 1.0, "");
+            slider(ui, "Scale", scale, 1.0, 500.0, " px");
+            slider(ui, "Scale X", scale_x, 0.1, 4.0, "");
+            slider(ui, "Scale Y", scale_y, 0.1, 4.0, "");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Complexity");
+                ui.add(egui::Slider::new(complexity, 1..=10));
+            });
+            slider(ui, "Sub Influence", sub_influence, 0.0, 1.0, "");
+            slider(ui, "Sub Scaling", sub_scaling, 1.0, 4.0, "");
+            slider(ui, "Evolution", evolution, -50.0, 50.0, "")
+                .on_hover_text("Animate this for flowing noise — the motion-design knob");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(seed).speed(1.0));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Overflow");
+                egui::ComboBox::from_id_salt(("overflow", idx))
+                    .selected_text(overflow.label())
+                    .show_ui(ui, |ui| {
+                        for ov in Overflow::ALL {
+                            if ui.selectable_label(*overflow == ov, ov.label()).clicked() {
+                                *overflow = ov;
+                            }
+                        }
+                    });
+            });
+            slider(ui, "Opacity", opacity, 0.0, 1.0, "");
+        }
     }
 }
 

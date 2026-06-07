@@ -26,6 +26,7 @@ mod effect;
 mod effect_browser;
 mod expr;
 mod footage;
+mod generate;
 mod keyframe;
 mod marker;
 mod mask;
@@ -45,6 +46,7 @@ pub use expr::{last_error as expr_last_error, ExprCtx};
 pub use footage::{
     source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
 };
+pub use generate::{FractalType, GenerateEffect, Overflow};
 pub use keyframe::{Ease, Handle, Interp, Track};
 pub use marker::{next_marker_time, prev_marker_time, Marker, WorkArea};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
@@ -96,6 +98,25 @@ pub struct PulseLayer {
     /// files still load.
     #[serde(default)]
     pub spatial_effects: Vec<SpatialEffect>,
+    /// Optional **generate** (whole-buffer fill) effect — currently **Fractal
+    /// Noise**. Unlike the colour/spatial stacks (which read the layer's pixels),
+    /// a generate effect *replaces* them: it synthesises the layer's content from
+    /// its parameters + the pixel position, filling the layer's quad before the
+    /// masks / matte / spatial passes apply. A layer carries at most one (a second
+    /// fill would just override the first), so it's an `Option`, not a `Vec`.
+    /// `serde`-defaulted to `None` so pre-generate `.pulse` files still load.
+    #[serde(default)]
+    pub generate: Option<GenerateEffect>,
+    /// **Evolution** track for the [`generate`](Self::generate) fill — the key
+    /// motion-design knob. Fractal Noise's other params are plain scalars (matching
+    /// how the colour / spatial effect stacks expose params), but *evolution* is
+    /// what flows the field over time, so it gets a full keyframable [`Track`].
+    /// When this track has keys it **overrides** the generate's static `evolution`
+    /// field at the sampled time (and is expression-able via the track); empty, the
+    /// static field is used. `serde`-defaulted to empty so pre-generate `.pulse`
+    /// files load unchanged.
+    #[serde(default)]
+    pub generate_evolution: Track,
     /// Parent layer index, if this layer is parented. A child inherits its
     /// parent's full transform (position, scale, rotation, anchor) but **not**
     /// its opacity (matching After Effects). `serde`-defaulted so pre-parenting
@@ -177,6 +198,8 @@ impl PulseLayer {
             visible: true,
             effects: Vec::new(),
             spatial_effects: Vec::new(),
+            generate: None,
+            generate_evolution: Track::default(),
             parent: None,
             matte: MatteMode::None,
             masks: Vec::new(),
@@ -292,6 +315,20 @@ impl PulseLayer {
     /// to run the whole-buffer passes.
     pub fn has_spatial_effects(&self) -> bool {
         !self.spatial_effects.is_empty()
+    }
+
+    /// The layer's generate fill with its **evolution** resolved at time `t`: if
+    /// the [`generate_evolution`](Self::generate_evolution) track has keys, the
+    /// generate's `evolution` field is replaced by the sampled track value (so the
+    /// field flows over time); otherwise the generate's static `evolution` is kept.
+    /// `None` when the layer has no generate fill.
+    pub fn generate_at(&self, t: f32) -> Option<GenerateEffect> {
+        let mut g = self.generate?;
+        if !self.generate_evolution.keys.is_empty() {
+            let GenerateEffect::FractalNoise { evolution, .. } = &mut g;
+            *evolution = self.generate_evolution.sample(t, *evolution);
+        }
+        Some(g)
     }
 
     /// Whether this layer is a [`LayerKind::Shape`] with at least one shape
@@ -494,6 +531,35 @@ impl Comp {
             out_white: 1.0,
         });
         c.layers.push(grade); // index 4
+
+        // A full-frame **Fractal Noise** layer on top: a moving cloud texture
+        // screened over the composite. Its **evolution** is keyframed (0 → 6 over
+        // the comp), so the noise field flows — the generate workhorse + its
+        // signature animate-the-evolution motion read out of the box. Screen blend
+        // at modest opacity so it textures rather than covers.
+        let mut noise = PulseLayer::new("Fractal Noise", [1.0; 4]);
+        noise.scale.set_key(0.0, 3.0); // cover the whole frame
+        noise.blend = LayerBlend(BlendMode::Screen);
+        noise.opacity.set_key(0.0, 0.35);
+        noise.generate = Some(GenerateEffect::FractalNoise {
+            fractal_type: FractalType::Turbulent,
+            contrast: 1.3,
+            brightness: -0.1,
+            scale: 140.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            complexity: 6,
+            sub_influence: 0.6,
+            sub_scaling: 2.0,
+            evolution: 0.0,
+            seed: 7,
+            overflow: Overflow::Clip,
+            opacity: 1.0,
+        });
+        // Keyframe the evolution to flow the field over the timeline.
+        noise.generate_evolution.set_key(0.0, 0.0);
+        noise.generate_evolution.set_key(5.0, 6.0);
+        c.layers.push(noise); // index 5
 
         // A comp marker mid-timeline so markers + time navigation read out of the
         // box (jump to it with the timeline's marker-nav buttons).

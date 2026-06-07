@@ -30,7 +30,8 @@ pub use export::{export_sequence_in_project, range_frame_count, RenderRange};
 pub use export::export_sequence;
 use passes::{
     apply_adjustment, apply_masks, apply_spatial, apply_track_matte, composite_footage,
-    composite_layer, composite_motion_blur, composite_precomp, composite_shape, composite_text,
+    composite_generate, composite_layer, composite_motion_blur, composite_precomp, composite_shape,
+    composite_text,
 };
 
 /// Per-render context for resolving **precomps**: the project's comps (so a
@@ -336,6 +337,25 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         // Expression-aware opacity for this layer at the frame time (the value the
         // rasterizers scale coverage by).
         let opacity = comp.layer_opacity(i, t);
+        // A **generate** fill (Fractal Noise) replaces a pixel-drawing layer's
+        // content with the synthesised field, before the masks / matte / spatial
+        // passes. It takes precedence over the kind-specific rasterizers (it fills
+        // the layer's quad regardless of solid/shape/text/footage/precomp). The
+        // field is deterministic per (params, evolution, seed, pixel), so it routes
+        // through the isolated-buffer path (no motion-blur snapshot averaging — the
+        // animation comes from keyframing the generate's evolution, not the
+        // transform). A null/adjustment has no quad to fill, so it's skipped.
+        if layer.kind.draws_own_pixels() {
+            if let Some(gen) = layer.generate_at(t) {
+                let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
+                composite_generate(&mut layer_buf, &geom, world, layer, gen, opacity);
+                finish_layer(
+                    &mut acc, &mut layer_buf, &geom, comp, cache, world, layer, masked, spatial,
+                    matte_src, t, ctx,
+                );
+                continue;
+            }
+        }
         match layer.kind {
             // A null draws nothing — it's a transform reference (parent) only.
             LayerKind::Null => {}
