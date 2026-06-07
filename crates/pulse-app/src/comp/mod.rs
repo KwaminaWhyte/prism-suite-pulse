@@ -28,6 +28,7 @@ mod effect_browser;
 mod expr;
 mod footage;
 mod generate;
+mod key;
 mod keyframe;
 mod marker;
 mod mask;
@@ -49,6 +50,7 @@ pub use footage::{
     source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
 };
 pub use generate::{FractalType, GenerateEffect, Overflow, RampShape};
+pub use key::{apply_key_effects, KeyEffect};
 pub use keyframe::{Ease, Handle, Interp, Track};
 pub use marker::{next_marker_time, prev_marker_time, Marker, WorkArea};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
@@ -110,6 +112,16 @@ pub struct PulseLayer {
     /// pre-distort `.pulse` files still load.
     #[serde(default)]
     pub distort_effects: Vec<DistortEffect>,
+    /// Non-destructive, ordered **key effect stack** (whole-buffer
+    /// alpha-affecting passes: Color Key, Luma Key, Chroma Key, Spill
+    /// Suppression, Matte Choke). Applied to the layer's isolated rendered buffer
+    /// in the finishing step *after* its color-correction stack, masks, and track
+    /// matte, but *before* the spatial passes — so a key carves the matte first
+    /// and a later Gaussian Blur can soften the keyed edge (matching AE's
+    /// keyer-then-blur matte-refine order). `serde`-defaulted to empty so
+    /// pre-keying `.pulse` files still load.
+    #[serde(default)]
+    pub key_effects: Vec<KeyEffect>,
     /// Optional **generate** (whole-buffer fill) effect — currently **Fractal
     /// Noise**. Unlike the colour/spatial stacks (which read the layer's pixels),
     /// a generate effect *replaces* them: it synthesises the layer's content from
@@ -211,6 +223,7 @@ impl PulseLayer {
             effects: Vec::new(),
             spatial_effects: Vec::new(),
             distort_effects: Vec::new(),
+            key_effects: Vec::new(),
             generate: None,
             generate_evolution: Track::default(),
             parent: None,
@@ -335,6 +348,13 @@ impl PulseLayer {
     /// isolated buffer to run the whole-buffer coordinate-remap passes.
     pub fn has_distort_effects(&self) -> bool {
         !self.distort_effects.is_empty()
+    }
+
+    /// Whether this layer has any **key effects** (Color / Luma / Chroma Key,
+    /// Spill Suppression, Matte Choke), so the renderer must route it through an
+    /// isolated buffer to run the whole-buffer alpha-affecting passes.
+    pub fn has_key_effects(&self) -> bool {
+        !self.key_effects.is_empty()
     }
 
     /// The layer's generate fill with its **evolution** resolved at time `t`: if
@@ -494,6 +514,17 @@ impl Comp {
             rotation: 0.0,
             skew: 0.0,
             opacity: 1.0,
+        });
+        // A gentle **Matte Choke** (a Keying effect) crisps the satellite's matte
+        // edge before the spatial passes, so the whole-buffer alpha-pulling keying
+        // family reads out of the box. It runs *before* the glow/shadow, so the
+        // keyer carves the matte and the spatial passes then soften it — AE's
+        // keyer-then-blur matte-refine order. Near-identity on the crisp solid
+        // (clips just the soft alpha tails), so the demo's look is preserved.
+        satellite.key_effects.push(KeyEffect::MatteChoke {
+            choke: 0.0,
+            clip_black: 0.02,
+            clip_white: 0.98,
         });
         c.layers.push(satellite); // index 1
 

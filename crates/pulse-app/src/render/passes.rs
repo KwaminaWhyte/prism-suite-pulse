@@ -4,8 +4,8 @@
 
 use super::{over, render_comp, Geom, Lin, RenderCtx};
 use crate::comp::{
-    apply_distort_effects, apply_effects, apply_spatial_effects, mask_stack_coverage, Affine2, Comp,
-    DecodedFrame, GenerateEffect, MatteMode, PulseLayer,
+    apply_distort_effects, apply_effects, apply_key_effects, apply_spatial_effects,
+    mask_stack_coverage, Affine2, Comp, DecodedFrame, GenerateEffect, MatteMode, PulseLayer,
 };
 use prism_core::color::srgb_to_linear;
 
@@ -720,6 +720,29 @@ pub(super) fn apply_masks(layer_buf: &mut [Lin], geom: &Geom, world: Affine2, la
             let cov = mask_stack_coverage(&layer.masks, &polys, lx, ly);
             layer_buf[idx].a *= cov;
         }
+    }
+}
+
+/// Run a layer's **key effect stack** (Color / Luma / Chroma Key, Spill
+/// Suppression, Matte Choke) over its isolated rendered buffer.
+///
+/// The twin of [`apply_spatial`]: the [`Lin`] accumulator is already
+/// **premultiplied** linear-light — exactly what the keyers operate on (they
+/// un-premultiply per pixel to test the straight colour, then re-premultiply by
+/// the new coverage) — so this is a zero-conversion bridge: view the `Lin` slice
+/// as `[[f32; 4]]`, run [`apply_key_effects`], then write the keyed values back.
+/// Runs *before* the spatial passes so a key carves the matte first and a later
+/// blur can soften the keyed edge. Assumes the layer has at least one key effect
+/// (the caller gates on [`PulseLayer::has_key_effects`]).
+pub(super) fn apply_key(layer_buf: &mut [Lin], geom: &Geom, layer: &PulseLayer) {
+    let (w, h) = (geom.w as usize, geom.h as usize);
+    let mut rgba: Vec<[f32; 4]> = layer_buf.iter().map(|p| [p.r, p.g, p.b, p.a]).collect();
+    apply_key_effects(&layer.key_effects, &mut rgba, w, h);
+    for (dst, src) in layer_buf.iter_mut().zip(rgba.iter()) {
+        dst.r = src[0];
+        dst.g = src[1];
+        dst.b = src[2];
+        dst.a = src[3];
     }
 }
 

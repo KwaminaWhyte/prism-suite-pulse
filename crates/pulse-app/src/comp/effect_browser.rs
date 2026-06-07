@@ -16,7 +16,7 @@
 //! selected layer. Keeping the registry and the matcher here (not in the UI)
 //! means the search/ranking logic is unit-testable without an egui context.
 
-use super::{DistortEffect, Effect, GenerateEffect, SpatialEffect};
+use super::{DistortEffect, Effect, GenerateEffect, KeyEffect, SpatialEffect};
 
 /// Which per-layer stack an effect belongs to. The browser adds a
 /// [`Category::Color`] / generic per-pixel effect to the layer's
@@ -35,6 +35,10 @@ pub enum Stack {
     /// A whole-buffer [`DistortEffect`] coordinate-remap (Corner Pin / Transform
     /// / Mirror / Polar) — warps the layer's pixels rather than recoloring them.
     Distort,
+    /// A whole-buffer [`KeyEffect`] matte-pull (Color / Luma / Chroma Key, Spill
+    /// Suppression, Matte Choke) — carves the layer's alpha (and, for spill,
+    /// neutralises RGB) rather than recoloring or warping it.
+    Keying,
 }
 
 /// The browser's top-level grouping (AE's *Effects & Presets* category folders).
@@ -56,17 +60,21 @@ pub enum Category {
     Distort,
     /// Generate passes (Fractal Noise, …) — synthesise content into the layer.
     Generate,
+    /// Keying passes (Color / Luma / Chroma Key, Spill Suppression, Matte
+    /// Choke, …) — pull a matte from the layer's colour.
+    Keying,
 }
 
 impl Category {
     /// Every category, in the browser's display order.
-    pub const ALL: [Category; 6] = [
+    pub const ALL: [Category; 7] = [
         Category::Color,
         Category::Blur,
         Category::Perspective,
         Category::Stylize,
         Category::Distort,
         Category::Generate,
+        Category::Keying,
     ];
 
     /// The folder label shown in the browser.
@@ -78,6 +86,7 @@ impl Category {
             Category::Stylize => "Stylize",
             Category::Distort => "Distort",
             Category::Generate => "Generate",
+            Category::Keying => "Keying",
         }
     }
 }
@@ -111,6 +120,7 @@ impl BrowserEntry {
             Stack::Spatial => NewEffect::Spatial(SpatialEffect::defaults()[self.default_index]),
             Stack::Generate => NewEffect::Generate(GenerateEffect::defaults()[self.default_index]),
             Stack::Distort => NewEffect::Distort(DistortEffect::defaults()[self.default_index]),
+            Stack::Keying => NewEffect::Keying(KeyEffect::defaults()[self.default_index]),
         }
     }
 }
@@ -124,6 +134,7 @@ pub enum NewEffect {
     Spatial(SpatialEffect),
     Generate(GenerateEffect),
     Distort(DistortEffect),
+    Keying(KeyEffect),
 }
 
 /// The full effect registry — every addable effect across both stacks. The
@@ -322,6 +333,87 @@ pub const REGISTRY: &[BrowserEntry] = &[
             "twirl",
         ],
     },
+    // --- Keying (KeyEffect::defaults() order) -------------------------------
+    BrowserEntry {
+        name: "Color Key",
+        category: Category::Keying,
+        stack: Stack::Keying,
+        default_index: 0,
+        keywords: &[
+            "key",
+            "color",
+            "chroma",
+            "green screen",
+            "blue screen",
+            "matte",
+            "transparency",
+            "tolerance",
+        ],
+    },
+    BrowserEntry {
+        name: "Luma Key",
+        category: Category::Keying,
+        stack: Stack::Keying,
+        default_index: 1,
+        keywords: &[
+            "key",
+            "luma",
+            "luminance",
+            "brightness",
+            "threshold",
+            "matte",
+            "shadow",
+            "highlight",
+        ],
+    },
+    BrowserEntry {
+        name: "Chroma Key",
+        category: Category::Keying,
+        stack: Stack::Keying,
+        default_index: 2,
+        keywords: &[
+            "key",
+            "chroma",
+            "keylight",
+            "green screen",
+            "blue screen",
+            "matte",
+            "gain",
+            "balance",
+        ],
+    },
+    BrowserEntry {
+        name: "Spill Suppression",
+        category: Category::Keying,
+        stack: Stack::Keying,
+        default_index: 3,
+        keywords: &[
+            "spill",
+            "suppress",
+            "despill",
+            "fringe",
+            "green",
+            "blue",
+            "edge",
+            "neutralise",
+        ],
+    },
+    BrowserEntry {
+        name: "Matte Choke",
+        category: Category::Keying,
+        stack: Stack::Keying,
+        default_index: 4,
+        keywords: &[
+            "choke",
+            "matte",
+            "erode",
+            "dilate",
+            "shrink",
+            "grow",
+            "clip",
+            "refine",
+        ],
+    },
 ];
 
 /// A scored search hit: the matched registry entry and a relevance `score`
@@ -427,6 +519,7 @@ mod tests {
         let spatials = SpatialEffect::defaults();
         let generates = GenerateEffect::defaults();
         let distorts = DistortEffect::defaults();
+        let keys = KeyEffect::defaults();
         for entry in REGISTRY {
             match entry.instantiate() {
                 NewEffect::Color(e) => {
@@ -449,6 +542,11 @@ mod tests {
                     assert_eq!(e, distorts[entry.default_index]);
                     assert_eq!(entry.stack, Stack::Distort);
                 }
+                NewEffect::Keying(e) => {
+                    assert!(entry.default_index < keys.len());
+                    assert_eq!(e, keys[entry.default_index]);
+                    assert_eq!(entry.stack, Stack::Keying);
+                }
             }
         }
     }
@@ -463,6 +561,7 @@ mod tests {
                 NewEffect::Spatial(e) => e.label(),
                 NewEffect::Generate(e) => e.label(),
                 NewEffect::Distort(e) => e.label(),
+                NewEffect::Keying(e) => e.label(),
             };
             assert_eq!(entry.name, label, "name/label mismatch for {}", entry.name);
         }
@@ -502,6 +601,14 @@ mod tests {
                     .iter()
                     .any(|e| e.stack == Stack::Distort && e.default_index == i),
                 "distort effect {i} missing from registry"
+            );
+        }
+        for (i, _) in KeyEffect::defaults().iter().enumerate() {
+            assert!(
+                REGISTRY
+                    .iter()
+                    .any(|e| e.stack == Stack::Keying && e.default_index == i),
+                "key effect {i} missing from registry"
             );
         }
     }
@@ -573,6 +680,34 @@ mod tests {
             .find(|(c, _)| *c == Category::Distort)
             .expect("Distort folder present");
         assert_eq!(dist.1.len(), 4, "four distorts in the Distort folder");
+    }
+
+    #[test]
+    fn keying_family_is_findable() {
+        // Each keyer is reachable by name and a synonym, and groups under the
+        // Keying category.
+        for (name, queries) in [
+            ("Color Key", ["color key", "green screen"]),
+            ("Luma Key", ["luma", "luminance"]),
+            ("Chroma Key", ["chroma", "keylight"]),
+            ("Spill Suppression", ["spill", "despill"]),
+            ("Matte Choke", ["choke", "erode"]),
+        ] {
+            for q in queries {
+                let hits = filter(q);
+                assert!(
+                    hits.iter().any(|h| h.entry.name == name),
+                    "querying {q:?} should find {name}"
+                );
+            }
+        }
+        // The Keying folder holds all five keyers on an empty query.
+        let groups = filter_grouped("");
+        let key = groups
+            .iter()
+            .find(|(c, _)| *c == Category::Keying)
+            .expect("Keying folder present");
+        assert_eq!(key.1.len(), 5, "five keyers in the Keying folder");
     }
 
     #[test]

@@ -45,6 +45,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Keying effect family — Color Key / Luma Key / Chroma Key / Spill Suppression
+  / Matte Choke** (After-Effects *Keying ▸ Color Key / Luma Key / Keylight-style
+  chroma key / Spill Suppressor / Matte Choker*; PLAN Phase 3 *Keying*) — the
+  first **keying** stack: whole-buffer **matte-pull** passes that *carve a layer's
+  alpha* from a per-pixel colour test (where the colour stack recolours, the
+  spatial stack convolves/blooms, and the distort stack warps). Built to mirror
+  the spatial / distort families exactly — a `KeyEffect` enum + an
+  `apply_key_effects` pass + an `apply_key` compositor bridge + a Properties
+  *Keying* section + the *Effects & Presets* browser's new *Keying* category. Each
+  works on the layer's **isolated premultiplied linear-light** buffer
+  (un-premultiplying per pixel to test the straight colour, re-premultiplying by
+  the new coverage), run in `finish_layer` **after** masks and the track matte but
+  **before** the spatial passes (AE's keyer-then-blur matte-refine order) so a key
+  pulls the matte first and a later Gaussian Blur can soften the keyed edge — and
+  so it composes with opacity / blend / masks / track-mattes / spatial-effects /
+  distort / motion-blur like every other layer effect, in both the offline render
+  and the live render-preview.
+  - **Color Key** (`KeyEffect::ColorKey`) — key out a target colour within an RGB
+    **tolerance** (linear-light Euclidean distance), with a **softness** band that
+    feathers the matte edge back to opaque (AE's *Color Key*).
+  - **Luma Key** (`KeyEffect::LumaKey`) — key on Rec.709 **luminance** above
+    (*key highlights*) or below (*key shadows*) a **threshold**, with a softness
+    band (AE's *Luma Key*).
+  - **Chroma Key** (`KeyEffect::ChromaKey`) — key a chroma colour by **YCbCr**
+    chroma-plane distance (luminance ignored, so shading on the backing doesn't
+    pull holes), with matte **gain**, green↔blue **balance**, and edge **softness**
+    (a Keylight-style chroma keyer).
+  - **Spill Suppression** (`KeyEffect::SpillSuppression`) — neutralise the key
+    colour bleeding onto retained edges by pulling the dominant key channel toward
+    the other two by an **amount**, leaving alpha untouched (AE's *Spill
+    Suppressor* / Keylight despill).
+  - **Matte Choke** (`KeyEffect::MatteChoke`) — erode (negative) / dilate
+    (positive) the alpha by a pixel **choke** radius (morphological min/max), plus
+    **clip black** / **clip white** levels that crush the matte's soft tails
+    (AE's *Matte Choker* / *Simple Choker* + Keylight clip controls).
+  - Wired through the model (`PulseLayer::key_effects`, `serde`-defaulted +
+    `has_key_effects`), the render path, the browser registry (findable by name +
+    synonyms like *green screen*, *keylight*, *despill*, *erode*), and the
+    Properties UI (add / reorder / remove + per-keyer params: key colour,
+    tolerance / softness, threshold + direction, gain / balance, amount, choke +
+    clip levels). Pure matte math (colour-key removes the target + keeps others +
+    softness feather, luma-key threshold direction + softness, chroma distance
+    keying independent of luminance, spill reduces the key channel, choke
+    erode/dilate + clip-level crush, determinism, stacking order, serde
+    round-trip) + render-path (keyed layer composites into the buffer, composes
+    with masks, isolated-buffer routing, dilate recovers masked alpha,
+    determinism) unit-tested. **Open** (Phase 3 *Keying*): Difference Matte,
+    advanced matte refine (edge blur/grow with colour-aware feather), Inner/Outer
+    edge keying.
+
 - **Distort effect family — Corner Pin / Transform / Mirror / Polar Coordinates**
   (After-Effects *Distort ▸ Corner Pin / Transform / Mirror / Polar Coordinates*;
   PLAN Phase 3 *Distort*) — the first **distort** stack: whole-buffer

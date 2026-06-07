@@ -5,9 +5,9 @@
 use super::PulseApp;
 use crate::comp::{
     blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, DistortEffect, Ease,
-    Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, LayerBlend, LayerKind,
-    Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RampShape, ShapeItem, ShapePrimitive,
-    SpatialEffect, Stroke, TextAlign, Track,
+    Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, KeyEffect, LayerBlend,
+    LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RampShape, ShapeItem,
+    ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -200,6 +200,15 @@ impl PulseApp {
                         if self.comp.layers[idx].kind.draws_own_pixels() {
                             section(ui, ("sec_distort", idx), "Distort effects", |ui| {
                                 self.distort_effects_section(ui, idx);
+                            });
+                        }
+
+                        // Keying effects (Color / Luma / Chroma Key, Spill Suppression,
+                        // Matte Choke) pull a matte from the layer's whole rendered
+                        // buffer. Only meaningful for layers that draw their own pixels.
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            section(ui, ("sec_keying", idx), "Keying", |ui| {
+                                self.key_effects_section(ui, idx);
                             });
                         }
 
@@ -1151,6 +1160,75 @@ impl PulseApp {
         }
     }
 
+    /// The layer's **key effect stack** editor: an "Add" menu (Color / Luma /
+    /// Chroma Key, Spill Suppression, Matte Choke), then each effect with reorder
+    /// / remove controls and per-parameter sliders. Key effects carve the layer's
+    /// whole rendered buffer's alpha (and, for spill, neutralise RGB), after its
+    /// color-correction stack, masks, and track matte, but before the spatial and
+    /// distort passes — so a key pulls the matte first and a later blur softens it.
+    fn key_effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    for eff in KeyEffect::defaults() {
+                        if ui.button(eff.label()).clicked() {
+                            self.comp.layers[idx].key_effects.push(eff);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].key_effects.is_empty() {
+            ui.weak("No keying. Add color, luma, or chroma key, spill, or choke.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].key_effects.len();
+        for ei in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(self.comp.layers[idx].key_effects[ei].label()).strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(ei);
+                    }
+                    if ui
+                        .add_enabled(ei > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((ei, true));
+                    }
+                    if ui
+                        .add_enabled(ei + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((ei, false));
+                    }
+                });
+            });
+            key_effect_params(ui, idx, ei, &mut self.comp.layers[idx].key_effects[ei]);
+        }
+
+        if let Some(ei) = to_remove {
+            self.comp.layers[idx].key_effects.remove(ei);
+        }
+        if let Some((ei, up)) = to_move {
+            let effects = &mut self.comp.layers[idx].key_effects;
+            let other = if up { ei.wrapping_sub(1) } else { ei + 1 };
+            if other < effects.len() {
+                effects.swap(ei, other);
+            }
+        }
+    }
+
     /// The Parent selector for layer `idx`: a combo of "None" plus every other
     /// layer that can legally be a parent (no self, no cycle). Choosing a parent
     /// makes `idx` inherit that layer's transform.
@@ -1983,6 +2061,75 @@ fn distort_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut 
                     });
             });
             slider(ui, "Interpolation", interp, 0.0, 1.0, "");
+        }
+    }
+}
+
+/// Parameter sliders / color pickers for one [`KeyEffect`], editing it in place.
+/// Key colours are straight sRGB swatches; tolerances / thresholds / softness are
+/// in linear-light/luminance units `[0, 1]`. `idx`/`ei` salt widget ids so
+/// multiple effects don't collide.
+fn key_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut KeyEffect) {
+    let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32, suffix: &str| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.add(egui::Slider::new(v, lo..=hi).suffix(suffix.to_owned()));
+        });
+    };
+    let color = |ui: &mut egui::Ui, label: &str, slot: u8, c: &mut [f32; 3]| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(label);
+            rgb_button(ui, (idx, ei, slot), c);
+        });
+    };
+    match effect {
+        KeyEffect::ColorKey {
+            key,
+            tolerance,
+            softness,
+        } => {
+            color(ui, "Key color", 0, key);
+            slider(ui, "Tolerance", tolerance, 0.0, 1.0, "");
+            slider(ui, "Softness", softness, 0.0, 1.0, "");
+        }
+        KeyEffect::LumaKey {
+            threshold,
+            softness,
+            key_high,
+        } => {
+            slider(ui, "Threshold", threshold, 0.0, 1.0, "");
+            slider(ui, "Softness", softness, 0.0, 1.0, "");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(key_high, "Key out highlights")
+                    .on_hover_text("On: drop pixels brighter than the threshold; off: drop darker");
+            });
+        }
+        KeyEffect::ChromaKey {
+            key,
+            gain,
+            balance,
+            softness,
+        } => {
+            color(ui, "Key color", 0, key);
+            slider(ui, "Gain", gain, 0.1, 4.0, "");
+            slider(ui, "Balance", balance, 0.0, 1.0, "");
+            slider(ui, "Softness", softness, 0.0, 1.0, "");
+        }
+        KeyEffect::SpillSuppression { key, amount } => {
+            color(ui, "Key color", 0, key);
+            slider(ui, "Amount", amount, 0.0, 1.0, "");
+        }
+        KeyEffect::MatteChoke {
+            choke,
+            clip_black,
+            clip_white,
+        } => {
+            slider(ui, "Choke", choke, -10.0, 10.0, " px");
+            slider(ui, "Clip black", clip_black, 0.0, 1.0, "");
+            slider(ui, "Clip white", clip_white, 0.0, 1.0, "");
         }
     }
 }

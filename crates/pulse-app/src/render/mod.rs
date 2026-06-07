@@ -29,7 +29,7 @@ pub use export::{export_sequence_in_project, range_frame_count, RenderRange};
 #[cfg(test)]
 pub use export::export_sequence;
 use passes::{
-    apply_adjustment, apply_distort, apply_masks, apply_spatial, apply_track_matte,
+    apply_adjustment, apply_distort, apply_key, apply_masks, apply_spatial, apply_track_matte,
     composite_footage, composite_generate, composite_layer, composite_motion_blur,
     composite_precomp, composite_shape, composite_text,
 };
@@ -331,6 +331,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         }
         let blurred = comp.layer_motion_blurred(i);
         let masked = layer.has_active_masks();
+        let keyed = layer.has_key_effects();
         let spatial = layer.has_spatial_effects();
         let distort = layer.has_distort_effects();
         let matte_src = comp.matte_source(i);
@@ -351,8 +352,8 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                 composite_generate(&mut layer_buf, &geom, world, layer, gen, opacity);
                 finish_layer(
-                    &mut acc, &mut layer_buf, &geom, comp, cache, world, layer, masked, spatial,
-                    distort, matte_src, t, ctx,
+                    &mut acc, &mut layer_buf, &geom, comp, cache, world, layer, masked, keyed,
+                    spatial, distort, matte_src, t, ctx,
                 );
                 continue;
             }
@@ -384,6 +385,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     world,
                     layer,
                     masked,
+                    keyed,
                     spatial,
                     distort,
                     matte_src,
@@ -407,6 +409,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     world,
                     layer,
                     masked,
+                    keyed,
                     spatial,
                     distort,
                     matte_src,
@@ -429,6 +432,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     world,
                     layer,
                     masked,
+                    keyed,
                     spatial,
                     distort,
                     matte_src,
@@ -460,6 +464,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     world,
                     layer,
                     masked,
+                    keyed,
                     spatial,
                     distort,
                     matte_src,
@@ -489,6 +494,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     world,
                     layer,
                     masked,
+                    keyed,
                     spatial,
                     distort,
                     matte_src,
@@ -498,13 +504,13 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
             }
             // A crisp solid draws its own colored quad (processed by its effect
             // stack) directly into the accumulator — or, when it has masks, a
-            // track matte, spatial or distort effects, or a non-Normal blend mode,
-            // into an isolated buffer whose alpha the masks/matte modulate and
-            // whose whole buffer the spatial / distort passes filter before it is
-            // composited with the layer's blend mode.
+            // track matte, key, spatial or distort effects, or a non-Normal blend
+            // mode, into an isolated buffer whose alpha the masks/matte/key
+            // modulate and whose whole buffer the spatial / distort passes filter
+            // before it is composited with the layer's blend mode.
             LayerKind::Solid => {
                 let blended = layer.blend_mode() != BlendMode::Normal;
-                if masked || spatial || distort || matte_src.is_some() || blended {
+                if masked || keyed || spatial || distort || matte_src.is_some() || blended {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, opacity);
                     finish_layer(
@@ -516,6 +522,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                         world,
                         layer,
                         masked,
+                        keyed,
                         spatial,
                         distort,
                         matte_src,
@@ -552,11 +559,11 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
 }
 
 /// Finish an isolated layer buffer and composite it over the accumulator: carve
-/// by the layer's masks, clip by its track matte, run its spatial-effect stack,
-/// run its distort-effect (coordinate-remap) stack, then source-over the result
-/// onto `acc`. Each pass is gated by the corresponding flag the caller already
-/// resolved, so an un-effected layer just composites. Shared by the solid /
-/// shape / text isolated-buffer paths.
+/// by the layer's masks, clip by its track matte, run its key-effect (matte-pull)
+/// stack, run its spatial-effect stack, run its distort-effect (coordinate-remap)
+/// stack, then source-over the result onto `acc`. Each pass is gated by the
+/// corresponding flag the caller already resolved, so an un-effected layer just
+/// composites. Shared by the solid / shape / text isolated-buffer paths.
 #[allow(clippy::too_many_arguments)]
 fn finish_layer(
     acc: &mut [Lin],
@@ -567,6 +574,7 @@ fn finish_layer(
     world: Affine2,
     layer: &crate::comp::PulseLayer,
     masked: bool,
+    keyed: bool,
     spatial: bool,
     distort: bool,
     matte_src: Option<usize>,
@@ -578,6 +586,13 @@ fn finish_layer(
     }
     if let Some(src_idx) = matte_src {
         apply_track_matte(layer_buf, geom, comp, src_idx, cache, layer.matte, t, ctx);
+    }
+    // Key effects (Color / Luma / Chroma Key, Spill, Matte Choke) carve the
+    // matte after masks and track matte but before the spatial passes, so a key
+    // pulls the matte first and a later Gaussian Blur can soften the keyed edge
+    // (matching AE's keyer-then-blur matte-refine order).
+    if keyed {
+        apply_key(layer_buf, geom, layer);
     }
     if spatial {
         apply_spatial(layer_buf, geom, layer);
