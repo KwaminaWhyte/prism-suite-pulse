@@ -4,10 +4,10 @@
 
 use super::PulseApp;
 use crate::comp::{
-    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, DistortEffect, Ease,
-    Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, KeyEffect, LayerBlend,
-    LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RadialKind, RampShape,
-    ShapeItem, ShapePrimitive, SpatialEffect, Stroke, StylizeEffect, TextAlign, Track,
+    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, CellType, DistortEffect,
+    Ease, Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, KeyEffect,
+    LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RadialKind,
+    RampShape, ShapeItem, ShapePrimitive, SpatialEffect, Stroke, StylizeEffect, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -853,9 +853,9 @@ impl PulseApp {
     }
 
     /// The layer's **generate** fill editor: an enable/clear toggle, a generator
-    /// picker (Fractal Noise / Ramp / Checkerboard / 4-Color / Grid), then the
-    /// chosen generator's parameters. A generate fill replaces the layer's content
-    /// with the synthesised field; a layer carries at most one.
+    /// picker (Fractal Noise / Ramp / Checkerboard / 4-Color / Grid / Cell
+    /// Pattern), then the chosen generator's parameters. A generate fill replaces
+    /// the layer's content with the synthesised field; a layer carries at most one.
     fn generate_section(&mut self, ui: &mut egui::Ui, idx: usize) {
         let has = self.comp.layers[idx].generate.is_some();
         ui.horizontal(|ui| {
@@ -906,13 +906,14 @@ impl PulseApp {
         if let Some(gen) = self.comp.layers[idx].generate.as_mut() {
             generate_params(ui, idx, gen);
         }
-        // Evolution (the Fractal-Noise motion knob) gets a keyframable track; the
-        // colour generators have no evolution axis, so the track is hidden for them.
-        let is_noise = matches!(
+        // Evolution (the Fractal-Noise / Cell-Pattern motion knob) gets a
+        // keyframable track; the colour generators have no evolution axis, so the
+        // track is hidden for them.
+        let has_evolution = matches!(
             self.comp.layers[idx].generate,
-            Some(GenerateEffect::FractalNoise { .. })
+            Some(GenerateEffect::FractalNoise { .. } | GenerateEffect::CellPattern { .. })
         );
-        if !is_noise {
+        if !has_evolution {
             return;
         }
         ui.separator();
@@ -936,7 +937,10 @@ impl PulseApp {
                     .clicked()
                 {
                     let seed_evo = match self.comp.layers[idx].generate {
-                        Some(GenerateEffect::FractalNoise { evolution, .. }) => evolution,
+                        Some(
+                            GenerateEffect::FractalNoise { evolution, .. }
+                            | GenerateEffect::CellPattern { evolution, .. },
+                        ) => evolution,
                         _ => 0.0,
                     };
                     self.comp.layers[idx]
@@ -1898,8 +1902,8 @@ fn color_balance_range(
 }
 
 /// Parameter sliders / pickers for a [`GenerateEffect`], editing it in place.
-/// `idx` salts widget ids. For Fractal Noise the **evolution** slider is the key
-/// motion-design knob (animate it for flowing noise).
+/// `idx` salts widget ids. For Fractal Noise / Cell Pattern the **evolution**
+/// slider is the key motion-design knob (animate it for a flowing field).
 fn generate_params(ui: &mut egui::Ui, idx: usize, effect: &mut GenerateEffect) {
     let slider = |ui: &mut egui::Ui,
                   label: &str,
@@ -2085,6 +2089,51 @@ fn generate_params(ui: &mut egui::Ui, idx: usize, effect: &mut GenerateEffect) {
             color_row(ui, "Line color", 0, color);
             color_row(ui, "Background", 1, background);
             slider(ui, "Background opacity", background_opacity, 0.0, 1.0, "");
+            slider(ui, "Opacity", opacity, 0.0, 1.0, "");
+        }
+
+        GenerateEffect::CellPattern {
+            cell_type,
+            size,
+            disorder,
+            contrast,
+            brightness,
+            invert,
+            evolution,
+            seed,
+            opacity,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Type");
+                egui::ComboBox::from_id_salt(("cell_type", idx))
+                    .selected_text(cell_type.label())
+                    .show_ui(ui, |ui| {
+                        for ct in CellType::ALL {
+                            if ui
+                                .selectable_label(*cell_type == ct, ct.label())
+                                .clicked()
+                            {
+                                *cell_type = ct;
+                            }
+                        }
+                    });
+            });
+            slider(ui, "Size", size, 1.0, 500.0, " px");
+            slider(ui, "Disorder", disorder, 0.0, 1.0, "");
+            slider(ui, "Contrast", contrast, 0.0, 4.0, "");
+            slider(ui, "Brightness", brightness, -1.0, 1.0, "");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(invert, "Invert");
+            });
+            slider(ui, "Evolution", evolution, -50.0, 50.0, "")
+                .on_hover_text("Animate this for flowing cells — the motion-design knob");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(seed).speed(1.0));
+            });
             slider(ui, "Opacity", opacity, 0.0, 1.0, "");
         }
     }

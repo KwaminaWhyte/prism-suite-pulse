@@ -50,7 +50,7 @@ pub use expr::{last_error as expr_last_error, ExprCtx};
 pub use footage::{
     source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
 };
-pub use generate::{FractalType, GenerateEffect, Overflow, RampShape};
+pub use generate::{CellType, FractalType, GenerateEffect, Overflow, RampShape};
 pub use key::{apply_key_effects, KeyEffect};
 pub use keyframe::{Ease, Handle, Interp, Track};
 pub use marker::{next_marker_time, prev_marker_time, Marker, WorkArea};
@@ -385,10 +385,14 @@ impl PulseLayer {
     pub fn generate_at(&self, t: f32) -> Option<GenerateEffect> {
         let mut g = self.generate?;
         if !self.generate_evolution.keys.is_empty() {
-            // Evolution is the Fractal-Noise motion knob; the colour generators
-            // have no evolution axis, so the track is a no-op for them.
-            if let GenerateEffect::FractalNoise { evolution, .. } = &mut g {
-                *evolution = self.generate_evolution.sample(t, *evolution);
+            // Evolution is the Fractal-Noise / Cell-Pattern motion knob; the colour
+            // generators have no evolution axis, so the track is a no-op for them.
+            match &mut g {
+                GenerateEffect::FractalNoise { evolution, .. }
+                | GenerateEffect::CellPattern { evolution, .. } => {
+                    *evolution = self.generate_evolution.sample(t, *evolution);
+                }
+                _ => {}
             }
         }
         Some(g)

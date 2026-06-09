@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cell Pattern generator (Voronoi)** (After Effects' *Generate ▸ Cell Pattern*;
+  PLAN *Generate* item) — a new **cellular / Voronoi** generate effect, added as a
+  `CellPattern` variant on the established generate infrastructure (the
+  `GenerateEffect` enum + `composite_generate` pass + Properties *Generate* section
+  with its generator picker + the *Effects & Presets* browser's *Generate*
+  category), mirroring the Fractal Noise / Ramp / Checkerboard / 4-Color / Grid
+  family exactly. Seed-hashed feature points sit one per cell on a jittered grid
+  (displaced by **Disorder**); each output pixel finds the nearest (**F1**) and
+  second-nearest (**F2**) feature point and shapes them by a **cell type** —
+  **Bubbles** (smooth rounded F1), **Crystals** (raw faceted F1), **Plates** and
+  **Static Plates** (flat per-cell tones, the latter not evolving), and
+  **Borders** (the `F2 − F1` cell web, bright along the boundaries). It exposes
+  **Size** (cell scale), **Contrast / Brightness**, optional **Invert**, a
+  **Seed**, and — like Fractal Noise — a keyframable **Evolution** axis reusing
+  the same evolution track, so the cells flow over time. Output is
+  **grayscale-linear** (like Fractal Noise), deterministic for a given
+  `(seed, evolution, pixel)`. The `CellPattern` variant is an additive enum
+  variant (and `generate` stays `serde`-defaulted), so older `.pulse` projects
+  round-trip unchanged. Determinism, the F1-zero-at-a-feature-point / borders web /
+  invert symmetry / per-type difference / output range math, the evolution track
+  driving the field, and the browser entry are unit + render-path tested.
+
 - **Null layers + transform parenting (pick-whip)** (After Effects' *null object*
   + *parent & link*; PLAN Phase 2 *Null / parenting*) — a layer can now be
   **parented** to another so it inherits that parent's full transform up the

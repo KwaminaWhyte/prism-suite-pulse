@@ -18,12 +18,15 @@
 //!   *4-Color Gradient*).
 //! - **Grid** — a line grid over a (transparent or filled) background (AE's
 //!   *Grid*).
+//! - **Cell Pattern** — a cellular / Voronoi pattern from seed-hashed feature
+//!   points on a jittered grid (AE's *Cell Pattern*). Grayscale, authored in
+//!   linear `[0,1]`, with a keyframable **evolution** axis like Fractal Noise.
 //!
 //! Every generator is **deterministic**: the same `(params, evolution, seed,
 //! pixel)` always produces the same value, so a frame renders identically on
 //! every pass (for the RAM-preview cache, multi-frame render, and golden-frame
-//! tests). For Fractal Noise the only motion knob is **evolution**; the colour
-//! generators are static within a frame (they animate by keyframing their
+//! tests). For Fractal Noise + Cell Pattern the motion knob is **evolution**; the
+//! colour generators are static within a frame (they animate by keyframing their
 //! scalar params / scatter via evolution).
 //!
 //! Each field is evaluated in the layer's **local** frame (comp px, origin at the
@@ -121,6 +124,53 @@ impl RampShape {
         match self {
             RampShape::Linear => "Linear",
             RampShape::Radial => "Radial",
+        }
+    }
+}
+
+/// How a [`GenerateEffect::CellPattern`] shapes the Voronoi feature distances
+/// into a grayscale value (After Effects' *Cell Pattern* cell types).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CellType {
+    /// **Bubbles** — rounded cells: a smooth (`smoothstep`-shaped) F1 distance,
+    /// dark at the feature points fading bright into the cell interiors. The
+    /// default (AE's "Bubbles").
+    #[default]
+    Bubbles,
+    /// **Crystals** — faceted cells: the raw F1 distance (no smoothing), giving
+    /// hard angular crystalline facets radiating from each feature point.
+    Crystals,
+    /// **Plates** — flat cells: each cell is a single flat tone keyed off its
+    /// feature point's hash, so the frame reads as irregular tiled plates with
+    /// crisp borders (AE's "Plates").
+    Plates,
+    /// **Static Plates** — like [`CellType::Plates`] but the per-cell tone is
+    /// independent of `disorder` / sizing wobble, for a steadier plate field.
+    StaticPlates,
+    /// **Borders** — the cell web: `F2 − F1`, ~0 deep inside a cell and rising
+    /// to a bright ridge along the boundaries between cells (AE's crystal
+    /// "borders" / web look).
+    Borders,
+}
+
+impl CellType {
+    /// All types, in menu order.
+    pub const ALL: [CellType; 5] = [
+        CellType::Bubbles,
+        CellType::Crystals,
+        CellType::Plates,
+        CellType::StaticPlates,
+        CellType::Borders,
+    ];
+
+    /// A short, stable label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            CellType::Bubbles => "Bubbles",
+            CellType::Crystals => "Crystals",
+            CellType::Plates => "Plates",
+            CellType::StaticPlates => "Static Plates",
+            CellType::Borders => "Borders",
         }
     }
 }
@@ -268,6 +318,42 @@ pub enum GenerateEffect {
         /// Output **opacity** (scales the whole fill's coverage).
         opacity: f32,
     },
+
+    /// **Cell Pattern** — a cellular / **Voronoi** pattern. Seed-hashed feature
+    /// points sit on a jittered grid (one per cell, displaced by `disorder`); for
+    /// each output pixel the distances to the nearest (**F1**) and second-nearest
+    /// (**F2**) feature point are found and shaped per [`CellType`] into a
+    /// grayscale value (RGB = value, A = value · `opacity`). Like Fractal Noise it
+    /// is grayscale, authored in linear `[0,1]`, and rides an **evolution** axis
+    /// (a third hash dimension that flows the field), so it shares the keyframable
+    /// evolution track. Evaluated deterministically from the pixel's layer-local
+    /// position + `evolution` + `seed`.
+    CellPattern {
+        /// How the F1 / F2 distances are shaped into the value (Bubbles / Crystals
+        /// / Plates / Static Plates / Borders).
+        cell_type: CellType,
+        /// **Size**: the cell scale — the grid spacing in comp px (larger = bigger
+        /// cells). Drives the feature-point lattice frequency `1/size`.
+        size: f32,
+        /// **Disorder**: jitter amount on each feature point within its cell
+        /// (`0` = a regular grid of points, `1` = fully scattered). AE's "Disorder".
+        disorder: f32,
+        /// Output **contrast** about 0.5 (1 = unchanged, >1 punchier, <1 flatter).
+        contrast: f32,
+        /// Output **brightness** offset added after contrast (`-1..=1` useful range).
+        brightness: f32,
+        /// **Invert**: flip the value (`1 − v`) after contrast / brightness, before
+        /// clamping — swaps cell interiors and borders / bright and dark.
+        invert: bool,
+        /// **Evolution**: the phase/time input that animates the field (the key
+        /// motion-design knob). A third hash axis; sweeping it flows the cells.
+        evolution: f32,
+        /// **Random seed**: salts the feature-point hash so different seeds give
+        /// independent cell layouts for the same parameters.
+        seed: u32,
+        /// Output **opacity** (the generated value scales the layer's coverage).
+        opacity: f32,
+    },
 }
 
 impl GenerateEffect {
@@ -279,12 +365,13 @@ impl GenerateEffect {
             GenerateEffect::Checkerboard { .. } => "Checkerboard",
             GenerateEffect::FourColorGradient { .. } => "4-Color Gradient",
             GenerateEffect::Grid { .. } => "Grid",
+            GenerateEffect::CellPattern { .. } => "Cell Pattern",
         }
     }
 
     /// A fresh, sensibly-defaulted instance of each generate effect, for the
     /// "add effect" menu / browser. The order is the registry/browser order.
-    pub fn defaults() -> [GenerateEffect; 5] {
+    pub fn defaults() -> [GenerateEffect; 6] {
         [
             GenerateEffect::FractalNoise {
                 fractal_type: FractalType::Basic,
@@ -338,14 +425,29 @@ impl GenerateEffect {
                 background_opacity: 0.0,
                 opacity: 1.0,
             },
+            GenerateEffect::CellPattern {
+                cell_type: CellType::Bubbles,
+                size: 80.0,
+                disorder: 1.0,
+                contrast: 1.0,
+                brightness: 0.0,
+                invert: false,
+                evolution: 0.0,
+                seed: 0,
+                opacity: 1.0,
+            },
         ]
     }
 
     /// Whether this generator emits **colour** (straight sRGB, decoded to linear
-    /// by the compositor) rather than Fractal Noise's grayscale *linear* value.
-    /// The compositor uses this to pick the right colour-space path.
+    /// by the compositor) rather than the grayscale *linear* value of Fractal
+    /// Noise / Cell Pattern. The compositor uses this to pick the right
+    /// colour-space path.
     pub fn produces_color(&self) -> bool {
-        !matches!(self, GenerateEffect::FractalNoise { .. })
+        !matches!(
+            self,
+            GenerateEffect::FractalNoise { .. } | GenerateEffect::CellPattern { .. }
+        )
     }
 
     /// Sample the generated **straight grayscale value** at a layer-local pixel
@@ -399,6 +501,32 @@ impl GenerateEffect {
                 let contrasted = (centered - 0.5) * contrast.max(0.0) + 0.5 + brightness;
                 overflow.apply(contrasted)
             }
+            GenerateEffect::CellPattern {
+                cell_type,
+                size,
+                disorder,
+                contrast,
+                brightness,
+                invert,
+                evolution,
+                seed,
+                ..
+            } => {
+                // Map the local pixel into cell space: divide by the cell size so a
+                // larger `size` zooms the pattern (bigger cells). Guard a
+                // zero/negative size collapsing the lattice to a point.
+                let s = size.abs().max(1e-3);
+                let cx = lx / s;
+                let cy = ly / s;
+                // The cellular field, shaped by the cell type into ~[0,1].
+                let raw = cellular(cx, cy, evolution, seed, disorder.clamp(0.0, 1.0), cell_type);
+                // Contrast about mid-grey + brightness offset, then optional invert
+                // (mirror about 0.5 is equivalent to `1 − v`), finally clip to [0,1]
+                // so the grayscale value lands in the display range like AE.
+                let contrasted = (raw - 0.5) * contrast.max(0.0) + 0.5 + brightness;
+                let shaped = if invert { 1.0 - contrasted } else { contrasted };
+                shaped.clamp(0.0, 1.0)
+            }
             // For a colour generator the "value" is its colour's luminance, with
             // the colour evaluated at a unit half-extent (the scalar callers don't
             // pass geometry). Mostly used by tests / generic callers; the
@@ -418,7 +546,7 @@ impl GenerateEffect {
     /// opacity multiply. Pure and deterministic.
     pub fn rgba_at(&self, lx: f32, ly: f32, half_w: f32, half_h: f32) -> [f32; 4] {
         match *self {
-            GenerateEffect::FractalNoise { .. } => {
+            GenerateEffect::FractalNoise { .. } | GenerateEffect::CellPattern { .. } => {
                 let v = self.value_at(lx, ly);
                 [v, v, v, v]
             }
@@ -553,7 +681,8 @@ impl GenerateEffect {
             | GenerateEffect::Ramp { opacity, .. }
             | GenerateEffect::Checkerboard { opacity, .. }
             | GenerateEffect::FourColorGradient { opacity, .. }
-            | GenerateEffect::Grid { opacity, .. } => opacity.clamp(0.0, 1.0),
+            | GenerateEffect::Grid { opacity, .. }
+            | GenerateEffect::CellPattern { opacity, .. } => opacity.clamp(0.0, 1.0),
         }
     }
 }
@@ -644,6 +773,97 @@ fn fbm(
         return 0.0;
     }
     sum / norm
+}
+
+/// Evaluate the **cellular / Voronoi** field at cell-space `(x, y)` with the
+/// `z` (evolution) axis flowing the feature points, seeded by `seed`, shaped by
+/// `cell_type` into a value in `~[0,1]`.
+///
+/// One **feature point** lives in each integer cell of the lattice, placed at the
+/// cell origin plus a deterministic per-cell jitter scaled by `disorder` (0 = a
+/// regular grid, 1 = anywhere in the cell). The 3×3 neighbourhood of the sample
+/// point is scanned for the nearest (**F1**) and second-nearest (**F2**) feature
+/// points (Euclidean), and the cell that owns F1 is remembered so per-cell tones
+/// (Plates) are stable. Because the jitter + per-cell tone come from a stable
+/// integer hash of `(cell, seed)` plus the evolution offset, the field is **fully
+/// deterministic** — the same `(x, y, z, seed, disorder, cell_type)` always
+/// yields the same value — and flows smoothly as `z` (evolution) sweeps.
+fn cellular(x: f32, y: f32, z: f32, seed: u32, disorder: f32, cell_type: CellType) -> f32 {
+    // Static Plates is the steady, non-evolving plate field: pin its evolution
+    // axis to 0 so neither the feature-point layout nor the per-cell tone moves as
+    // evolution sweeps. Every other type rides the live `z`.
+    let z = if cell_type == CellType::StaticPlates {
+        0.0
+    } else {
+        z
+    };
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let mut f1 = f32::INFINITY;
+    let mut f2 = f32::INFINITY;
+    // The cell that owns the nearest feature point (for per-cell Plates tone).
+    let (mut best_cx, mut best_cy) = (xi, yi);
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (gx, gy) = (xi + dx, yi + dy);
+            // Per-cell jittered feature point: the cell origin plus a hashed
+            // offset in [0,1)² scaled by `disorder`. The evolution `z` drifts the
+            // offset (a third hash axis) so the points flow as it sweeps.
+            let jx = cell_hash_unit(gx, gy, seed, 0, z);
+            let jy = cell_hash_unit(gx, gy, seed, 1, z);
+            let fx = gx as f32 + 0.5 + (jx - 0.5) * disorder;
+            let fy = gy as f32 + 0.5 + (jy - 0.5) * disorder;
+            let d = ((x - fx).powi(2) + (y - fy).powi(2)).sqrt();
+            if d < f1 {
+                f2 = f1;
+                f1 = d;
+                best_cx = gx;
+                best_cy = gy;
+            } else if d < f2 {
+                f2 = d;
+            }
+        }
+    }
+    match cell_type {
+        // Rounded bubbles: smooth F1 (dark at the point, bright into the cell).
+        CellType::Bubbles => smoothstep01(f1).clamp(0.0, 1.0),
+        // Faceted crystals: the raw F1 distance (hard angular facets).
+        CellType::Crystals => f1.clamp(0.0, 1.0),
+        // Flat plates: one tone per cell, keyed off the owning cell's hash. The
+        // layout (and so which cell owns each pixel) wobbles with evolution.
+        // Static Plates lands here too but with `z` pinned to 0 above, so it holds.
+        CellType::Plates | CellType::StaticPlates => cell_hash_unit(best_cx, best_cy, seed, 2, z),
+        // Borders / web: F2 − F1 is large deep inside a cell and falls to ~0 along
+        // the boundaries between cells (where the two nearest points tie). Invert
+        // it so the value is ~0 in the cell interiors and rises to a bright ridge
+        // *along the borders* — the cell-web look.
+        CellType::Borders => (1.0 - (f2 - f1)).clamp(0.0, 1.0),
+    }
+}
+
+/// A `smoothstep`-shaped ramp of `t` over `[0,1]` (`3t² − 2t³`), clamped at the
+/// ends — rounds the Bubbles cell so it eases dark→bright from the feature point.
+fn smoothstep01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A deterministic pseudo-random value in `[0,1)` for an integer **cell**
+/// `(cx, cy)` + `seed` + channel `salt`, drifted by the evolution `z` (quantised
+/// so it varies smoothly-ish as `z` sweeps but stays a stable hash). Used to place
+/// each cell's feature point and pick its plate tone — never `rand`.
+fn cell_hash_unit(cx: i32, cy: i32, seed: u32, salt: u32, z: f32) -> f32 {
+    // Fold the continuous evolution into the integer hash: scale + floor so it
+    // changes the field as `z` moves while keeping the result a pure function of
+    // the inputs (so a frame renders identically every pass).
+    let zi = (z * 16.0).floor() as i64 as u64;
+    let mut h = (cx as u32 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= (cy as u32 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h ^= (seed as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h ^= (salt as u64).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= zi.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    let m = splitmix64(h);
+    (m >> 11) as f32 / (1u64 << 53) as f32
 }
 
 /// 3-D value-gradient noise at `(x, y, z)`, seeded by `seed`, in roughly
@@ -771,19 +991,22 @@ mod tests {
     #[test]
     fn labels_and_defaults() {
         let d = GenerateEffect::defaults();
-        assert_eq!(d.len(), 5);
+        assert_eq!(d.len(), 6);
         assert_eq!(d[0].label(), "Fractal Noise");
         assert_eq!(d[1].label(), "Gradient Ramp");
         assert_eq!(d[2].label(), "Checkerboard");
         assert_eq!(d[3].label(), "4-Color Gradient");
         assert_eq!(d[4].label(), "Grid");
+        assert_eq!(d[5].label(), "Cell Pattern");
     }
 
     #[test]
     fn produces_color_only_for_color_generators() {
         let d = GenerateEffect::defaults();
+        // Fractal Noise + Cell Pattern are grayscale-linear; the rest are colour.
         assert!(!d[0].produces_color(), "fractal noise is grayscale-linear");
-        for e in &d[1..] {
+        assert!(!d[5].produces_color(), "cell pattern is grayscale-linear");
+        for e in &d[1..5] {
             assert!(e.produces_color(), "{} is a colour generator", e.label());
         }
     }
@@ -1080,7 +1303,8 @@ mod tests {
                 | GenerateEffect::Ramp { opacity, .. }
                 | GenerateEffect::Checkerboard { opacity, .. }
                 | GenerateEffect::FourColorGradient { opacity, .. }
-                | GenerateEffect::Grid { opacity, .. } => *opacity = 2.0,
+                | GenerateEffect::Grid { opacity, .. }
+                | GenerateEffect::CellPattern { opacity, .. } => *opacity = 2.0,
             });
             assert_eq!(e.opacity(), 1.0, "{} opacity clamps", e.label());
         }
@@ -1417,11 +1641,278 @@ mod tests {
     #[test]
     fn color_generators_are_deterministic() {
         for e in &GenerateEffect::defaults()[1..] {
+            // Cell Pattern is grayscale-linear (not a colour generator), so skip it
+            // here — its determinism is covered by `cell_pattern_is_deterministic`.
+            if !e.produces_color() {
+                continue;
+            }
             for &(x, y) in &[(0.0, 0.0), (33.0, -17.0), (-90.0, 120.0)] {
                 let a = e.rgba_at(x, y, 100.0, 100.0);
                 let b = e.rgba_at(x, y, 100.0, 100.0);
                 assert_eq!(a, b, "{} must be deterministic", e.label());
             }
         }
+    }
+
+    // --- Cell Pattern -------------------------------------------------------
+
+    /// A default Cell Pattern (the Bubbles type) for tweaking in tests.
+    fn cells() -> GenerateEffect {
+        GenerateEffect::defaults()[5]
+    }
+
+    /// Replace the `cell_type` of a Cell Pattern (terse test helper).
+    fn with_type(e: GenerateEffect, ct: CellType) -> GenerateEffect {
+        with(e, |x| {
+            if let GenerateEffect::CellPattern { cell_type, .. } = x {
+                *cell_type = ct;
+            }
+        })
+    }
+
+    #[test]
+    fn cell_pattern_is_grayscale_not_colour() {
+        // Cell Pattern is the sixth generator and, like Fractal Noise, is
+        // grayscale-linear (not an sRGB colour generator).
+        let d = GenerateEffect::defaults();
+        assert_eq!(d.len(), 6);
+        assert_eq!(d[5].label(), "Cell Pattern");
+        assert!(!d[5].produces_color(), "cell pattern is grayscale-linear");
+        // rgba_at returns value in all of R/G/B and A (a straight grayscale fill).
+        let [r, g, b, a] = d[5].rgba_at(13.0, 7.0, 100.0, 100.0);
+        assert_eq!(r, g, "grayscale: R == G");
+        assert_eq!(g, b, "grayscale: G == B");
+        assert_eq!(a, r, "alpha carries the value too");
+    }
+
+    #[test]
+    fn cell_pattern_is_deterministic() {
+        // Same (params, pixel) → same value, every call (the cache / render need
+        // this). Checked across every cell type.
+        for ct in CellType::ALL {
+            let e = with_type(cells(), ct);
+            for &(x, y) in &[(0.0, 0.0), (13.0, -7.0), (200.0, 130.0), (-50.5, 88.25)] {
+                let a = e.value_at(x, y);
+                let b = e.value_at(x, y);
+                assert_eq!(a, b, "{} must be deterministic at ({x},{y})", ct.label());
+            }
+        }
+    }
+
+    #[test]
+    fn cell_pattern_value_in_range() {
+        // Every cell type lands in [0,1] across the frame (clipped output).
+        for ct in CellType::ALL {
+            let e = with_type(cells(), ct);
+            for i in 0..200 {
+                let x = (i as f32) * 3.7 - 100.0;
+                let y = (i as f32) * -2.1 + 40.0;
+                let v = e.value_at(x, y);
+                assert!(
+                    (0.0..=1.0).contains(&v),
+                    "{} value out of range: {v}",
+                    ct.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cell_pattern_seed_changes_the_layout() {
+        // A different seed re-rolls the feature points → a different field.
+        let a = cells();
+        let b = with(cells(), |e| {
+            if let GenerateEffect::CellPattern { seed, .. } = e {
+                *seed = 12345;
+            }
+        });
+        let mut max_diff = 0.0f32;
+        for i in 0..64 {
+            let x = i as f32 * 5.0;
+            let y = i as f32 * 3.0;
+            max_diff = max_diff.max((a.value_at(x, y) - b.value_at(x, y)).abs());
+        }
+        assert!(max_diff > 0.05, "seed should change the layout, max diff {max_diff}");
+    }
+
+    #[test]
+    fn cell_pattern_evolution_flows_the_field() {
+        // Sweeping evolution must move the field — the keyframable motion knob.
+        let a = cells();
+        let b = with(cells(), |e| {
+            if let GenerateEffect::CellPattern { evolution, .. } = e {
+                *evolution = 5.0;
+            }
+        });
+        let mut max_diff = 0.0f32;
+        for i in 0..64 {
+            let x = i as f32 * 5.0;
+            let y = i as f32 * 3.0;
+            max_diff = max_diff.max((a.value_at(x, y) - b.value_at(x, y)).abs());
+        }
+        assert!(max_diff > 0.05, "evolution should flow the field, max diff {max_diff}");
+    }
+
+    #[test]
+    fn cell_pattern_f1_is_zero_at_a_feature_point() {
+        // Crystals output the raw F1 distance. With no disorder the feature points
+        // sit at cell centres (size px apart, offset half a cell): at a centre F1 is
+        // 0 and the value is 0, rising as we move away from it.
+        let e = with(with_type(cells(), CellType::Crystals), |x| {
+            if let GenerateEffect::CellPattern { size, disorder, .. } = x {
+                *size = 100.0;
+                *disorder = 0.0;
+            }
+        });
+        // Cell (0,0)'s feature point with no disorder is at local (0.5,0.5) cells =
+        // (50,50) px. F1 there is ~0, so the Crystals value is ~0.
+        let at_point = e.value_at(50.0, 50.0);
+        assert!(at_point < 1e-3, "F1 ~0 at a feature point, got {at_point}");
+        // A little away from the point F1 grows, so the value rises.
+        let near = e.value_at(50.0 + 25.0, 50.0);
+        assert!(near > at_point + 0.1, "F1 grows away from the point ({near} vs {at_point})");
+    }
+
+    #[test]
+    fn cell_pattern_borders_high_at_boundary_low_in_interior() {
+        // Borders is the cell-web: ~0 deep inside a cell, high along the boundary
+        // between two cells (where F1 ≈ F2). With no disorder on a 100 px grid the
+        // feature points are at cell centres (…, 50, 150, …); the midline x=100 is
+        // equidistant from the (0,0) and (1,0) points, i.e. on a boundary.
+        let e = with(with_type(cells(), CellType::Borders), |x| {
+            if let GenerateEffect::CellPattern { size, disorder, .. } = x {
+                *size = 100.0;
+                *disorder = 0.0;
+            }
+        });
+        let on_boundary = e.value_at(100.0, 50.0); // halfway between two points
+        let in_interior = e.value_at(50.0, 50.0); // right at a feature point
+        assert!(
+            on_boundary > 0.9,
+            "borders bright on the boundary, got {on_boundary}"
+        );
+        assert!(
+            in_interior < 0.5,
+            "borders dark in the cell interior, got {in_interior}"
+        );
+        assert!(
+            on_boundary > in_interior + 0.4,
+            "boundary clearly brighter than interior ({on_boundary} vs {in_interior})"
+        );
+    }
+
+    #[test]
+    fn cell_pattern_invert_is_symmetric() {
+        // Inverting flips the value about the clip range: at pixels where the plain
+        // value isn't clamped, inverted == 1 − plain. Use Crystals so the value is
+        // well inside (0,1) for many pixels.
+        let plain = with(with_type(cells(), CellType::Crystals), |x| {
+            if let GenerateEffect::CellPattern { invert, .. } = x {
+                *invert = false;
+            }
+        });
+        let inv = with(plain, |x| {
+            if let GenerateEffect::CellPattern { invert, .. } = x {
+                *invert = true;
+            }
+        });
+        let mut checked = 0;
+        for i in 0..200 {
+            let x = i as f32 * 3.3;
+            let y = i as f32 * 1.7;
+            let p = plain.value_at(x, y);
+            // Only assert where the plain value is strictly inside the range (so
+            // neither side hit the clamp and broke the 1−p symmetry).
+            if (0.02..=0.98).contains(&p) {
+                assert!(
+                    (inv.value_at(x, y) - (1.0 - p)).abs() < 1e-4,
+                    "invert should mirror the value about 0.5"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 10, "expected some mid-range pixels to check, got {checked}");
+    }
+
+    #[test]
+    fn cell_pattern_types_differ() {
+        // Each cell type shapes the same feature points differently, so the fields
+        // are visibly distinct (pairwise).
+        for (a, b) in [
+            (CellType::Bubbles, CellType::Crystals),
+            (CellType::Crystals, CellType::Borders),
+            (CellType::Plates, CellType::Bubbles),
+        ] {
+            let ea = with_type(cells(), a);
+            let eb = with_type(cells(), b);
+            let mut max_diff = 0.0f32;
+            for i in 0..64 {
+                let x = i as f32 * 4.0 + 1.0;
+                let y = i as f32 * 2.0 - 3.0;
+                max_diff = max_diff.max((ea.value_at(x, y) - eb.value_at(x, y)).abs());
+            }
+            assert!(
+                max_diff > 0.05,
+                "{} should differ from {}, max diff {max_diff}",
+                a.label(),
+                b.label()
+            );
+        }
+    }
+
+    #[test]
+    fn cell_pattern_static_plates_ignore_evolution() {
+        // Static Plates' per-cell tone is independent of evolution (the steadier
+        // plate field), so sweeping evolution leaves the value unchanged.
+        let a = with_type(cells(), CellType::StaticPlates);
+        let b = with(a, |e| {
+            if let GenerateEffect::CellPattern { evolution, .. } = e {
+                *evolution = 7.0;
+            }
+        });
+        for i in 0..32 {
+            let x = i as f32 * 6.0;
+            let y = i as f32 * 4.0;
+            assert_eq!(
+                a.value_at(x, y),
+                b.value_at(x, y),
+                "static plates ignore evolution"
+            );
+        }
+    }
+
+    #[test]
+    fn cell_pattern_disorder_jitters_the_points() {
+        // Adding disorder displaces the feature points, so the field changes vs the
+        // regular (disorder = 0) grid.
+        let ordered = with(with_type(cells(), CellType::Crystals), |x| {
+            if let GenerateEffect::CellPattern { disorder, .. } = x {
+                *disorder = 0.0;
+            }
+        });
+        let messy = with(ordered, |x| {
+            if let GenerateEffect::CellPattern { disorder, .. } = x {
+                *disorder = 1.0;
+            }
+        });
+        let mut max_diff = 0.0f32;
+        for i in 0..64 {
+            let x = i as f32 * 4.0;
+            let y = i as f32 * 3.0;
+            max_diff = max_diff.max((ordered.value_at(x, y) - messy.value_at(x, y)).abs());
+        }
+        assert!(max_diff > 0.02, "disorder should jitter the points, max diff {max_diff}");
+    }
+
+    #[test]
+    fn cell_pattern_zero_size_does_not_panic() {
+        // A degenerate zero size must be guarded (no div-by-zero / NaN).
+        let e = with(cells(), |x| {
+            if let GenerateEffect::CellPattern { size, .. } = x {
+                *size = 0.0;
+            }
+        });
+        let v = e.value_at(10.0, 20.0);
+        assert!(v.is_finite(), "zero size must not produce NaN/inf");
     }
 }

@@ -2126,7 +2126,7 @@ fn precomp_freeze_time_remap_holds_one_source_frame() {
 
 // --- Generate render-path ---------------------------------------------------
 
-use crate::comp::{FractalType, GenerateEffect, Overflow, RampShape};
+use crate::comp::{CellType, FractalType, GenerateEffect, Overflow, RampShape};
 
 /// A full-opacity default Fractal Noise that always covers (opacity 1, no clip
 /// killing the center). Scale tuned so several features fall inside the quad.
@@ -2396,6 +2396,58 @@ fn checkerboard_color_decodes_through_srgb() {
     assert!((r as i32 - 128).abs() <= 3, "r ~128, got {r}");
     assert!((g as i32 - 64).abs() <= 3, "g ~64, got {g}");
     assert!((b as i32 - 191).abs() <= 3, "b ~191, got {b}");
+}
+
+#[test]
+fn cell_pattern_render_fills_quad_grayscale() {
+    // Cell Pattern is grayscale-linear (like Fractal Noise): it fills the quad, and
+    // a covered pixel is grey (R ≈ G ≈ B) rather than a tinted colour.
+    let cells = GenerateEffect::CellPattern {
+        cell_type: CellType::Crystals,
+        size: 8.0,
+        disorder: 1.0,
+        contrast: 1.0,
+        brightness: 0.3, // lift so the centre is visibly covered
+        invert: false,
+        evolution: 0.0,
+        seed: 0,
+        opacity: 1.0,
+    };
+    let f = render_frame(&generated(cells), 0.0);
+    let [r, g, b, a] = f.pixel(32, 32);
+    assert!(a > 0, "cell pattern covers the quad centre");
+    assert!(
+        (r as i32 - g as i32).abs() <= 1 && (g as i32 - b as i32).abs() <= 1,
+        "grayscale fill: r={r} g={g} b={b}"
+    );
+}
+
+#[test]
+fn cell_pattern_evolution_track_drives_the_field_over_time() {
+    // A keyframed evolution track flows the cells over comp time (Cell Pattern
+    // shares the keyframable evolution infra with Fractal Noise): two times differ.
+    let mut c = generated(GenerateEffect::CellPattern {
+        cell_type: CellType::Bubbles,
+        size: 8.0,
+        disorder: 1.0,
+        contrast: 1.0,
+        brightness: 0.0,
+        invert: false,
+        evolution: 0.0,
+        seed: 0,
+        opacity: 1.0,
+    });
+    c.duration = 2.0;
+    c.layers[0].generate_evolution.set_key(0.0, 0.0);
+    c.layers[0].generate_evolution.set_key(2.0, 8.0);
+    let f0 = render_frame(&c, 0.0);
+    let f1 = render_frame(&c, 2.0);
+    assert_ne!(
+        f0.pixels, f1.pixels,
+        "a keyframed evolution track should flow the cells over time"
+    );
+    // And it's still deterministic at a fixed time.
+    assert_eq!(render_frame(&c, 1.0).pixels, render_frame(&c, 1.0).pixels);
 }
 
 // --- Stylize effects ----------------------------------------------------

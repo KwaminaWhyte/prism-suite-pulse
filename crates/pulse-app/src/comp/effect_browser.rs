@@ -352,6 +352,24 @@ pub const REGISTRY: &[BrowserEntry] = &[
         default_index: 4,
         keywords: &["grid", "lines", "graph", "guides", "mesh", "checker"],
     },
+    BrowserEntry {
+        name: "Cell Pattern",
+        category: Category::Generate,
+        stack: Stack::Generate,
+        default_index: 5,
+        keywords: &[
+            "cell",
+            "cells",
+            "voronoi",
+            "worley",
+            "cellular",
+            "bubbles",
+            "crystals",
+            "plates",
+            "organic",
+            "web",
+        ],
+    },
     // --- Distort (DistortEffect::defaults() order) --------------------------
     BrowserEntry {
         name: "Corner Pin",
@@ -756,6 +774,7 @@ mod tests {
             ("Checkerboard", ["checker", "checkerboard"]),
             ("4-Color Gradient", ["4 color", "corner"]),
             ("Grid", ["grid", "lines"]),
+            ("Cell Pattern", ["cell", "voronoi"]),
         ] {
             for q in queries {
                 let hits = filter(q);
@@ -765,13 +784,13 @@ mod tests {
                 );
             }
         }
-        // The Generate folder holds all five generators on an empty query.
+        // The Generate folder holds all six generators on an empty query.
         let groups = filter_grouped("");
         let gen = groups
             .iter()
             .find(|(c, _)| *c == Category::Generate)
             .expect("Generate folder present");
-        assert_eq!(gen.1.len(), 5, "five generators in the Generate folder");
+        assert_eq!(gen.1.len(), 6, "six generators in the Generate folder");
     }
 
     #[test]
