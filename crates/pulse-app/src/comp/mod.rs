@@ -26,6 +26,7 @@ mod distort;
 mod effect;
 mod effect_browser;
 mod expr;
+mod fonts;
 mod footage;
 mod generate;
 mod key;
@@ -47,6 +48,7 @@ pub use distort::{apply_distort_effects, DistortEffect, PolarKind};
 pub use effect::{apply_effects, Effect, LayerKind};
 pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
 pub use expr::{last_error as expr_last_error, ExprCtx};
+pub use fonts::{families as font_families, is_available as font_is_available};
 pub use footage::{
     source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
 };
@@ -592,6 +594,7 @@ impl Comp {
             tracking: 12.0,
             leading: 0.0,
             align: TextAlign::Center,
+            font_family: None,
             fill: Some(Fill {
                 color: [0.96, 0.97, 1.0],
                 opacity: 1.0,

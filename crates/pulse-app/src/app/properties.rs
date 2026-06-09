@@ -4,13 +4,19 @@
 
 use super::PulseApp;
 use crate::comp::{
-    blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, CellType, DistortEffect,
-    Ease, Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, KeyEffect,
-    LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RadialKind,
-    RampShape, ShapeItem, ShapePrimitive, SpatialEffect, Stroke, StylizeEffect, TextAlign, Track,
+    blend_label, expr_last_error, font_families, font_is_available, source_from_path, AlphaMode,
+    BlendMode, CellType, DistortEffect, Ease, Effect, ExprCtx, Fill, FootageSource, FractalType,
+    GenerateEffect, Interp, KeyEffect, LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Overflow,
+    PolarKind, Prop, RadialKind, RampShape, ShapeItem, ShapePrimitive, SpatialEffect, Stroke,
+    StylizeEffect, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
+
+/// The Font dropdown's first entry, mapping to a `None` family — the default,
+/// dependency-free **built-in stroke font** that keeps old projects rendering
+/// identically. Every other entry is a real outline family.
+const STROKE_FONT_LABEL: &str = "Built-in stroke font";
 
 impl PulseApp {
     pub(super) fn properties_panel(&mut self, root: &mut egui::Ui) {
@@ -403,8 +409,9 @@ impl PulseApp {
     }
 
     /// The text layer's content editor: a multi-line string, type settings
-    /// (size / tracking / leading / alignment), and a fill / stroke (reused from
-    /// the shape system). The text is drawn with the built-in stroke font.
+    /// (size / tracking / leading / alignment), a **font family** (the built-in
+    /// stroke font or a real outline family), and a fill / stroke (reused from the
+    /// shape system).
     fn text_section(&mut self, ui: &mut egui::Ui, idx: usize) {
         let text = &mut self.comp.layers[idx].text;
 
@@ -443,6 +450,47 @@ impl PulseApp {
                     }
                 });
         });
+
+        // Font family: the built-in stroke font (`None`) or a real outline family
+        // enumerated from the system via `fontdb`. The default entry maps back to
+        // `None`, so picking it restores the back-compat stroke font. A selected
+        // family that turns up missing renders via the bundled fallback face.
+        ui.horizontal(|ui| {
+            ui.label("Font");
+            let selected = match &text.font_family {
+                None => STROKE_FONT_LABEL,
+                Some(f) => f.as_str(),
+            };
+            egui::ComboBox::from_id_salt(("text_font", idx))
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(text.font_family.is_none(), STROKE_FONT_LABEL)
+                        .clicked()
+                    {
+                        text.font_family = None;
+                    }
+                    for fam in font_families() {
+                        let chosen = text.font_family.as_deref() == Some(fam.as_str());
+                        if ui.selectable_label(chosen, fam).clicked() {
+                            text.font_family = Some(fam.clone());
+                        }
+                    }
+                });
+        });
+        // A selected family that isn't installed on this machine renders via the
+        // bundled fallback face — surface that so the look isn't a silent mystery.
+        if let Some(fam) = &text.font_family {
+            if !font_is_available(fam) {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.weak(
+                        egui::RichText::new(format!("\"{fam}\" not installed — using fallback"))
+                            .small(),
+                    );
+                });
+            }
+        }
 
         // Fill toggle + color/opacity.
         ui.horizontal(|ui| {

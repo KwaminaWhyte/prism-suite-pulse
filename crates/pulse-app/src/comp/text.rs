@@ -1,23 +1,38 @@
-//! Text layers: a string laid out into glyphs drawn by a self-contained,
-//! dependency-free **stroke vector font**.
+//! Text layers: a string laid out into glyphs, drawn either by a self-contained,
+//! dependency-free **stroke vector font** (the default / back-compat path) or by
+//! a selected **real outline font** (TrueType faces via `fontdb` + `ttf-parser`).
 //!
 //! A [`TextLayer`] is a string plus type settings (font size, tracking, leading,
-//! alignment) and a [`Fill`](super::shape::Fill) / [`Stroke`](super::shape::Stroke)
-//! reused from the shape system. Each visible character maps to a small set of
-//! **polyline strokes** authored on a unit em grid (`glyph` below); the renderer
-//! scales those strokes by the font size, lays them out left-to-right with
-//! per-line alignment, and rasterizes coverage as a thickened band around the
-//! nearest stroke (a "line font"), antialiased the same way shapes are.
+//! alignment), an optional `font_family`, and a [`Fill`](super::shape::Fill) /
+//! [`Stroke`](super::shape::Stroke) reused from the shape system.
+//!
+//! **Stroke font (`font_family == None`).** Each visible character maps to a
+//! small set of **polyline strokes** authored on a unit em grid (`glyph` below);
+//! the renderer scales those strokes by the font size, lays them out
+//! left-to-right with per-line alignment, and rasterizes coverage as a thickened
+//! band around the nearest stroke (a "line font"), antialiased the same way
+//! shapes are. This is the original, self-contained path: `None` (the default,
+//! and every legacy `.pulse` file, which carries no `font_family` key) renders
+//! **identically** to before this module gained outline support.
+//!
+//! **Outline font (`font_family == Some(family)`).** The string is laid out into
+//! real glyph **outlines** read from the chosen TrueType face — advances + the
+//! glyph contours come from [`ttf_parser`], the family is enumerated / resolved
+//! by [`super::fonts`]. Each glyph contour flattens to a closed layer-local
+//! polygon; coverage is the **same antialiased even-odd polygon fill the shape
+//! layer rasterizes** (`point_in_polygon` + nearest-edge AA), so glyphs read as
+//! crisp filled shapes. An unknown / unloadable family falls back to the bundled
+//! default face (text never vanishes).
 //!
 //! Everything here is pure and time-agnostic — the layout produces layer-local
 //! geometry that rides the layer's transform (position / scale / rotation /
 //! parent) exactly like a shape layer, so text composes with masks, mattes,
-//! spatial effects, and motion blur for free. There is no font-shaping
-//! dependency: the built-in font is intentionally simple (uppercased, monospace
-//! cell) so the feature is self-contained and unit-testable. Per-character
-//! animators and real OpenType/variable fonts are a later step.
+//! spatial effects, and motion blur for free, whichever font path is active.
+//! Still open: per-character animators, weight / style sub-selection, kerning /
+//! full OpenType shaping (outline advances are plain horizontal metrics), and
+//! variable-font axes.
 
-use super::mask::dist_to_segment;
+use super::mask::{dist_to_polygon, dist_to_segment, point_in_polygon};
 use super::shape::{Fill, Stroke};
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +87,14 @@ pub struct TextLayer {
     pub leading: f32,
     /// Per-line horizontal alignment.
     pub align: TextAlign,
+    /// The real font family to render with. `None` (the default, and every legacy
+    /// `.pulse` file — `#[serde(default)]` so the absent key deserializes to
+    /// `None`) keeps the built-in **stroke font**, so old projects render
+    /// identically. `Some(family)` switches to **real glyph outlines** from that
+    /// TrueType face (resolved via [`super::fonts`]; an unknown / unloadable
+    /// family falls back to the bundled default face, never to nothing).
+    #[serde(default)]
+    pub font_family: Option<String>,
     /// Fill of the glyph pen body (the strokes' interior). `None` draws only the
     /// outline stroke (if any).
     pub fill: Option<Fill>,
@@ -87,6 +110,7 @@ impl Default for TextLayer {
             tracking: 0.0,
             leading: 0.0,
             align: TextAlign::default(),
+            font_family: None,
             fill: Some(Fill::default()),
             stroke: None,
         }
@@ -98,6 +122,13 @@ impl TextLayer {
     /// stroke).
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() || (self.fill.is_none() && self.stroke.is_none())
+    }
+
+    /// Whether this layer renders with **real outline glyphs** (a family is
+    /// selected) rather than the built-in **stroke font** (`font_family` is
+    /// `None`). The renderer branches on this to pick the layout + rasterizer.
+    pub fn uses_outline(&self) -> bool {
+        self.font_family.is_some()
     }
 
     /// The resolved line leading in comp px (auto = `size·1.2`).
@@ -270,6 +301,347 @@ impl TextLayer {
             }
         }
         out
+    }
+
+    // ---- Real outline-font path (`font_family == Some(..)`) ---------------
+    //
+    // Mirrors the stroke-font methods above (`segments` / `local_bounds` /
+    // `coverage_at`) but lays the string out into **filled glyph outlines** from a
+    // TrueType face and rasterizes them with the *shape layer's* even-odd polygon
+    // fill, so a family-selected text layer reads as crisp filled glyphs and
+    // composes with the whole pipeline exactly like a shape.
+
+    /// Lay the whole string out into a flat list of **closed glyph contours** in
+    /// layer-local space (comp px, origin at the layer's geometric center, `+y`
+    /// down) using the selected font family's real outlines. Each contour is a
+    /// closed polygon (the closing edge is implicit, as the shape system expects).
+    ///
+    /// The block is vertically centered about the origin and each line is aligned
+    /// horizontally per [`TextAlign`], matching the stroke font's layout so the
+    /// two paths sit in the same place. Advances and contours come from the face's
+    /// horizontal metrics + glyph outlines (plus the layer's `tracking` /
+    /// `leading`); quadratic / cubic glyph curves are flattened to line segments.
+    /// Returns an empty list for empty text, a missing family that even the
+    /// fallback can't parse, or a non-positive size.
+    pub fn outline_contours(&self) -> Vec<Vec<(f32, f32)>> {
+        self.outline_layout().map(|l| l.contours).unwrap_or_default()
+    }
+
+    /// The layer-local AABB `(min_x, min_y, max_x, max_y)` of the laid-out
+    /// **outline** glyphs, padded by any stroke half-width, or `None` when nothing
+    /// draws. The outline twin of [`local_bounds`](Self::local_bounds).
+    pub fn outline_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        let contours = self.outline_contours();
+        let pad = self.stroke.map(|s| s.width * 0.5).unwrap_or(0.0).max(0.0) + 1.0;
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut any = false;
+        for contour in &contours {
+            for &(x, y) in contour {
+                any = true;
+                min_x = min_x.min(x - pad);
+                min_y = min_y.min(y - pad);
+                max_x = max_x.max(x + pad);
+                max_y = max_y.max(y + pad);
+            }
+        }
+        any.then_some((min_x, min_y, max_x, max_y))
+    }
+
+    /// The straight sRGB RGBA the **outline** text contributes at layer-local
+    /// `(px, py)`, given its pre-laid-out `contours` (from
+    /// [`outline_contours`](Self::outline_contours)).
+    ///
+    /// The outline twin of [`coverage_at`](Self::coverage_at): the fill is an
+    /// antialiased **even-odd** polygon fill (so glyph holes — the inside of `o`,
+    /// `A`, `8` — are carved out) reusing the shape system's
+    /// [`point_in_polygon`](super::mask::point_in_polygon) test +
+    /// nearest-edge-distance AA, and the optional stroke is a band of `width`
+    /// straddling the glyph boundary, composited over the fill. Returns `a = 0`
+    /// where the point contributes nothing.
+    pub fn outline_coverage_at(&self, contours: &[Vec<(f32, f32)>], px: f32, py: f32) -> [f32; 4] {
+        if contours.is_empty() {
+            return [0.0; 4];
+        }
+        const AA: f32 = 0.75;
+        // Distance to the nearest contour edge, and even-odd inside-ness folded
+        // across every contour (an XOR of per-contour ray casts), so holes count.
+        let mut dist = f32::INFINITY;
+        let mut inside = false;
+        for contour in contours {
+            if contour.len() < 3 {
+                continue;
+            }
+            dist = dist.min(dist_to_polygon(contour, px, py));
+            if point_in_polygon(contour, px, py) {
+                inside = !inside;
+            }
+        }
+        if !dist.is_finite() {
+            return [0.0; 4];
+        }
+        // Signed distance to the glyph boundary: positive inside, negative out.
+        let signed = if inside { dist } else { -dist };
+
+        let mut out = [0.0f32; 4];
+        if let Some(fill) = self.fill {
+            // Fill: 1 well inside, ramping to 0 across ±AA around the boundary —
+            // the shape fill's exact recipe.
+            let cov = ((signed + AA) / (2.0 * AA)).clamp(0.0, 1.0) * fill.opacity.clamp(0.0, 1.0);
+            if cov > 0.0 {
+                out = [fill.color[0], fill.color[1], fill.color[2], cov];
+            }
+        }
+        if let Some(stroke) = self.stroke {
+            if stroke.width > 0.0 {
+                // A band of `width` centered on the boundary: covers |signed| <=
+                // width/2 (ramped by AA at each edge of the band).
+                let half = stroke.width * 0.5;
+                let band = ((half - dist) / (2.0 * AA) + 0.5).clamp(0.0, 1.0)
+                    * stroke.opacity.clamp(0.0, 1.0);
+                if band > 0.0 {
+                    out = over_straight(
+                        [stroke.color[0], stroke.color[1], stroke.color[2], band],
+                        out,
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// Lay the string out into glyph contours + measure each line, using the
+    /// resolved face. `None` only when the text/size is empty or even the fallback
+    /// face fails to parse (so callers degrade to drawing nothing, never panic).
+    fn outline_layout(&self) -> Option<OutlineLayout> {
+        let family = self.font_family.as_deref()?;
+        let size = self.size.max(0.0);
+        if size <= 0.0 || self.text.is_empty() {
+            return None;
+        }
+        let face_bytes = super::fonts::resolve(family);
+        let face = ttf_parser::Face::parse(&face_bytes.data, face_bytes.index).ok()?;
+        let upem = (face.units_per_em() as f32).max(1.0);
+        let scale = size / upem;
+        let leading = self.line_leading();
+
+        // Measure + build each line independently (pen at x = 0, baseline at y = 0
+        // in line-local space), then place lines: vertically center the block and
+        // horizontally align each line within the widest one — the same framing
+        // the stroke font uses, so the two paths register.
+        let lines: Vec<OutlineLine> = self
+            .lines()
+            .map(|line| layout_outline_line(&face, line, scale, self.tracking))
+            .collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let widest = lines.iter().map(|l| l.width).fold(0.0_f32, f32::max);
+        let block_h = (lines.len().saturating_sub(1)) as f32 * leading;
+        // Each line's baseline y so the cap-to-baseline band straddles `line_cy`.
+        // The glyph contours are built y-down with the baseline at line-local
+        // y = 0; we shift them so a glyph's vertical mass sits on `line_cy`. Using
+        // the face ascent centers the visual block like the stroke font's box.
+        let ascent = (face.ascender() as f32).max(upem * 0.8) * scale;
+        let descent = (-face.descender() as f32).max(0.0) * scale;
+        let half_cap = (ascent - descent) * 0.5;
+
+        let mut contours: Vec<Vec<(f32, f32)>> = Vec::new();
+        let mut line_cy = -block_h * 0.5;
+        for line in &lines {
+            let x_off = match self.align {
+                TextAlign::Left => -widest * 0.5,
+                TextAlign::Center => -line.width * 0.5,
+                TextAlign::Right => widest * 0.5 - line.width,
+            };
+            // Baseline in layer-local y for this line: line center plus half the
+            // cap band so cap-height sits above center and the baseline below.
+            let baseline_y = line_cy + half_cap;
+            for contour in &line.contours {
+                contours.push(
+                    contour
+                        .iter()
+                        .map(|&(x, y)| (x + x_off, y + baseline_y))
+                        .collect(),
+                );
+            }
+            line_cy += leading;
+        }
+        Some(OutlineLayout { contours })
+    }
+}
+
+/// A laid-out outline block: every glyph contour in layer-local space.
+struct OutlineLayout {
+    contours: Vec<Vec<(f32, f32)>>,
+}
+
+/// One measured outline line: its advance width and glyph contours, with the pen
+/// at x = 0 and the baseline at line-local y = 0 (y grows downward).
+struct OutlineLine {
+    width: f32,
+    contours: Vec<Vec<(f32, f32)>>,
+}
+
+/// Build one baseline run of outline glyphs: walk the characters, extract each
+/// glyph's flattened contours at the running pen x, and advance the pen by the
+/// glyph's horizontal advance plus the layer's `tracking`. The trailing tracking
+/// past the last glyph is dropped so the line width is tight (matching the stroke
+/// font's measure). Contours come back y-down (baseline at y = 0).
+fn layout_outline_line(
+    face: &ttf_parser::Face,
+    line: &str,
+    scale: f32,
+    tracking: f32,
+) -> OutlineLine {
+    let mut pen_x = 0.0_f32;
+    let mut contours: Vec<Vec<(f32, f32)>> = Vec::new();
+    for ch in line.chars() {
+        let advance = match face.glyph_index(ch) {
+            Some(gid) => {
+                if !ch.is_whitespace() {
+                    let mut builder = OutlineFlattener::new(pen_x, scale);
+                    if face.outline_glyph(gid, &mut builder).is_some() {
+                        contours.extend(builder.finish());
+                    }
+                }
+                face.glyph_hor_advance(gid)
+                    .map(|a| a as f32 * scale)
+                    .unwrap_or_else(|| space_advance(face, scale))
+            }
+            // No glyph for this char: advance by a space so layout stays sane.
+            None => space_advance(face, scale),
+        };
+        pen_x += advance + tracking;
+    }
+    // Tight width: total pen travel less the trailing tracking after the last
+    // glyph (so a single-char line measures its glyph advance, not advance+track).
+    let width = (pen_x - tracking).max(0.0);
+    OutlineLine { width, contours }
+}
+
+/// A reasonable advance for a missing / whitespace glyph: the face's space
+/// advance if it has one, else half the em.
+fn space_advance(face: &ttf_parser::Face, scale: f32) -> f32 {
+    face.glyph_index(' ')
+        .and_then(|g| face.glyph_hor_advance(g))
+        .map(|a| a as f32 * scale)
+        .unwrap_or(face.units_per_em() as f32 * 0.5 * scale)
+}
+
+/// Number of straight chords each glyph curve (quadratic / cubic) is flattened
+/// into. Fixed subdivision keeps the polygon fill cheap and deterministic, and is
+/// plenty smooth at motion-graphics sizes (mirrors the shape system's `ARC_STEPS`
+/// approach).
+const CURVE_STEPS: u32 = 8;
+
+/// A [`ttf_parser::OutlineBuilder`] that flattens a glyph's outline into closed
+/// layer-local polygons (one per glyph contour). TrueType outlines are y-up;
+/// layer space is y-down with the baseline at y = 0, so every y is negated. The
+/// pen-x offset and em→px `scale` are folded in as points arrive. Quadratic and
+/// cubic segments are tessellated into [`CURVE_STEPS`] line chords each, so the
+/// shape system's polygon fill consumes the result unchanged.
+struct OutlineFlattener {
+    pen_x: f32,
+    scale: f32,
+    /// Completed contours.
+    done: Vec<Vec<(f32, f32)>>,
+    /// Current contour's points (layer-local).
+    cur: Vec<(f32, f32)>,
+    /// Last emitted point (the current pen position), for curve starts.
+    last: (f32, f32),
+}
+
+impl OutlineFlattener {
+    fn new(pen_x: f32, scale: f32) -> Self {
+        Self {
+            pen_x,
+            scale,
+            done: Vec::new(),
+            cur: Vec::new(),
+            last: (0.0, 0.0),
+        }
+    }
+
+    /// Map a font-space point to layer space (apply pen offset + scale, flip y).
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.pen_x + x * self.scale, -y * self.scale)
+    }
+
+    /// Finish the in-progress contour (if any) and return every contour built.
+    fn finish(mut self) -> Vec<Vec<(f32, f32)>> {
+        self.flush();
+        self.done
+    }
+
+    /// Close out the current contour into `done` (glyph contours are closed
+    /// regions; the polygon fill closes the implicit last edge). Drops degenerate
+    /// (< 3-point) contours.
+    fn flush(&mut self) {
+        if self.cur.len() >= 3 {
+            self.done.push(std::mem::take(&mut self.cur));
+        } else {
+            self.cur.clear();
+        }
+    }
+}
+
+impl ttf_parser::OutlineBuilder for OutlineFlattener {
+    fn move_to(&mut self, x: f32, y: f32) {
+        // Starting a new contour: flush any previous one.
+        self.flush();
+        let p = self.map(x, y);
+        self.cur.push(p);
+        self.last = p;
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = self.map(x, y);
+        self.cur.push(p);
+        self.last = p;
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let a = self.last;
+        let ctrl = self.map(x1, y1);
+        let end = self.map(x, y);
+        // Tessellate the quadratic Bézier into line chords.
+        for s in 1..=CURVE_STEPS {
+            let t = s as f32 / CURVE_STEPS as f32;
+            let mt = 1.0 - t;
+            let bx = mt * mt * a.0 + 2.0 * mt * t * ctrl.0 + t * t * end.0;
+            let by = mt * mt * a.1 + 2.0 * mt * t * ctrl.1 + t * t * end.1;
+            self.cur.push((bx, by));
+        }
+        self.last = end;
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let a = self.last;
+        let c1 = self.map(x1, y1);
+        let c2 = self.map(x2, y2);
+        let end = self.map(x, y);
+        // Tessellate the cubic Bézier into line chords.
+        for s in 1..=CURVE_STEPS {
+            let t = s as f32 / CURVE_STEPS as f32;
+            let mt = 1.0 - t;
+            let bx = mt * mt * mt * a.0
+                + 3.0 * mt * mt * t * c1.0
+                + 3.0 * mt * t * t * c2.0
+                + t * t * t * end.0;
+            let by = mt * mt * mt * a.1
+                + 3.0 * mt * mt * t * c1.1
+                + 3.0 * mt * t * t * c2.1
+                + t * t * t * end.1;
+            self.cur.push((bx, by));
+        }
+        self.last = end;
+    }
+
+    fn close(&mut self) {
+        self.flush();
     }
 }
 
@@ -765,14 +1137,194 @@ mod tests {
         assert!((t.line_leading() - 80.0).abs() < 1e-3, "explicit honored");
     }
 
+    // ---- Real outline-font path -----------------------------------------
+
+    /// A new layer (and every legacy file) defaults `font_family` to `None`, which
+    /// selects the built-in **stroke** path, not the outline path.
+    #[test]
+    fn default_is_stroke_font_not_outline() {
+        let t = TextLayer::default();
+        assert_eq!(t.font_family, None);
+        assert!(!t.uses_outline(), "None → built-in stroke font");
+        // The stroke path lays out; the outline path is empty (no family).
+        assert!(!t.segments().is_empty());
+        assert!(t.outline_contours().is_empty());
+    }
+
+    /// Selecting a family flips the layer to the outline path and produces real
+    /// glyph contours (closed polygons), while the stroke layout is irrelevant.
+    #[test]
+    fn some_family_selects_outline_path() {
+        let mut t = TextLayer::default();
+        t.text = "A".to_string();
+        t.font_family = Some("Ubuntu".to_string());
+        assert!(t.uses_outline(), "Some(family) → outline path");
+        let contours = t.outline_contours();
+        assert!(!contours.is_empty(), "letter A produces outline contours");
+        assert!(
+            contours.iter().any(|c| c.len() >= 3),
+            "at least one contour has real geometry"
+        );
+    }
+
+    /// An unknown family falls back to the bundled face and still renders glyphs —
+    /// text never vanishes.
+    #[test]
+    fn unknown_family_falls_back_to_bundled_glyphs() {
+        let mut t = TextLayer::default();
+        t.text = "A".to_string();
+        t.font_family = Some("No Such Font 99999".to_string());
+        assert!(t.uses_outline());
+        assert!(
+            !t.outline_contours().is_empty(),
+            "unknown family still renders via the fallback face"
+        );
+    }
+
+    /// Outline layout width is **monotonic** (more / wider text is wider) and
+    /// **deterministic** (the same input lays out identically every call).
+    #[test]
+    fn outline_layout_advance_is_monotonic_and_deterministic() {
+        let mk = |s: &str| {
+            let mut t = TextLayer::default();
+            t.text = s.to_string();
+            t.size = 100.0;
+            t.font_family = Some("Ubuntu".to_string());
+            t.outline_layout().expect("layout").contours
+        };
+        let span_x = |contours: &[Vec<(f32, f32)>]| {
+            let min = contours
+                .iter()
+                .flat_map(|c| c.iter())
+                .map(|p| p.0)
+                .fold(f32::INFINITY, f32::min);
+            let max = contours
+                .iter()
+                .flat_map(|c| c.iter())
+                .map(|p| p.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        let one = mk("W");
+        let many = mk("WWW");
+        assert!(
+            span_x(&many) > span_x(&one),
+            "more glyphs lay out wider: {} vs {}",
+            span_x(&many),
+            span_x(&one)
+        );
+        // Determinism: identical input → identical geometry.
+        let a = mk("Ag");
+        let b = mk("Ag");
+        assert_eq!(a, b, "outline layout is deterministic");
+    }
+
+    /// Doubling the font size roughly doubles the outline advance (metrics scale).
+    #[test]
+    fn outline_advance_scales_with_size() {
+        let span = |size: f32| {
+            let mut t = TextLayer::default();
+            t.text = "Ag".to_string();
+            t.size = size;
+            t.font_family = Some("Ubuntu".to_string());
+            let contours = t.outline_contours();
+            let min = contours
+                .iter()
+                .flat_map(|c| c.iter())
+                .map(|p| p.0)
+                .fold(f32::INFINITY, f32::min);
+            let max = contours
+                .iter()
+                .flat_map(|c| c.iter())
+                .map(|p| p.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        let small = span(40.0);
+        let big = span(80.0);
+        assert!(
+            (big - small * 2.0).abs() < small * 0.1,
+            "doubling size ~doubles the outline width: {small} -> {big}"
+        );
+    }
+
+    /// A glyph with a hole ("o") yields an interior point that is *outside* the
+    /// even-odd fill — proving the counter is carved out, not filled solid.
+    #[test]
+    fn outline_fill_carves_glyph_holes() {
+        let mut t = TextLayer::default();
+        t.text = "o".to_string();
+        t.size = 200.0;
+        t.font_family = Some("Ubuntu".to_string());
+        let contours = t.outline_contours();
+        assert!(contours.len() >= 2, "o has an outer + inner contour");
+        // The glyph ink sits roughly at the layer center; the very center of "o"
+        // falls inside the hole, so coverage there is clear.
+        let center = t.outline_coverage_at(&contours, 0.0, 0.0);
+        assert_eq!(center[3], 0.0, "center of 'o' is the carved hole");
+    }
+
+    /// The outline fill is solid on glyph ink and clear far outside.
+    #[test]
+    fn outline_coverage_solid_on_ink_clear_outside() {
+        let mut t = TextLayer::default();
+        t.text = "I".to_string();
+        t.size = 200.0;
+        t.font_family = Some("Ubuntu".to_string());
+        let contours = t.outline_contours();
+        // The vertical bar of "I" passes through the layer center: solid fill.
+        let on = t.outline_coverage_at(&contours, 0.0, 0.0);
+        assert!(on[3] > 0.5, "on-ink covered, got {}", on[3]);
+        // Far to the side: clear.
+        let off = t.outline_coverage_at(&contours, 10_000.0, 0.0);
+        assert_eq!(off[3], 0.0);
+    }
+
+    /// `outline_bounds` grows with the font size, like the stroke path's bounds.
+    #[test]
+    fn outline_bounds_grows_with_size() {
+        let mut small = TextLayer::default();
+        small.text = "WIDE".to_string();
+        small.size = 40.0;
+        small.font_family = Some("Ubuntu".to_string());
+        let mut big = small.clone();
+        big.size = 200.0;
+        let (sx0, _, sx1, _) = small.outline_bounds().unwrap();
+        let (bx0, _, bx1, _) = big.outline_bounds().unwrap();
+        assert!((bx1 - bx0) > (sx1 - sx0), "bigger size → wider outline bounds");
+    }
+
     #[test]
     fn serde_round_trips() {
         let mut t = TextLayer::default();
         t.text = "HELLO\nWORLD!".to_string();
         t.align = TextAlign::Center;
+        t.font_family = Some("Helvetica".to_string());
         t.stroke = Some(Stroke::default());
         let json = serde_json::to_string(&t).unwrap();
         let back: TextLayer = serde_json::from_str(&json).unwrap();
         assert_eq!(t, back);
+    }
+
+    /// A legacy `.pulse` text layer — written before font selection existed, so it
+    /// has no `font_family` key — deserializes with `font_family = None`, i.e. the
+    /// built-in stroke font, so old projects render identically.
+    #[test]
+    fn legacy_text_without_font_family_defaults_to_stroke_font() {
+        let legacy = r#"{
+            "text": "OLD",
+            "size": 120.0,
+            "tracking": 0.0,
+            "leading": 0.0,
+            "align": "Left",
+            "fill": { "color": [1.0, 1.0, 1.0], "opacity": 1.0 },
+            "stroke": null
+        }"#;
+        let t: TextLayer = serde_json::from_str(legacy).unwrap();
+        assert_eq!(t.font_family, None, "absent key → None");
+        assert!(!t.uses_outline(), "legacy file keeps the stroke font");
+        // It lays out via the stroke path exactly as it always did.
+        assert!(!t.segments().is_empty());
+        assert!(t.outline_contours().is_empty());
     }
 }

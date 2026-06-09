@@ -69,16 +69,25 @@ pub(super) fn composite_shape(
     }
 }
 
-/// Rasterize a **text layer**'s glyph strokes into the (assumed-clear) isolated
-/// `out` buffer, in the compositor's premultiplied linear-light form.
+/// Rasterize a **text layer**'s glyphs into the (assumed-clear) isolated `out`
+/// buffer, in the compositor's premultiplied linear-light form.
 ///
-/// The mirror of [`composite_shape`] for text: the string is laid out into
-/// layer-local stroke segments once, the pixel loop is bounded by the text's
+/// The mirror of [`composite_shape`] for text. Two layout/coverage paths share
+/// the same per-pixel loop and color boundary:
+///
+/// * **Stroke font** (`font_family == None`, the default and every legacy file):
+///   the string is laid out into layer-local *stroke segments* and coverage is
+///   the thickened pen band + optional outline — byte-for-byte the original path,
+///   so old projects render identically.
+/// * **Outline font** (`font_family == Some(..)`): the string is laid out into
+///   real glyph *outlines* and coverage is the antialiased even-odd polygon fill
+///   + optional stroke band.
+///
+/// Either way the layout is built once, the pixel loop is bounded by the text's
 /// local bounds mapped through `world` to a comp-space AABB, and each candidate
-/// pixel is inverse-mapped back into local space where the text's straight-RGBA
-/// coverage (thickened pen band + optional outline) is sampled, then converted to
-/// linear and scaled by the layer's `opacity`. A singular `world` (zero scale) or
-/// empty text leaves the buffer clear.
+/// pixel is inverse-mapped back into local space where the straight-RGBA coverage
+/// is sampled, converted to linear, and scaled by the layer's `opacity`. A
+/// singular `world` (zero scale) or empty text leaves the buffer clear.
 pub(super) fn composite_text(
     out: &mut [Lin],
     geom: &Geom,
@@ -93,12 +102,28 @@ pub(super) fn composite_text(
     let Some(inv) = world.inverse() else {
         return;
     };
-    // Lay the string out into layer-local stroke segments once for sampling.
-    let segs = layer.text.segments();
-    if segs.is_empty() {
-        return;
-    }
-    let Some((lx0, ly0, lx1, ly1)) = layer.text.local_bounds() else {
+
+    // Pick the layout + coverage sampler by font path. Both produce straight sRGBA
+    // coverage in layer-local space, so the loop below is identical.
+    let outline = layer.text.uses_outline();
+    let contours: Vec<Vec<(f32, f32)>>;
+    let segs: Vec<((f32, f32), (f32, f32))>;
+    let bounds = if outline {
+        contours = layer.text.outline_contours();
+        segs = Vec::new();
+        if contours.is_empty() {
+            return;
+        }
+        layer.text.outline_bounds()
+    } else {
+        segs = layer.text.segments();
+        contours = Vec::new();
+        if segs.is_empty() {
+            return;
+        }
+        layer.text.local_bounds()
+    };
+    let Some((lx0, ly0, lx1, ly1)) = bounds else {
         return;
     };
     let Some((x0, x1, y0, y1)) = geom.aabb_of_local_box(world, lx0, ly0, lx1, ly1) else {
@@ -110,7 +135,11 @@ pub(super) fn composite_text(
         for px in x0..=x1 {
             let comp_x = px as f32 + 0.5 - cx;
             let (llx, lly) = inv.apply(comp_x, comp_y);
-            let straight = layer.text.coverage_at(&segs, llx, lly);
+            let straight = if outline {
+                layer.text.outline_coverage_at(&contours, llx, lly)
+            } else {
+                layer.text.coverage_at(&segs, llx, lly)
+            };
             let cov = straight[3] * opacity;
             if cov <= 0.0 {
                 continue;

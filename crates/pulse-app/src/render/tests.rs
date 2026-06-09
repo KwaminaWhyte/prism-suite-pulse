@@ -1452,6 +1452,7 @@ fn text(s: &str, size: f32, fill: [f32; 3]) -> Comp {
         tracking: 0.0,
         leading: 0.0,
         align: TextAlign::Center,
+        font_family: None,
         fill: Some(Fill {
             color: fill,
             opacity: 1.0,
@@ -1517,6 +1518,7 @@ fn text_stroke_outlines_the_glyph() {
         tracking: 0.0,
         leading: 0.0,
         align: TextAlign::Center,
+        font_family: None,
         fill: Some(Fill {
             color: [1.0, 0.0, 0.0],
             opacity: 1.0,
@@ -1576,6 +1578,7 @@ fn text_layer_as_luma_matte() {
         tracking: 0.0,
         leading: 0.0,
         align: TextAlign::Center,
+        font_family: None,
         fill: Some(Fill {
             color: [1.0, 1.0, 1.0],
             opacity: 1.0,

@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real outline fonts + font-family selection for text layers** (After Effects'
+  *Character* panel font picker; PLAN Phase 3 *Text — real font shaping*) — text
+  layers can now render with **real TrueType glyph outlines** from a chosen font
+  family, not just the built-in stroke font. A new **Font** dropdown in the Text
+  Properties section lists the bundled default ("Built-in stroke font") plus every
+  installed system family (enumerated via the pure-Rust `fontdb` stack); picking a
+  family lays the string out with that face's advance metrics + glyph contours
+  (`ttf-parser`) and rasterizes **filled, antialiased** glyphs by **reusing the
+  Shape layer's even-odd polygon fill** (`point_in_polygon` + nearest-edge AA), so
+  glyph holes (`o`, `A`, `8`) are carved out correctly and text composes with the
+  full pipeline (masks / mattes / effects / motion blur) exactly like the stroke
+  font. Loaded faces are **cached** per family (a font file is read at most once,
+  never per frame), and an unknown / unloadable family **falls back** to the
+  bundled Ubuntu Light face so text never vanishes.
+  - **Back-compat is preserved exactly:** a new `font_family: Option<String>`
+    field (`#[serde(default)]` → `None`) keeps the **built-in stroke font** as the
+    default. `None` — the default for new layers *and* every legacy `.pulse` file,
+    which carries no `font_family` key — renders **identically** to before; only a
+    selected `Some(family)` switches to outlines. Serde round-trips the new field,
+    and a legacy text layer with no key deserializes to `None` → the stroke font.
+  - Pure logic is unit-tested: family enumeration (default first, de-duplicated),
+    resolution + fallback (unknown → bundled, cached/shared bytes), `Some` vs
+    `None` selecting the outline vs stroke path, outline layout width monotonic +
+    deterministic + size-proportional, even-odd hole carving, and the serde /
+    legacy round-trips. *Still open:* variable-font axes, weight/style
+    sub-selection, kerning / full OpenType shaping, and per-character animators.
 - **RAM-cache fill indicator** (After Effects' *RAM Preview* green cache bar; PLAN
   Phase 6 *Caching*) — a subtle **"caching… N%"** readout now appears in the
   timeline transport row while the **RAM-preview cache** is filling, so the

@@ -33,5 +33,16 @@ egui-phosphor = "0.12.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rhai = "1.25.1"
 
+# Real outline-font rendering for text layers (the family-selected path; the
+# built-in stroke font stays dependency-free). `ttf-parser` reads glyph outlines
+# (move/line/quad/cubic) via an `OutlineBuilder` we flatten into the same
+# polygon fill the shape layer rasterizes; `fontdb` enumerates installed system
+# families and resolves a name to face bytes. Both already ride in the lockfile
+# transitively (via eframe), so this adds no new crates to the graph. We only
+# need filesystem enumeration + reading face bytes, so fontdb's heavier
+# `memmap`/`fontconfig` default features are dropped.
+ttf-parser = "0.25"
+fontdb = { version = "0.23", default-features = false, features = ["fs"] }
+
 [lints]
 workspace = true
