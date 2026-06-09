@@ -446,6 +446,28 @@ fn can_parent_rejects_self_and_cycles() {
     assert!(c.can_parent(2, 0));
 }
 
+#[test]
+fn parent_assign_then_clear_returns_to_local() {
+    // Assigning a parent makes the child ride the parent's offset; clearing it
+    // (back to `None`) returns the child to its own local transform exactly.
+    let mut c = parented_comp();
+    c.layers[0].x.set_key(0.0, 30.0); // parent shifted right 30
+    c.layers[1].x.set_key(0.0, 5.0); // child shifted right 5
+
+    // Assign: child inherits +30 on top of its own +5 = +35.
+    assert!(c.can_parent(1, 0));
+    c.layers[1].parent = Some(0);
+    assert!(approx(c.world_matrix(1, 0.0).apply(0.0, 0.0), (35.0, 0.0)));
+
+    // Clear: world matrix collapses back to the child's local transform (+5).
+    c.layers[1].parent = None;
+    assert_eq!(
+        c.world_matrix(1, 0.0),
+        c.layers[1].transform(0.0).local_matrix()
+    );
+    assert!(approx(c.world_matrix(1, 0.0).apply(0.0, 0.0), (5.0, 0.0)));
+}
+
 // --- Layer kinds --------------------------------------------------------
 
 #[test]
@@ -453,6 +475,35 @@ fn only_solid_draws_own_pixels() {
     assert!(LayerKind::Solid.draws_own_pixels());
     assert!(!LayerKind::Null.draws_own_pixels());
     assert!(!LayerKind::Adjustment.draws_own_pixels());
+}
+
+#[test]
+fn null_layer_creation_is_transform_only() {
+    // A fresh Null is a real, unparented layer whose transform is live but which
+    // draws nothing of its own — usable purely as a parent / pivot handle.
+    let null = PulseLayer::of_kind(LayerKind::Null, "Null 1", [0.6, 0.6, 0.6, 1.0]);
+    assert_eq!(null.kind, LayerKind::Null);
+    assert!(!null.kind.draws_own_pixels());
+    assert_eq!(null.parent, None);
+    // Its transform is the usual identity-at-default and animatable like any layer.
+    assert_eq!(null.transform(0.0).scale, 1.0);
+    assert!(null.x.keys.is_empty());
+}
+
+#[test]
+fn null_layerkind_serde_roundtrips() {
+    // The new `Null` variant round-trips, and a pre-Null-variant layer (no `kind`
+    // field at all) still deserializes — adding the variant doesn't break old files.
+    let null = PulseLayer::of_kind(LayerKind::Null, "N", [0.6, 0.6, 0.6, 1.0]);
+    let json = serde_json::to_string(&null).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.kind, LayerKind::Null);
+
+    let old = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(old).unwrap();
+    assert_eq!(layer.kind, LayerKind::Solid);
 }
 
 #[test]

@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Null layers + transform parenting (pick-whip)** (After Effects' *null object*
+  + *parent & link*; PLAN Phase 2 *Null / parenting*) — a layer can now be
+  **parented** to another so it inherits that parent's full transform up the
+  chain, driven from a per-layer **Parent** pick-whip in the Properties panel
+  (a combo of *None* + every layer that can legally be a parent), with the
+  transform-only **Null** layer kind (`LayerKind::Null`) available from *Layer ▸
+  New ▸ Null* as a non-rendering pivot / rig handle. A child's **world** matrix
+  folds its own local transform under every ancestor's (`Comp::world_matrix`,
+  parent applied outermost, so translate / rotate / scale all inherit), and the
+  pick-whip only offers safe targets via a **cycle guard** (`Comp::can_parent`
+  rejects self-parenting, missing layers, and descendant links that would loop —
+  `world_matrix` itself also breaks any corrupt cycle with a bounded walk).
+  Parent references are kept consistent when layers are deleted or reordered
+  (children of a removed layer unparent; indices shift to follow swaps). The
+  `parent` field is `serde`-defaulted to `None` and `Null` is an additive
+  `LayerKind` variant, so older `.pulse` projects round-trip unchanged.
+  Parent-chain composition, the self / mutual / descendant cycle guards, Null
+  creation, parent assign → clear, and serde back-compat are unit-tested.
+
 ## [0.1.0] - 2026-06-09
 
 ### Fixed
