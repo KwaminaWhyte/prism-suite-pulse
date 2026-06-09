@@ -7,7 +7,7 @@ use crate::comp::{
     blend_label, expr_last_error, source_from_path, AlphaMode, BlendMode, DistortEffect, Ease,
     Effect, ExprCtx, Fill, FootageSource, FractalType, GenerateEffect, Interp, KeyEffect, LayerBlend,
     LayerKind, Mask, MaskMode, MatteMode, Overflow, PolarKind, Prop, RadialKind, RampShape,
-    ShapeItem, ShapePrimitive, SpatialEffect, Stroke, TextAlign, Track,
+    ShapeItem, ShapePrimitive, SpatialEffect, Stroke, StylizeEffect, TextAlign, Track,
 };
 use crate::{icons, render};
 use egui::Color32;
@@ -191,6 +191,16 @@ impl PulseApp {
                         if self.comp.layers[idx].kind.draws_own_pixels() {
                             section(ui, ("sec_spatial", idx), "Spatial effects", |ui| {
                                 self.spatial_effects_section(ui, idx);
+                            });
+                        }
+
+                        // Stylize effects (Find Edges / Mosaic) reshape the layer's whole
+                        // rendered buffer's look, after the spatial passes and before the
+                        // distort passes. Only meaningful for layers that draw their own
+                        // pixels.
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            section(ui, ("sec_stylize", idx), "Stylize effects", |ui| {
+                                self.stylize_effects_section(ui, idx);
                             });
                         }
 
@@ -1160,6 +1170,74 @@ impl PulseApp {
         }
     }
 
+    /// The layer's **stylize effect stack** editor: an "Add" menu (Find Edges /
+    /// Mosaic), then each effect with reorder / remove controls and per-parameter
+    /// sliders. Stylize effects reshape the layer's whole rendered buffer's look,
+    /// after its color-correction stack, masks, track matte, key, and spatial
+    /// passes, but before the distort passes.
+    fn stylize_effects_section(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(format!("{}  Add", icons::ADD_KEY), |ui| {
+                    for eff in StylizeEffect::defaults() {
+                        if ui.button(eff.label()).clicked() {
+                            self.comp.layers[idx].stylize_effects.push(eff);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+
+        if self.comp.layers[idx].stylize_effects.is_empty() {
+            ui.weak("No stylize effects. Add find-edges or mosaic.");
+            return;
+        }
+
+        let mut to_remove: Option<usize> = None;
+        let mut to_move: Option<(usize, bool)> = None;
+        let n = self.comp.layers[idx].stylize_effects.len();
+        for ei in 0..n {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(self.comp.layers[idx].stylize_effects[ei].label()).strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Remove").clicked() {
+                        to_remove = Some(ei);
+                    }
+                    if ui
+                        .add_enabled(ei > 0, egui::Button::new(icons::ARROW_UP))
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        to_move = Some((ei, true));
+                    }
+                    if ui
+                        .add_enabled(ei + 1 < n, egui::Button::new(icons::ARROW_DOWN))
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        to_move = Some((ei, false));
+                    }
+                });
+            });
+            stylize_effect_params(ui, idx, ei, &mut self.comp.layers[idx].stylize_effects[ei]);
+        }
+
+        if let Some(ei) = to_remove {
+            self.comp.layers[idx].stylize_effects.remove(ei);
+        }
+        if let Some((ei, up)) = to_move {
+            let effects = &mut self.comp.layers[idx].stylize_effects;
+            let other = if up { ei.wrapping_sub(1) } else { ei + 1 };
+            if other < effects.len() {
+                effects.swap(ei, other);
+            }
+        }
+    }
+
     /// The layer's **key effect stack** editor: an "Add" menu (Color / Luma /
     /// Chroma Key, Spill Suppression, Matte Choke), then each effect with reorder
     /// / remove controls and per-parameter sliders. Key effects carve the layer's
@@ -2120,6 +2198,42 @@ fn spatial_effect_params(ui: &mut egui::Ui, idx: usize, ei: usize, effect: &mut 
             slider(ui, "Threshold", threshold, 0.0, 1.0, "");
             slider(ui, "Radius", radius, 0.0, 100.0, " px");
             slider(ui, "Intensity", intensity, 0.0, 4.0, "");
+        }
+    }
+}
+
+/// Parameter sliders / checkboxes for one [`StylizeEffect`], editing it in place.
+/// Find Edges' amount is an edge-response gain; Mosaic's counts are integer block
+/// counts across / down the buffer. `idx`/`ei` salt widget ids so multiple effects
+/// don't collide.
+fn stylize_effect_params(ui: &mut egui::Ui, _idx: usize, _ei: usize, effect: &mut StylizeEffect) {
+    match effect {
+        StylizeEffect::FindEdges { amount, invert } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Amount");
+                ui.add(egui::Slider::new(amount, 0.0..=8.0));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.checkbox(invert, "Invert")
+                    .on_hover_text("On: bright edges on black; off: dark edges on white (AE default)");
+            });
+        }
+        StylizeEffect::Mosaic {
+            horizontal,
+            vertical,
+        } => {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Horizontal");
+                ui.add(egui::Slider::new(horizontal, 1..=200));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label("Vertical");
+                ui.add(egui::Slider::new(vertical, 1..=200));
+            });
         }
     }
 }

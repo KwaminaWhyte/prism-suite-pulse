@@ -45,6 +45,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Stylize family — Find Edges / Mosaic** (After Effects' *Stylize ▸ Find Edges
+  / Mosaic*; PLAN Phase 3 *Stylize*) — a new **stylize** (whole-buffer
+  look-shaping) effect family, built to mirror the established distort / keying
+  stacks exactly: a new `StylizeEffect` enum + its `apply` passes +
+  `apply_stylize_effects` stack runner + a compositor bridge (`apply_stylize`) + a
+  Properties *Stylize effects* editor + the *Effects & Presets* browser's
+  *Stylize* folder. Each runs on the layer's **isolated premultiplied
+  linear-light** buffer in `finish_layer` — **after** the spatial passes and
+  **before** the distort passes (matching AE's top-down effect order, distort
+  below stylize) — so they compose with opacity / blend / masks / track-mattes /
+  keying / blur / distort / motion-blur in both the offline render and the live
+  render-preview. Both passes are pure (no time / IO / RNG) and deterministic.
+  - **Find Edges** (`StylizeEffect::FindEdges`) — a **Sobel** gradient-magnitude
+    edge detector run per channel on the buffer's *straight* colour
+    (un-premultiplied so coverage-faded edges don't read as colour gradients;
+    off-buffer taps clamp to the edge pixel so the frame border isn't a hard
+    edge), **inverted** like AE so flat regions go white and edges go dark (the
+    "ink outline" look). An `amount` scales the edge response and an `invert` flag
+    flips back to bright-edges-on-black. Alpha (the layer's matte) is preserved.
+  - **Mosaic** (`StylizeEffect::Mosaic`) — pixelate the buffer into
+    `horizontal × vertical` blocks, each filled with the **premultiplied** average
+    colour of the pixels it covers (the correct pooling for transparency). Block
+    bounds are floored so an uneven division spreads the remainder; counts clamp to
+    `>= 1` (and to per-pixel when over-subdivided). `1 × 1` collapses the whole
+    buffer to its average colour.
+  - Posterize is left as the remaining *Stylize* TODO (it would overlap the
+    existing Levels / Curves / Gradient-Map grade, so it's deferred until it can be
+    shaped distinctly).
+  - Tests (25 new): Find-Edges flat-region-stays-white / edge-produces-response /
+    amount-strengthens-edges / invert-flips / alpha-preserved / determinism;
+    Mosaic block-is-constant / block-is-the-average / 1×1-whole-average /
+    per-pixel-identity / zero-counts-clamp / over-subdivide-clamps /
+    premultiplied-transparency-pooling / determinism; stack-applies-in-order;
+    labels/defaults + serde round-trip + empty-buffer no-op; **render-path** tests
+    (per-pixel mosaic routes value-neutrally through the isolated buffer, Find
+    Edges whitens a flat solid interior, a 1×1 mosaic pools the frame to a constant
+    block, stylize composes with a mask); `stylize_effects` serde-defaults to empty
+    so existing project files round-trip; browser findability + the *Stylize*
+    folder now lists Glow + Find Edges + Mosaic.
+
 - **Color-correction expansion — Channel Mixer / Gradient Map / Tritone** (After
   Effects' *Color Correction ▸ Channel Mixer / Photoshop "Gradient Map" /
   Tritone*; PLAN Phase 3 *Color correction*) — three new per-layer

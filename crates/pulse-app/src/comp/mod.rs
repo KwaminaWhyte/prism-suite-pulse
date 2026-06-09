@@ -37,6 +37,7 @@ mod motion_blur;
 mod precomp;
 mod shape;
 mod spatial;
+mod stylize;
 mod text;
 mod time_remap;
 mod transform;
@@ -59,6 +60,7 @@ pub use motion_blur::{MotionBlur, Prop};
 pub use precomp::{PrecompLayer, Project};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, RadialKind, SpatialEffect};
+pub use stylize::{apply_stylize_effects, StylizeEffect};
 pub use text::{TextAlign, TextLayer};
 pub use time_remap::TimeRemap;
 pub use transform::{Affine2, Transform};
@@ -122,6 +124,16 @@ pub struct PulseLayer {
     /// pre-keying `.pulse` files still load.
     #[serde(default)]
     pub key_effects: Vec<KeyEffect>,
+    /// Non-destructive, ordered **stylize effect stack** (whole-buffer
+    /// look-shaping passes: Find Edges, Mosaic). Applied to the layer's isolated
+    /// rendered buffer in the finishing step *after* its color-correction stack,
+    /// masks, track matte, key passes, and spatial passes, but *before* the
+    /// distort passes — so a stylize reshapes the already-blurred/glowed buffer and
+    /// a later distort can warp the stylized result (matching After Effects'
+    /// top-down effect order, distort below stylize). `serde`-defaulted to empty so
+    /// pre-stylize `.pulse` files still load.
+    #[serde(default)]
+    pub stylize_effects: Vec<StylizeEffect>,
     /// Optional **generate** (whole-buffer fill) effect — currently **Fractal
     /// Noise**. Unlike the colour/spatial stacks (which read the layer's pixels),
     /// a generate effect *replaces* them: it synthesises the layer's content from
@@ -224,6 +236,7 @@ impl PulseLayer {
             spatial_effects: Vec::new(),
             distort_effects: Vec::new(),
             key_effects: Vec::new(),
+            stylize_effects: Vec::new(),
             generate: None,
             generate_evolution: Track::default(),
             parent: None,
@@ -355,6 +368,13 @@ impl PulseLayer {
     /// isolated buffer to run the whole-buffer alpha-affecting passes.
     pub fn has_key_effects(&self) -> bool {
         !self.key_effects.is_empty()
+    }
+
+    /// Whether this layer has any **stylize effects** (Find Edges / Mosaic), so
+    /// the renderer must route it through an isolated buffer to run the
+    /// whole-buffer look-shaping passes.
+    pub fn has_stylize_effects(&self) -> bool {
+        !self.stylize_effects.is_empty()
     }
 
     /// The layer's generate fill with its **evolution** resolved at time `t`: if

@@ -16,7 +16,7 @@
 //! selected layer. Keeping the registry and the matcher here (not in the UI)
 //! means the search/ranking logic is unit-testable without an egui context.
 
-use super::{DistortEffect, Effect, GenerateEffect, KeyEffect, SpatialEffect};
+use super::{DistortEffect, Effect, GenerateEffect, KeyEffect, SpatialEffect, StylizeEffect};
 
 /// Which per-layer stack an effect belongs to. The browser adds a
 /// [`Category::Color`] / generic per-pixel effect to the layer's
@@ -35,6 +35,9 @@ pub enum Stack {
     /// A whole-buffer [`DistortEffect`] coordinate-remap (Corner Pin / Transform
     /// / Mirror / Polar) — warps the layer's pixels rather than recoloring them.
     Distort,
+    /// A whole-buffer [`StylizeEffect`] look-shaping pass (Find Edges / Mosaic) —
+    /// reshapes the layer's look rather than recoloring or warping it.
+    Stylize,
     /// A whole-buffer [`KeyEffect`] matte-pull (Color / Luma / Chroma Key, Spill
     /// Suppression, Matte Choke) — carves the layer's alpha (and, for spill,
     /// neutralises RGB) rather than recoloring or warping it.
@@ -120,6 +123,7 @@ impl BrowserEntry {
             Stack::Spatial => NewEffect::Spatial(SpatialEffect::defaults()[self.default_index]),
             Stack::Generate => NewEffect::Generate(GenerateEffect::defaults()[self.default_index]),
             Stack::Distort => NewEffect::Distort(DistortEffect::defaults()[self.default_index]),
+            Stack::Stylize => NewEffect::Stylize(StylizeEffect::defaults()[self.default_index]),
             Stack::Keying => NewEffect::Keying(KeyEffect::defaults()[self.default_index]),
         }
     }
@@ -134,6 +138,7 @@ pub enum NewEffect {
     Spatial(SpatialEffect),
     Generate(GenerateEffect),
     Distort(DistortEffect),
+    Stylize(StylizeEffect),
     Keying(KeyEffect),
 }
 
@@ -400,6 +405,38 @@ pub const REGISTRY: &[BrowserEntry] = &[
             "twirl",
         ],
     },
+    // --- Stylize (StylizeEffect::defaults() order) --------------------------
+    BrowserEntry {
+        name: "Find Edges",
+        category: Category::Stylize,
+        stack: Stack::Stylize,
+        default_index: 0,
+        keywords: &[
+            "find",
+            "edges",
+            "edge",
+            "sobel",
+            "outline",
+            "ink",
+            "contour",
+            "detect",
+        ],
+    },
+    BrowserEntry {
+        name: "Mosaic",
+        category: Category::Stylize,
+        stack: Stack::Stylize,
+        default_index: 1,
+        keywords: &[
+            "mosaic",
+            "pixelate",
+            "pixelsize",
+            "pixelize",
+            "blocks",
+            "censor",
+            "tile",
+        ],
+    },
     // --- Keying (KeyEffect::defaults() order) -------------------------------
     BrowserEntry {
         name: "Color Key",
@@ -586,6 +623,7 @@ mod tests {
         let spatials = SpatialEffect::defaults();
         let generates = GenerateEffect::defaults();
         let distorts = DistortEffect::defaults();
+        let stylizes = StylizeEffect::defaults();
         let keys = KeyEffect::defaults();
         for entry in REGISTRY {
             match entry.instantiate() {
@@ -609,6 +647,11 @@ mod tests {
                     assert_eq!(e, distorts[entry.default_index]);
                     assert_eq!(entry.stack, Stack::Distort);
                 }
+                NewEffect::Stylize(e) => {
+                    assert!(entry.default_index < stylizes.len());
+                    assert_eq!(e, stylizes[entry.default_index]);
+                    assert_eq!(entry.stack, Stack::Stylize);
+                }
                 NewEffect::Keying(e) => {
                     assert!(entry.default_index < keys.len());
                     assert_eq!(e, keys[entry.default_index]);
@@ -628,6 +671,7 @@ mod tests {
                 NewEffect::Spatial(e) => e.label(),
                 NewEffect::Generate(e) => e.label(),
                 NewEffect::Distort(e) => e.label(),
+                NewEffect::Stylize(e) => e.label(),
                 NewEffect::Keying(e) => e.label(),
             };
             assert_eq!(entry.name, label, "name/label mismatch for {}", entry.name);
@@ -668,6 +712,14 @@ mod tests {
                     .iter()
                     .any(|e| e.stack == Stack::Distort && e.default_index == i),
                 "distort effect {i} missing from registry"
+            );
+        }
+        for (i, _) in StylizeEffect::defaults().iter().enumerate() {
+            assert!(
+                REGISTRY
+                    .iter()
+                    .any(|e| e.stack == Stack::Stylize && e.default_index == i),
+                "stylize effect {i} missing from registry"
             );
         }
         for (i, _) in KeyEffect::defaults().iter().enumerate() {
@@ -747,6 +799,32 @@ mod tests {
             .find(|(c, _)| *c == Category::Distort)
             .expect("Distort folder present");
         assert_eq!(dist.1.len(), 4, "four distorts in the Distort folder");
+    }
+
+    #[test]
+    fn stylize_family_is_findable() {
+        // Each stylize effect is reachable by name and a synonym, and groups under
+        // the Stylize category.
+        for (name, queries) in [
+            ("Find Edges", ["find edges", "sobel"]),
+            ("Mosaic", ["mosaic", "pixelate"]),
+        ] {
+            for q in queries {
+                let hits = filter(q);
+                assert!(
+                    hits.iter().any(|h| h.entry.name == name),
+                    "querying {q:?} should find {name}"
+                );
+            }
+        }
+        // The Stylize folder holds Glow (spatial stack) plus the two stylize-stack
+        // effects on an empty query.
+        let groups = filter_grouped("");
+        let stylize = groups
+            .iter()
+            .find(|(c, _)| *c == Category::Stylize)
+            .expect("Stylize folder present");
+        assert_eq!(stylize.1.len(), 3, "three effects in the Stylize folder");
     }
 
     #[test]

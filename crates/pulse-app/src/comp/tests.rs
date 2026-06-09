@@ -2170,6 +2170,37 @@ fn distort_effects_serde_defaults_to_empty() {
     assert!(!layer.has_distort_effects());
 }
 
+#[test]
+fn stylize_effects_serde_defaults_to_empty() {
+    // Pre-stylize-effect layers (no `stylize_effects` field) load with none, so
+    // existing project files round-trip unchanged.
+    let json = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let layer: PulseLayer = serde_json::from_str(json).unwrap();
+    assert!(layer.stylize_effects.is_empty());
+    assert!(!layer.has_stylize_effects());
+}
+
+#[test]
+fn stylize_effects_serde_round_trips() {
+    // A layer with a stylize stack serializes and reloads identically.
+    use crate::comp::StylizeEffect;
+    let mut layer = PulseLayer::new("L", [1.0, 1.0, 1.0, 1.0]);
+    layer.stylize_effects.push(StylizeEffect::FindEdges {
+        amount: 2.0,
+        invert: true,
+    });
+    layer.stylize_effects.push(StylizeEffect::Mosaic {
+        horizontal: 12,
+        vertical: 20,
+    });
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(layer.stylize_effects, back.stylize_effects);
+    assert!(back.has_stylize_effects());
+}
+
 // --- Keying effects (Color / Luma / Chroma Key, Spill, Matte Choke) -----
 
 /// A `w×h` premultiplied, fully-opaque buffer flooded with one **linear-light**

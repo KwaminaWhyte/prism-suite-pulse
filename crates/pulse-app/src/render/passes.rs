@@ -5,7 +5,8 @@
 use super::{over, render_comp, Geom, Lin, RenderCtx};
 use crate::comp::{
     apply_distort_effects, apply_effects, apply_key_effects, apply_spatial_effects,
-    mask_stack_coverage, Affine2, Comp, DecodedFrame, GenerateEffect, MatteMode, PulseLayer,
+    apply_stylize_effects, mask_stack_coverage, Affine2, Comp, DecodedFrame, GenerateEffect,
+    MatteMode, PulseLayer,
 };
 use prism_core::color::srgb_to_linear;
 
@@ -759,6 +760,31 @@ pub(super) fn apply_spatial(layer_buf: &mut [Lin], geom: &Geom, layer: &PulseLay
     let (w, h) = (geom.w as usize, geom.h as usize);
     let mut rgba: Vec<[f32; 4]> = layer_buf.iter().map(|p| [p.r, p.g, p.b, p.a]).collect();
     apply_spatial_effects(&layer.spatial_effects, &mut rgba, w, h);
+    for (dst, src) in layer_buf.iter_mut().zip(rgba.iter()) {
+        dst.r = src[0];
+        dst.g = src[1];
+        dst.b = src[2];
+        dst.a = src[3];
+    }
+}
+
+/// Run a layer's **stylize effect stack** (Find Edges / Mosaic) over its
+/// isolated rendered buffer.
+///
+/// The twin of [`apply_spatial`]: the [`Lin`] accumulator is already
+/// **premultiplied** linear-light — exactly what the look-shaping passes operate
+/// on (Find Edges un-premultiplies per pixel to detect edges in the straight
+/// colour then re-premultiplies; Mosaic averages the premultiplied values
+/// directly) — so this is a zero-conversion bridge: view the `Lin` slice as
+/// `[[f32; 4]]`, run [`apply_stylize_effects`], then write the stylized values
+/// back. Runs *after* the spatial passes and *before* the distort passes (so a
+/// stylize reshapes the blurred/glowed buffer and a later distort warps the
+/// result). Assumes the layer has at least one stylize effect (the caller gates on
+/// [`PulseLayer::has_stylize_effects`]).
+pub(super) fn apply_stylize(layer_buf: &mut [Lin], geom: &Geom, layer: &PulseLayer) {
+    let (w, h) = (geom.w as usize, geom.h as usize);
+    let mut rgba: Vec<[f32; 4]> = layer_buf.iter().map(|p| [p.r, p.g, p.b, p.a]).collect();
+    apply_stylize_effects(&layer.stylize_effects, &mut rgba, w, h);
     for (dst, src) in layer_buf.iter_mut().zip(rgba.iter()) {
         dst.r = src[0];
         dst.g = src[1];
