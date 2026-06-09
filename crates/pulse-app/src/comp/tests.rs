@@ -354,6 +354,117 @@ fn anchor_point_is_the_pivot_and_lands_on_position() {
     assert!(approx(m.apply(0.0, 0.0), (70.0, 50.0)));
 }
 
+/// Regression: a text layer's **transform stays put across a font-family change**.
+/// Position / anchor / scale / rotation live on the layer's animatable tracks,
+/// wholly separate from the glyph buffer, so switching the rendered font
+/// (stroke `None` ↔ outline `Some(..)`) — like changing size / align — must not
+/// touch the transform or move where the layer's anchor lands on screen. (Guards
+/// against the class of bug where editing a type property resets the layer to the
+/// top-left / makes the text jump.)
+#[test]
+fn font_family_change_preserves_text_layer_transform_and_anchor() {
+    let mut layer = PulseLayer::of_kind(LayerKind::Text, "T", [1.0; 4]);
+    layer.text = TextLayer {
+        text: "HELLO".to_string(),
+        size: 120.0,
+        align: TextAlign::Center,
+        font_family: None, // built-in stroke font
+        ..TextLayer::default()
+    };
+    // Place / move the layer somewhere non-trivial (a user dragging it around):
+    // an offset anchor, a position away from center, plus scale + rotation.
+    layer.anchor_x.set_key(0.0, 7.0);
+    layer.anchor_y.set_key(0.0, -3.0);
+    layer.x.set_key(0.0, 140.0);
+    layer.y.set_key(0.0, -90.0);
+    layer.scale.set_key(0.0, 1.5);
+    layer.rotation.set_key(0.0, 30.0);
+
+    let before = layer.transform(0.0);
+    // Where the anchor point lands in comp space, before the font change.
+    let anchor_before = before.local_matrix().apply(before.anchor_x, before.anchor_y);
+
+    // Switch to a real outline family (and bump other type settings while we're
+    // here) — exactly what the Properties Font dropdown does.
+    layer.text.font_family = Some("Ubuntu".to_string());
+    layer.text.size = 200.0;
+    layer.text.align = TextAlign::Right;
+
+    let after = layer.transform(0.0);
+    // Every transform component is untouched by the type edit.
+    assert_eq!(before.anchor_x, after.anchor_x);
+    assert_eq!(before.anchor_y, after.anchor_y);
+    assert_eq!(before.x, after.x);
+    assert_eq!(before.y, after.y);
+    assert_eq!(before.scale, after.scale);
+    assert_eq!(before.rotation_deg, after.rotation_deg);
+    // …and the anchor still lands on the exact same comp-space point: the layer
+    // (and so the text) does not jump on a font change.
+    let anchor_after = after.local_matrix().apply(after.anchor_x, after.anchor_y);
+    assert!(approx(anchor_before, anchor_after), "anchor moved on font change");
+
+    // The laid-out block stays centered about the layer-local origin in *both*
+    // font paths, so the text rides the same anchor regardless of font: the
+    // stroke path lays out segments centered on (0,0), the outline path lays out
+    // contours centered on (0,0). (A path that anchored text to its own bounds
+    // would shift the centroid when metrics changed and the text would appear to
+    // move.)
+    let mut stroke = layer.clone();
+    stroke.text.font_family = None;
+    let span = |xs: &[f32]| {
+        let lo = xs.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        (lo + hi) * 0.5 // midpoint of the extent
+    };
+    let stroke_xs: Vec<f32> = stroke
+        .text
+        .segments()
+        .iter()
+        .flat_map(|&(a, b)| [a.0, b.0])
+        .collect();
+    let stroke_ys: Vec<f32> = stroke
+        .text
+        .segments()
+        .iter()
+        .flat_map(|&(a, b)| [a.1, b.1])
+        .collect();
+    let outline_xs: Vec<f32> = layer
+        .text
+        .outline_contours()
+        .iter()
+        .flat_map(|c| c.iter().map(|p| p.0))
+        .collect();
+    let outline_ys: Vec<f32> = layer
+        .text
+        .outline_contours()
+        .iter()
+        .flat_map(|c| c.iter().map(|p| p.1))
+        .collect();
+    // Both font paths center the block on the origin (within a glyph-metric
+    // tolerance): the visual center coincides with the layer center either way,
+    // so the on-screen placement is stable across the font switch.
+    assert!(
+        span(&stroke_xs).abs() < 1.0,
+        "stroke block centered on x=0, got {}",
+        span(&stroke_xs)
+    );
+    assert!(
+        span(&outline_xs).abs() < layer.text.size,
+        "outline block centered near x=0, got {}",
+        span(&outline_xs)
+    );
+    assert!(
+        span(&stroke_ys).abs() < 1.0,
+        "stroke block centered on y=0, got {}",
+        span(&stroke_ys)
+    );
+    assert!(
+        span(&outline_ys).abs() < layer.text.size,
+        "outline block centered near y=0, got {}",
+        span(&outline_ys)
+    );
+}
+
 // --- Parenting / world matrix ------------------------------------------
 
 fn parented_comp() -> Comp {

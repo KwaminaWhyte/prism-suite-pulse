@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cache_progress` is unit-tested (0 frames before a comp is registered, climbing
   to `total` exactly as `fully_cached` turns true).
 
+### Fixed
+
+- **Guard: a text layer's position is preserved across a font change** (regression
+  test). A sibling app surfaced a bug where editing a text's font family / size /
+  alignment reset its position to the top-left corner. Pulse is **not** affected —
+  a text layer's position / anchor / scale / rotation live on the layer's
+  animatable transform tracks, wholly separate from the glyph buffer, and both
+  font paths (built-in stroke `None` ↔ real outline `Some(family)`) lay the block
+  out **centered on the layer-local origin**, so the text rides the same anchor
+  regardless of font. Added a unit test
+  (`font_family_change_preserves_text_layer_transform_and_anchor`) that places /
+  moves a text layer, switches font family (and size / align), and asserts every
+  transform component and the anchor's comp-space landing point are unchanged —
+  and that both font paths stay centered on the origin — locking this in.
+
 ## [0.2.0] - 2026-06-09
 
 ### Added
