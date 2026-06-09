@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RAM-cache fill indicator** (After Effects' *RAM Preview* green cache bar; PLAN
+  Phase 6 *Caching*) — a subtle **"caching… N%"** readout now appears in the
+  timeline transport row while the **RAM-preview cache** is filling, so the
+  first-pass lag the playhead shows (the CPU compositor renders each work-area
+  frame **once** off the UI thread, then the loop replays cached frames in real
+  time) is legible rather than mysterious. The readout reads a new
+  `PreviewRenderer::cache_progress()` accessor (`(cached, total)` work-area frames)
+  and **disappears once the comp is fully cached** — from then on the loop plays
+  back smoothly straight from RAM. This makes the *expected* "laggy first play,
+  smooth on loop" behaviour self-explanatory in the UI; the underlying pacing
+  (playback gated by the cache via `is_frame_ready` / `fully_cached`) is unchanged.
+  `cache_progress` is unit-tested (0 frames before a comp is registered, climbing
+  to `total` exactly as `fully_cached` turns true).
+
 ## [0.2.0] - 2026-06-09
 
 ### Added

@@ -39,6 +39,8 @@ pub const PAUSE: &str = ph::PAUSE;
 pub const TO_START: &str = ph::SKIP_BACK;
 /// Jump to end.
 pub const TO_END: &str = ph::SKIP_FORWARD;
+/// RAM-preview cache fill (transport "caching…" readout).
+pub const RAM_CACHE: &str = ph::DATABASE;
 
 // --- Layers / panels --------------------------------------------------------
 

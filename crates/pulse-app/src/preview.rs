@@ -418,6 +418,17 @@ impl PreviewRenderer {
         self.n_frames > 0 && (self.frames.len() as i64) >= self.n_frames
     }
 
+    /// RAM-cache fill progress as `(cached_frames, total_frames)` for the current
+    /// work area. `total` is `0` before the first comp is registered. While the
+    /// first pass builds the cache `cached < total`; once `fully_cached`, they're
+    /// equal. Drives the transport's "caching…" readout so the first-pass lag the
+    /// user sees is legible rather than mysterious.
+    pub fn cache_progress(&self) -> (i64, i64) {
+        let total = self.n_frames.max(0);
+        let cached = (self.frames.len() as i64).min(total);
+        (cached, total)
+    }
+
     /// The playhead time of the frame currently displayed. Overlays / the timeline
     /// align to *this* so they track the pixels on screen rather than leading them
     /// (the displayed frame can be the nearest cached neighbour while the exact
@@ -956,6 +967,48 @@ mod tests {
             "a time past the work area clamps to the cached last frame"
         );
         assert_eq!(p.bytes, 16 * 3, "byte tally tracks the cached frames");
+    }
+
+    #[test]
+    fn cache_progress_tracks_first_pass_fill() {
+        // The transport "caching…" readout reads `cache_progress()`: 0 frames
+        // until a comp is registered, then `cached` climbs to `total` as the
+        // first pass fills the RAM cache, reaching equality exactly when
+        // `fully_cached` is true.
+        let mut p = PreviewRenderer::default();
+        assert_eq!(p.cache_progress(), (0, 0), "no comp yet → nothing to cache");
+
+        p.fps = 30.0;
+        p.n_frames = 3; // frames 0, 1, 2
+        assert_eq!(p.cache_progress(), (0, 3), "first pass not started");
+
+        p.insert_frame(
+            0,
+            Frame {
+                width: 2,
+                height: 2,
+                pixels: vec![0u8; 16],
+            },
+        );
+        assert_eq!(p.cache_progress(), (1, 3), "one frame cached mid-fill");
+        assert!(!p.fully_cached());
+
+        for idx in 1..3 {
+            p.insert_frame(
+                idx,
+                Frame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0u8; 16],
+                },
+            );
+        }
+        assert_eq!(
+            p.cache_progress(),
+            (3, 3),
+            "cached == total once the work area is full"
+        );
+        assert!(p.fully_cached());
     }
 
     // --- persistent FrameCache reuse (no re-decode for the same frame) -----

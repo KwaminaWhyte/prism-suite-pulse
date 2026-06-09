@@ -78,6 +78,22 @@ impl PulseApp {
                     let frame = (self.time * self.comp.fps).round() as i32;
                     ui.monospace(format!("{:>6.2}s   frame {:>4}", self.time, frame));
 
+                    // RAM-cache fill indicator: while the first pass renders each
+                    // work-area frame to the RAM-preview cache, show a subtle
+                    // "caching…" readout (After Effects' green cache bar) so the
+                    // first-pass lag is legible. It disappears once fully cached —
+                    // from then on the loop replays cached frames in real time.
+                    let (cached, total) = self.preview.cache_progress();
+                    if total > 0 && cached < total {
+                        let pct = (cached as f32 / total as f32 * 100.0).round() as i32;
+                        ui.weak(format!("{}  caching… {pct}%", crate::icons::RAM_CACHE))
+                            .on_hover_text(format!(
+                                "Building the RAM-preview cache ({cached}/{total} frames). \
+                                 The first pass renders each frame on the CPU; once cached, \
+                                 the loop plays back smoothly from RAM."
+                            ));
+                    }
+
                     // Right-aligned editor-mode toggle (timeline vs graph).
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
