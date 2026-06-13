@@ -197,6 +197,16 @@ pub struct Keyframe {
     /// (and is `serde`-defaulted so pre-easing `.pulse` files still load).
     #[serde(default)]
     pub interp: Interp,
+    /// **Roving across time** (After Effects' *Rove Across Time*): when set on
+    /// an *interior* spatial-position key, the key is freed from its authored
+    /// time and re-timed so the layer moves at constant velocity along the
+    /// motion path between the surrounding anchored keys (see
+    /// [`roving`](super::roving)). Only meaningful on the `x` / `y` position
+    /// tracks; ignored on the first/last key (endpoints always anchor) and on
+    /// non-spatial tracks. `serde`-defaulted to `false` and skipped when unset,
+    /// so pre-roving `.pulse` files load and round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub roving: bool,
 }
 
 /// One animated property: a time-ordered list of keyframes, plus an optional
@@ -316,7 +326,53 @@ impl Track {
             .checked_sub(1)
             .map(|prev| self.keys[prev].interp)
             .unwrap_or_default();
-        self.keys.insert(idx, Keyframe { t, value, interp });
+        self.keys.insert(
+            idx,
+            Keyframe {
+                t,
+                value,
+                interp,
+                roving: false,
+            },
+        );
+    }
+
+    /// Whether the key nearest `t` is an **interior** key (not the first or last)
+    /// — the only keys that may rove (endpoints always anchor the time range).
+    /// `false` when there is no key near `t`, or it is an endpoint, or the track
+    /// has fewer than three keys.
+    pub fn is_interior_key(&self, t: f32) -> bool {
+        const EPS: f32 = 1e-3;
+        if self.keys.len() < 3 {
+            return false;
+        }
+        let last = self.keys.len() - 1;
+        self.keys
+            .iter()
+            .position(|k| (k.t - t).abs() < EPS)
+            .is_some_and(|i| i != 0 && i != last)
+    }
+
+    /// Set the **roving** flag on the key nearest `t` (After Effects' *Rove
+    /// Across Time*). No-op returning `false` when no key is near `t` or it is an
+    /// endpoint (endpoints can never rove). Returns `true` when a key was updated.
+    pub fn set_roving(&mut self, t: f32, roving: bool) -> bool {
+        if !self.is_interior_key(t) {
+            return false;
+        }
+        const EPS: f32 = 1e-3;
+        if let Some(k) = self.keys.iter_mut().find(|k| (k.t - t).abs() < EPS) {
+            k.roving = roving;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the key nearest `t` is flagged roving (and is interior). Drives
+    /// the *Rove Across Time* toggle's checked state.
+    pub fn is_roving_at(&self, t: f32) -> bool {
+        self.is_interior_key(t) && self.key_at(t).is_some_and(|k| k.roving)
     }
 
     /// Set the outgoing interpolation mode for the key nearest `t`, if any.

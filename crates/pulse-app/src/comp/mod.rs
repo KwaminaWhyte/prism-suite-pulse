@@ -38,6 +38,7 @@ mod motion_blur;
 mod motion_path;
 mod precomp;
 mod preset;
+mod roving;
 mod shape;
 mod spatial;
 mod stylize;
@@ -71,6 +72,12 @@ pub use motion_blur::{MotionBlur, Prop};
 pub use motion_path::{auto_orient_deg, sample_path, PathSample};
 pub use precomp::{PrecompLayer, Project};
 pub use preset::AnimationPreset;
+// The roving re-timer is the deliverable's pure constant-velocity API: position
+// sampling uses it via `roving::` internally, and `roved_times` / `RoveKey` are
+// re-exported for the unit tests (and a future speed-graph readout). Allowed
+// unused until a non-test caller consumes them directly.
+#[allow(unused_imports)]
+pub use roving::{has_roving, roved_times, roved_tracks, RoveKey};
 // `PresetTrack` / `PropTag` are the public field types of an `AnimationPreset`
 // (re-exported for API completeness + the unit tests); the live UI touches a
 // preset only through `capture` / `apply`, so allow them unused in the bin build.
@@ -329,18 +336,64 @@ impl PulseLayer {
         }
     }
 
+    /// Whether this layer has **roving** position keys, so position sampling must
+    /// re-time the `x` / `y` tracks for constant velocity (see [`roving`]).
+    pub fn has_roving_position(&self) -> bool {
+        roving::has_roving(&self.x, &self.y)
+    }
+
+    /// The layer's **effective** `x` / `y` position tracks at sample time: the
+    /// roving-re-timed copies when any interior position key roves (constant
+    /// velocity along the motion path — see [`roving::roved_tracks`]), otherwise
+    /// the originals borrowed unchanged. Returned as a [`Cow`] so the common
+    /// no-roving case borrows with zero allocation and stays byte-identical.
+    ///
+    /// [`Cow`]: std::borrow::Cow
+    fn position_tracks(&self) -> (std::borrow::Cow<'_, Track>, std::borrow::Cow<'_, Track>) {
+        use std::borrow::Cow;
+        if self.has_roving_position() {
+            let (rx, ry) = roving::roved_tracks(&self.x, &self.y);
+            (Cow::Owned(rx), Cow::Owned(ry))
+        } else {
+            (Cow::Borrowed(&self.x), Cow::Borrowed(&self.y))
+        }
+    }
+
     /// Sample one property at time `t`, ignoring any expression (keyframes only).
+    ///
+    /// For the spatial **position** properties (`X` / `Y`) the sample honours
+    /// **roving keys**: when an interior position key roves, the `x` / `y` tracks
+    /// are re-timed for constant velocity along the motion path before sampling.
     pub fn value(&self, prop: Prop, t: f32) -> f32 {
-        self.track(prop).sample(t, prop.default_value())
+        match prop {
+            Prop::X | Prop::Y if self.has_roving_position() => {
+                let (rx, ry) = self.position_tracks();
+                let track = if prop == Prop::X { rx } else { ry };
+                track.sample(t, prop.default_value())
+            }
+            _ => self.track(prop).sample(t, prop.default_value()),
+        }
     }
 
     /// Sample one property at time `t`, **evaluating its expression** if one is
     /// set. `ctx` carries the comp/layer context (fps, duration, layer index);
     /// `ctx.time` should be `t`. The keyframed value is exposed to the expression
     /// as `value`; a parse/eval error falls back to the keyframed value.
+    ///
+    /// For the spatial **position** properties the keyframed value seen by the
+    /// expression honours **roving keys** (re-timed for constant velocity),
+    /// exactly like [`value`](Self::value).
     pub fn value_ctx(&self, prop: Prop, ctx: ExprCtx) -> f32 {
-        self.track(prop)
-            .sample_expr(ctx.time, prop.default_value(), ctx)
+        match prop {
+            Prop::X | Prop::Y if self.has_roving_position() => {
+                let (rx, ry) = self.position_tracks();
+                let track = if prop == Prop::X { rx } else { ry };
+                track.sample_expr(ctx.time, prop.default_value(), ctx)
+            }
+            _ => self
+                .track(prop)
+                .sample_expr(ctx.time, prop.default_value(), ctx),
+        }
     }
 
     /// Sample the transform properties at time `t` into a [`Transform`],
@@ -800,9 +853,14 @@ impl Comp {
     fn oriented_transform(&self, layer: &PulseLayer, idx: usize, t: f32) -> Transform {
         let mut tf = layer.transform_ctx(self.expr_ctx(idx, t));
         if layer.auto_orient {
+            // Auto-orient reads the **effective** position path so the heading
+            // follows the roving-re-timed motion (constant velocity) when any
+            // interior position key roves; otherwise the originals are borrowed
+            // unchanged.
+            let (rx, ry) = layer.position_tracks();
             tf.rotation_deg += motion_path::auto_orient_deg(
-                &layer.x,
-                &layer.y,
+                &rx,
+                &ry,
                 t,
                 Prop::X.default_value(),
                 Prop::Y.default_value(),

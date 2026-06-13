@@ -1733,6 +1733,30 @@ impl PulseApp {
                 }
             });
         }
+
+        // Rove Across Time — only for the spatial position properties (X / Y) and
+        // only on an *interior* keyframe (endpoints always anchor the time range).
+        // The position is a single 2D property split across the x/y tracks, so the
+        // toggle roves the matching key on **both** tracks together.
+        if matches!(prop, Prop::X | Prop::Y)
+            && layer.x.is_interior_key(t)
+            && layer.y.is_interior_key(t)
+        {
+            let mut roving = layer.x.is_roving_at(t) || layer.y.is_roving_at(t);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if ui
+                    .checkbox(&mut roving, "Rove Across Time")
+                    .on_hover_text(
+                        "Re-time this position key for constant velocity along the motion path",
+                    )
+                    .changed()
+                {
+                    layer.x.set_roving(t, roving);
+                    layer.y.set_roving(t, roving);
+                }
+            });
+        }
         ui.add_space(2.0);
     }
 

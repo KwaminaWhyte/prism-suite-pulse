@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Roving keyframes** (After Effects' *Rove Across Time*; PLAN *Spatial motion
+  paths ▸ roving in time* and *Graph Editor ▸ roving keyframes*). An interior
+  spatial-position keyframe can now be marked **roving**: it is freed from its
+  authored time and **re-timed so the layer moves at constant velocity** along
+  the spatial motion path between the surrounding **anchored** (non-roving) keys.
+  Within each anchored segment the elapsed time is distributed across the
+  interior roving keys in proportion to **arc length** along the path — so a key
+  where the path is spatially long gets a proportionally long slice of time,
+  equalizing speed. Only interior keys can rove; the first/last keys always
+  anchor the time range (matching After Effects). A new `serde`-defaulted
+  `roving: bool` flag on `Keyframe` carries it, **skipped on serialize when
+  false** so pre-roving `.pulse` files load and round-trip byte-identically. The
+  re-timer is a **pure** function — `comp::roved_times` maps each key's
+  `(time, position, roving)` to a new effective time (no time source, no IO, no
+  mutation) — with `comp::roved_tracks` lifting it to a layer's split `x` / `y`
+  position tracks over their shared (union) timeline. Position sampling
+  (`PulseLayer::value` / `value_ctx`) and **auto-orient along path** route
+  through the roved tracks when any interior key roves, and skip the re-timing
+  clone entirely otherwise (zero-cost, byte-identical for non-roving layers).
+  Degenerate inputs are handled: a coincident (zero-length) path falls back to
+  even time spacing, and effective times are clamped non-decreasing and in-range
+  so sampling never sees an out-of-order key. UI: a *Rove Across Time* toggle in
+  the Properties X / Y rows, shown only on an interior position key and roving
+  the matching key on both tracks together. Pure + headless: unit tests cover
+  endpoints-never-move, even-spacing-unchanged, uneven-redistribution with a
+  near-constant-velocity assertion, multiple roving keys per segment,
+  anchored-interior segment splitting, the coincident-position even fallback,
+  roving-off back-compat, determinism, the track-level remap + no-roving borrow
+  equality, layer-level position sampling, and serde round-trip incl. legacy
+  default.
+
 ## [0.4.0] - 2026-06-13
 
 ### Added
