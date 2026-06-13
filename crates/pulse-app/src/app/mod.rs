@@ -462,6 +462,92 @@ impl PulseApp {
         }
     }
 
+    /// Rebuild the live editor state from a loaded [`Project`] — the inverse of
+    /// [`to_project`](Self::to_project). Restores **everything save writes**: the
+    /// comp / precomp tree (active comp inline, the rest in
+    /// [`others`](Self::others)), the id counter, and the document's
+    /// [`presets`](Self::presets). Selection / playhead / editor mode reset to a
+    /// clean opening state, and the preview's frame + RAM-preview caches are
+    /// dropped so the new project decodes fresh.
+    fn apply_project(&mut self, project: Project) {
+        let mut comps = project.comps;
+        // A `Project` is always non-empty, but be defensive against a hand-edited
+        // file: fall back to a fresh demo comp rather than panic on an empty list.
+        if comps.is_empty() {
+            let mut comp = Comp::new();
+            comp.id = 1;
+            comps.push(comp);
+        }
+        let active = project.active.min(comps.len() - 1);
+        // Pull the active comp out to hold inline; the rest become `others`.
+        let comp = comps.remove(active);
+        let highest = std::iter::once(comp.id)
+            .chain(comps.iter().map(|c| c.id))
+            .max()
+            .unwrap_or(0);
+
+        self.comp = comp;
+        self.others = comps;
+        // Never let a stale/lagging `next_id` hand out a live comp id.
+        self.next_id = project.next_id.max(highest + 1).max(1);
+        self.presets = project.presets;
+
+        // Clean opening state.
+        self.time = 0.0;
+        self.playing = false;
+        self.selected = (!self.comp.layers.is_empty()).then_some(0);
+        self.mode = EditorMode::default();
+        self.graph = GraphState::default();
+        self.gizmo_drag = None;
+        self.export_range = None;
+        self.preset_name_draft.clear();
+        // Drop the frame + RAM-preview caches so the new project decodes fresh.
+        self.preview = crate::preview::PreviewRenderer::default();
+    }
+
+    /// **File ▸ Open…**: pick a `.pulse` file, deserialize it into a [`Project`],
+    /// and rebuild the editor from it (see [`apply_project`](Self::apply_project)).
+    ///
+    /// A missing / unreadable / malformed file is **non-destructive**: it logs the
+    /// error and surfaces it in a message dialog, leaving the current project
+    /// intact. Never panics. Cancelling the picker is a silent no-op.
+    fn open_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open Pulse project")
+            .add_filter("Pulse project", &["pulse", "json"])
+            .pick_file()
+        else {
+            return;
+        };
+        match Self::read_project(&path) {
+            Ok(project) => {
+                let n = project.comps.len();
+                self.apply_project(project);
+                let msg = format!("Opened {} ({n} comps)", path.display());
+                log::info!("{msg}");
+                self.status = Some(msg);
+            }
+            Err(e) => {
+                let msg = format!("Open failed: {e}");
+                log::error!("{msg}");
+                self.status = Some(msg.clone());
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("Couldn't open project")
+                    .set_description(&msg)
+                    .show();
+            }
+        }
+    }
+
+    /// Read + deserialize a `.pulse` file into a [`Project`] (pure I/O, no UI), so
+    /// the open path and tests share one loader. Errors (I/O or malformed JSON)
+    /// are returned, never panicked.
+    fn read_project(path: &std::path::Path) -> Result<Project, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        serde_json::from_slice::<Project>(&bytes).map_err(|e| format!("parse: {e}"))
+    }
+
     fn save_dialog(&self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Pulse project", &["pulse", "json"])

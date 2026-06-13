@@ -14,6 +14,14 @@ impl PulseApp {
                         self.new_comp();
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Open .pulse…")
+                        .on_hover_text("Open a saved Pulse project (comps, layers, presets)")
+                        .clicked()
+                    {
+                        self.open_dialog();
+                        ui.close_menu();
+                    }
                     if ui.button("Save .pulse…").clicked() {
                         self.save_dialog();
                         ui.close_menu();

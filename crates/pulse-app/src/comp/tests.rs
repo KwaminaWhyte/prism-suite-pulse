@@ -3399,6 +3399,54 @@ fn legacy_project_loads_with_empty_presets() {
 }
 
 #[test]
+fn project_with_layers_keyframes_and_preset_round_trips_via_bytes() {
+    // The acceptance bar for File ▸ Open: a project carrying a rigged layer (with
+    // effects + keyframes + an expression) *and* a saved animation preset must
+    // survive serialize → deserialize → re-serialize unchanged. `Project`/`Comp`
+    // don't derive `PartialEq`, so we compare the canonical JSON of the loaded
+    // project against the original's — a byte-exact document round-trip.
+    let mut comp = Comp::new();
+    comp.id = 1;
+    comp.layers.push(rigged_layer());
+    let mut project = Project {
+        comps: vec![comp],
+        active: 0,
+        next_id: 2,
+        presets: vec![AnimationPreset::capture("Saved", &rigged_layer())],
+    };
+    // A second comp so the comp tree (not just one comp) round-trips.
+    let mut b = Comp::empty_like("B", &Comp::new());
+    b.id = 2;
+    project.comps.push(b);
+    project.next_id = 3;
+
+    let bytes = serde_json::to_vec(&project).unwrap();
+    let loaded: Project = serde_json::from_slice(&bytes).expect("deserialize round-trip");
+
+    assert_eq!(loaded.comps.len(), 2);
+    assert_eq!(loaded.presets.len(), 1);
+    assert_eq!(loaded.next_id, 3);
+    assert_eq!(loaded.comps[0].layers[0].x, project.comps[0].layers[0].x);
+    assert_eq!(loaded.presets, project.presets);
+    // Whole-document equality via canonical serialization (no PartialEq needed).
+    assert_eq!(
+        serde_json::to_string(&loaded).unwrap(),
+        serde_json::to_string(&project).unwrap(),
+        "project document round-trips byte-for-byte"
+    );
+}
+
+#[test]
+fn malformed_project_json_returns_err_not_panic() {
+    // The Open path must never panic on a bad file — it returns Err and leaves the
+    // current project intact. Exercise the same deserialize the loader uses.
+    assert!(serde_json::from_slice::<Project>(b"not json at all {{{").is_err());
+    assert!(serde_json::from_slice::<Project>(b"").is_err());
+    // Structurally valid JSON but the wrong shape (missing required `comps`).
+    assert!(serde_json::from_slice::<Project>(br#"{"active":0}"#).is_err());
+}
+
+#[test]
 fn preset_capture_is_deterministic() {
     let src = rigged_layer();
     let a = AnimationPreset::capture("Same", &src);

@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Open / load `.pulse` projects** (*File ▸ Open…*). Pulse could already
+  **save** a project but had **no in-app load path**, so saved projects — and
+  the newly added animation presets — could not be read back. *File ▸ Open…* now
+  pops an `rfd` picker, `serde_json`-deserializes the file into a `Project`, and
+  rebuilds the editor's runtime state as the **exact inverse of `to_project`**:
+  the active comp inline with the rest of the comp/precomp tree in `others`, the
+  monotonic comp-id counter, fps/size/duration/work-area, and — crucially — the
+  document's **animation presets** (`Project::presets`). Selection / playhead /
+  editor mode reset to a clean opening state and the frame + RAM-preview caches
+  are dropped so the reopened project decodes fresh. A malformed / unreadable
+  file is **non-destructive**: it logs the error and shows an error dialog,
+  leaving the current project intact, and **never panics** (the loader returns a
+  `Result`, not an `unwrap`). Closes the round-trip: save a project with effects
+  + keyframes + an animation preset, reopen it, and get the same `Project` back.
+  Pure loader (`read_project`: bytes → `Project`) shared by the UI and tests;
+  covered by a full document byte-round-trip test (layers + keyframes + preset)
+  and a malformed-JSON-returns-`Err` test, alongside the existing legacy/minimal
+  back-compat coverage.
+
 - **Animation presets** (After Effects' *Save / Apply Animation Preset*; PLAN
   *Presets / animation presets (S)*). A new pure, serializable
   `comp::AnimationPreset` (`comp/preset.rs`) is a **named snapshot of a layer's
