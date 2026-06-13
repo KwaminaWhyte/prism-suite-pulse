@@ -57,6 +57,28 @@ pub struct Camera {
     /// telephoto, flatter perspective); larger = wider lens.
     #[serde(default = "Camera::default_fov")]
     pub fov_deg: f32,
+    /// **Depth of field** master switch. When `false` (the default) the camera
+    /// renders every 3-D layer perfectly sharp — the pre-DoF behavior — so any
+    /// existing comp (and a serde-default / `dof`-less `.pulse` file) is
+    /// unchanged. When `true` the lens defocuses 3-D layers by how far their
+    /// camera-space depth is from [`focus_distance`](Self::focus_distance),
+    /// scaled by [`aperture`](Self::aperture).
+    #[serde(default)]
+    pub dof_enabled: bool,
+    /// The camera-space depth (comp px, along the view axis) that is in perfect
+    /// focus: a 3-D layer whose [`layer_depth`](super::Comp::layer_depth) equals
+    /// this renders sharp; layers nearer or farther blur. Defaults to the
+    /// camera-to-point-of-interest distance (`0.0` is a sentinel meaning "use the
+    /// focal plane"). Only consulted when [`dof_enabled`](Self::dof_enabled).
+    #[serde(default)]
+    pub focus_distance: f32,
+    /// **Aperture / blur strength**: how aggressively out-of-focus layers blur.
+    /// It is the blur radius in comp px produced **per unit of relative depth
+    /// error** (see [`coc_blur_radius`](Self::coc_blur_radius)); a wider aperture
+    /// (larger value) gives a shallower depth of field. `0.0` (the default) means
+    /// no blur even with [`dof_enabled`](Self::dof_enabled) on.
+    #[serde(default)]
+    pub aperture: f32,
 }
 
 /// One layer's quad projected through the camera onto the comp plane: the
@@ -81,6 +103,9 @@ impl Default for Camera {
             position: Self::default_position(),
             poi: Self::default_poi(),
             fov_deg: Self::default_fov(),
+            dof_enabled: false,
+            focus_distance: 0.0,
+            aperture: 0.0,
         }
     }
 }
@@ -218,6 +243,54 @@ impl Camera {
             Self::distance_for(comp_h, self.fov_deg)
         }
     }
+
+    /// The camera-space depth (comp px) that is in **perfect focus**: the stored
+    /// [`focus_distance`](Self::focus_distance) when it is set (positive), else
+    /// the camera-to-point-of-interest distance — the focal plane that projects
+    /// at unit scale (see [`focal_px`](Self::focal_px)). Falling back to the focal
+    /// plane makes "DoF on, focus untouched" focus on whatever the camera is
+    /// already aimed at.
+    pub fn effective_focus(&self, comp_h: f32) -> f32 {
+        if self.focus_distance > 0.0 {
+            self.focus_distance
+        } else {
+            self.focal_px(comp_h)
+        }
+    }
+
+    /// The **circle-of-confusion blur radius** (comp px) for a 3-D layer at
+    /// camera-space `depth`, under this camera's depth-of-field settings.
+    ///
+    /// Pure function of `(depth, focus, aperture)` — the testable heart of DoF.
+    /// A real thin lens blurs a point by a circle whose diameter grows with the
+    /// *relative* depth error `|depth − focus| / focus`; we model the blur radius
+    /// as
+    ///
+    /// ```text
+    /// r = aperture · |depth − focus| / focus
+    /// ```
+    ///
+    /// so a layer **at** the focus distance is perfectly sharp (`r = 0`), the
+    /// radius grows linearly with both how far it is from focus and the aperture,
+    /// and it is scale-invariant (doubling the whole scene's depth and focus
+    /// leaves the look unchanged). Returns `0.0` when DoF is off, the aperture is
+    /// zero, or `focus`/`depth` is degenerate. The result is clamped to a sane
+    /// `MAX_DOF_RADIUS` so a pathological aperture can't blow up the kernel.
+    pub fn coc_blur_radius(&self, depth: f32, comp_h: f32) -> f32 {
+        if !self.dof_enabled || self.aperture <= 0.0 {
+            return 0.0;
+        }
+        let focus = self.effective_focus(comp_h);
+        if !focus.is_finite() || focus <= 0.0 || !depth.is_finite() {
+            return 0.0;
+        }
+        let r = self.aperture * (depth - focus).abs() / focus;
+        r.clamp(0.0, Self::MAX_DOF_RADIUS)
+    }
+
+    /// Upper bound on the DoF blur radius (comp px) so an extreme aperture can't
+    /// produce a runaway convolution kernel.
+    pub const MAX_DOF_RADIUS: f32 = 256.0;
 
     /// Project a comp-space 3-D point `(x, y, z)` through this camera onto the
     /// comp plane, for a comp of pixel height `comp_h`.

@@ -99,7 +99,7 @@ pub use roving::{has_roving, roved_times, roved_tracks, RoveKey};
 #[allow(unused_imports)]
 pub use preset::{PresetTrack, PropTag};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
-pub use spatial::{apply_spatial_effects, RadialKind, SpatialEffect};
+pub use spatial::{apply_spatial_effects, gaussian_blur, RadialKind, SpatialEffect};
 pub use stylize::{apply_stylize_effects, StylizeEffect};
 pub use text::{TextAlign, TextLayer};
 pub use time_remap::TimeRemap;
@@ -989,6 +989,25 @@ impl Comp {
         let normal = light::layer_normal(ox, oy, oz);
         let surface = self.layer_pivot_3d(idx, t);
         Some(light::illumination(&self.lights, surface, normal))
+    }
+
+    /// The **depth-of-field blur radius** (comp px) the camera applies to 3-D
+    /// layer `idx` at time `t`, or `None` when the layer must render perfectly
+    /// sharp.
+    ///
+    /// Returns `None` (no blur) unless the camera's
+    /// [`dof_enabled`](Camera::dof_enabled) is set **and** the layer is a **3-D
+    /// layer** — so a 2-D layer, or any comp with DoF off (the default), keeps its
+    /// exact pixels (the back-compat contract). When DoF is on, the radius is the
+    /// pure [`Camera::coc_blur_radius`] of the layer's camera-space
+    /// [`depth`](Self::layer_depth); an in-focus layer yields `Some(0.0)` (a
+    /// no-op blur) so the caller can treat "3-D + DoF" uniformly.
+    pub fn layer_dof_blur(&self, idx: usize, t: f32) -> Option<f32> {
+        if !self.camera.dof_enabled || !self.layer_is_3d(idx) {
+            return None;
+        }
+        let depth = self.layer_depth(idx, t);
+        Some(self.camera.coc_blur_radius(depth, self.height as f32))
     }
 
     /// Layer `idx`'s resolved comp-space [`Affine2`] for the rasterizer at time

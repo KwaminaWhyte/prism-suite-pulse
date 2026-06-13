@@ -5,8 +5,8 @@
 use super::{over, render_comp, Geom, Lin, RenderCtx};
 use crate::comp::{
     apply_distort_effects, apply_effects, apply_effects_masked, apply_key_effects,
-    apply_spatial_effects, apply_stylize_effects, blend_masked, mask_stack_coverage, Affine2, Comp,
-    DecodedFrame, GenerateEffect, MatteMode, PulseLayer,
+    apply_spatial_effects, apply_stylize_effects, blend_masked, gaussian_blur, mask_stack_coverage,
+    Affine2, Comp, DecodedFrame, GenerateEffect, MatteMode, PulseLayer,
 };
 use prism_core::color::srgb_to_linear;
 
@@ -872,6 +872,35 @@ pub(super) fn apply_spatial(layer_buf: &mut [Lin], geom: &Geom, layer: &PulseLay
     let (w, h) = (geom.w as usize, geom.h as usize);
     let mut rgba: Vec<[f32; 4]> = layer_buf.iter().map(|p| [p.r, p.g, p.b, p.a]).collect();
     apply_spatial_effects(&layer.spatial_effects, &mut rgba, w, h);
+    for (dst, src) in layer_buf.iter_mut().zip(rgba.iter()) {
+        dst.r = src[0];
+        dst.g = src[1];
+        dst.b = src[2];
+        dst.a = src[3];
+    }
+}
+
+/// Apply the camera's **depth-of-field** defocus to a 3-D layer's isolated
+/// rendered buffer: a symmetric Gaussian blur whose radius is the layer's
+/// circle-of-confusion ([`Comp::layer_dof_blur`] → [`Camera::coc_blur_radius`]).
+///
+/// `radius` is the comp-px circle-of-confusion radius the camera computed for
+/// this layer; an in-focus layer (`radius ≈ 0`) is left untouched (no blur
+/// allocation or convolution), so a sharp 3-D layer renders byte-identically to
+/// the no-DoF path. The radius is mapped to a Gaussian `sigma = radius / 2`
+/// (≈ a 95%-energy blur whose visible spread is the CoC diameter) and run on
+/// both axes. Off-buffer samples read transparent (no edge clamp) so a defocused
+/// layer's soft edges spread into the surrounding frame the way a real lens
+/// blurs a bright object against the background. The bridge mirrors
+/// [`apply_spatial`].
+pub(super) fn apply_dof(layer_buf: &mut [Lin], geom: &Geom, radius: f32) {
+    let sigma = radius * 0.5;
+    if sigma <= 0.0 {
+        return; // in focus (or degenerate) — leave the buffer exactly as is.
+    }
+    let (w, h) = (geom.w as usize, geom.h as usize);
+    let mut rgba: Vec<[f32; 4]> = layer_buf.iter().map(|p| [p.r, p.g, p.b, p.a]).collect();
+    gaussian_blur(&mut rgba, w, h, sigma, sigma, false);
     for (dst, src) in layer_buf.iter_mut().zip(rgba.iter()) {
         dst.r = src[0];
         dst.g = src[1];

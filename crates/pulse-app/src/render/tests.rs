@@ -2813,3 +2813,118 @@ fn back_facing_layer_falls_to_ambient_floor() {
     let away = make(180.0);
     assert!(facing > away, "facing {facing} brighter than back-facing {away}");
 }
+
+// ---- Camera depth of field (defocus blur on 3-D layers) ----
+
+/// Count of fully/partially opaque pixels in a frame.
+fn dof_opaque_count(f: &Frame) -> usize {
+    (0..f.width * f.height)
+        .filter(|i| f.pixels[(*i * 4 + 3) as usize] > 0)
+        .count()
+}
+
+#[test]
+fn dof_off_renders_byte_identical() {
+    // A comp with DoF off (the default) renders exactly as before — even with a
+    // 3-D layer pushed off the focal plane. Golden / back-compat guarantee.
+    let mut base = comp_3d_render();
+    base.layers[0].scale.set_key(0.0, 2.0);
+    base.layers[0].threed = true;
+    base.layers[0].z.set_key(0.0, 600.0); // off the focal plane
+    let mut explicit_off = base.clone();
+    explicit_off.camera.dof_enabled = false; // explicit OFF
+    explicit_off.camera.aperture = 80.0; // aperture set but DoF off → ignored
+    let a = render_frame(&base, 0.0);
+    let b = render_frame(&explicit_off, 0.0);
+    assert_eq!(a.pixels, b.pixels, "DoF off → byte-identical");
+}
+
+#[test]
+fn in_focus_layer_is_sharp_with_dof_on() {
+    // A 3-D layer placed exactly at the focus distance renders identically with
+    // DoF on vs off — an in-focus layer is untouched.
+    let mut sharp = comp_3d_render();
+    sharp.layers[0].scale.set_key(0.0, 2.0);
+    sharp.layers[0].threed = true;
+    sharp.layers[0].z.set_key(0.0, 300.0);
+    let depth = sharp.layer_depth(0, 0.0);
+    let mut dof_on = sharp.clone();
+    dof_on.camera.dof_enabled = true;
+    dof_on.camera.aperture = 60.0;
+    dof_on.camera.focus_distance = depth; // focus exactly on the layer
+    let a = render_frame(&sharp, 0.0);
+    let b = render_frame(&dof_on, 0.0);
+    assert_eq!(a.pixels, b.pixels, "in-focus 3-D layer is sharp");
+}
+
+#[test]
+fn out_of_focus_layer_blurs_and_spreads() {
+    // A 3-D layer far from focus blurs: its opaque footprint spreads (soft edges
+    // bleed into surrounding transparent pixels) compared to the sharp render.
+    let mut sharp = comp_3d_render();
+    sharp.layers[0] = PulseLayer::new("L", [0.2, 0.8, 0.4, 1.0]);
+    sharp.layers[0].scale.set_key(0.0, 0.5); // small footprint so it can spread
+    sharp.layers[0].threed = true;
+    sharp.layers[0].z.set_key(0.0, 100.0);
+    let mut blurred = sharp.clone();
+    blurred.camera.dof_enabled = true;
+    blurred.camera.aperture = 40.0;
+    blurred.camera.focus_distance = 1500.0; // far from the layer → blur
+    let sf = render_frame(&sharp, 0.0);
+    let bf = render_frame(&blurred, 0.0);
+    assert_ne!(sf.pixels, bf.pixels, "out-of-focus layer must differ");
+    assert!(
+        dof_opaque_count(&bf) > dof_opaque_count(&sf),
+        "blur spreads coverage: blurred {} > sharp {}",
+        dof_opaque_count(&bf),
+        dof_opaque_count(&sf),
+    );
+}
+
+#[test]
+fn wider_aperture_blurs_more() {
+    // The same off-focus 3-D layer blurs more with a wider aperture: a wider
+    // aperture spreads its soft footprint over more pixels.
+    let make = |aperture: f32| -> usize {
+        let mut c = comp_3d_render();
+        c.layers[0] = PulseLayer::new("L", [0.9, 0.6, 0.2, 1.0]);
+        c.layers[0].scale.set_key(0.0, 0.4); // small footprint so it can spread
+        c.layers[0].threed = true;
+        c.layers[0].z.set_key(0.0, 50.0);
+        c.camera.dof_enabled = true;
+        c.camera.aperture = aperture;
+        c.camera.focus_distance = 800.0;
+        dof_opaque_count(&render_frame(&c, 0.0))
+    };
+    let narrow = make(10.0);
+    let wide = make(40.0);
+    assert!(wide > narrow, "wider aperture spreads more: {wide} > {narrow}");
+}
+
+#[test]
+fn dof_does_not_blur_2d_layers() {
+    // A 2-D layer is never defocused, even with DoF on and a wide aperture.
+    let mut base = comp_3d_render();
+    base.layers[0].scale.set_key(0.0, 2.0); // 2-D (threed stays false)
+    let baseline = render_frame(&base, 0.0).pixels.clone();
+    let mut dof_on = base.clone();
+    dof_on.camera.dof_enabled = true;
+    dof_on.camera.aperture = 150.0;
+    dof_on.camera.focus_distance = 9000.0;
+    let b = render_frame(&dof_on, 0.0);
+    assert_eq!(baseline, b.pixels, "2-D layer unaffected by camera DoF");
+}
+
+#[test]
+fn dof_render_is_deterministic() {
+    let mut c = comp_3d_render();
+    c.layers[0].scale.set_key(0.0, 1.5);
+    c.layers[0].threed = true;
+    c.layers[0].z.set_key(0.0, 700.0);
+    c.camera.dof_enabled = true;
+    c.camera.aperture = 90.0;
+    c.camera.focus_distance = 200.0;
+    let a = render_frame(&c, 0.0);
+    let b = render_frame(&c, 0.0);
+    assert_eq!(a.pixels, b.pixels, "DoF render is deterministic");
+}

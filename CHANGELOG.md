@@ -10,6 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Camera depth of field** (After Effects' camera *Depth of Field / Focus
+  Distance / Aperture*; PLAN *Camera (M): … depth of field
+  (focus distance/aperture/blur)*). The comp camera gains three
+  `serde`-defaulted fields — `dof_enabled: bool` (**off** by default),
+  `focus_distance: f32` (camera-space depth, comp px, that renders sharp; `0`
+  means "the focal plane / camera-to-look-at distance"), and `aperture: f32`
+  (blur strength) — so any existing `.pulse` file (and a serde-default camera)
+  loads with DoF off and renders **byte-identically**. When enabled, each **3-D
+  layer** is defocused in proportion to how far its camera-space
+  [depth](`Comp::layer_depth`) is from the focus distance: the blur is a pure
+  **circle-of-confusion** radius `r = aperture · |depth − focus| / focus`
+  (`Camera::coc_blur_radius`, clamped to a sane max), so a layer **at** the focus
+  distance is perfectly sharp (`r = 0`), and the radius grows linearly with both
+  the aperture and the relative depth error (scale-invariant). The radius maps to
+  a Gaussian `sigma = r/2` and is applied as the **last** per-layer pass (after
+  lighting / masks / key / spatial / stylize / distort) over the layer's isolated
+  premultiplied linear-light buffer — the way a lens defocuses the finished layer
+  image — with transparent off-buffer samples so soft edges spread naturally; a
+  layer that actually blurs is forced through the isolated-buffer path. **Back-
+  compat is exact**: `Comp::layer_dof_blur` returns `None` for a 2-D layer or any
+  DoF-off comp, and an in-focus 3-D layer is left untouched, so 2-D layers and
+  pre-DoF comps render unchanged. Wired through the **real compositor** (so the
+  preview shows it) and exposed in the **Comp ▸ Camera** menu (a *Depth of field*
+  toggle plus *Focus distance* / *Aperture* sliders). Pure CoC math (sharp at
+  focus, grows with distance + aperture, symmetric, DoF-off / aperture-0 sharp,
+  clamped, default-focus = focal plane) and the render path (DoF-off
+  byte-identical golden, in-focus sharp, out-of-focus blur spreads, wider
+  aperture blurs more, 2-D unaffected, determinism, serde + legacy round-trips)
+  unit-tested. Follow-ups: a bokeh/hexagonal-iris shape (vs the current Gaussian
+  CoC), near/far focus-range falloff, and a focus-on-layer convenience.
 - **Lights** (After Effects' comp lights + per-layer material option; PLAN
   *Lights (M): point/spot/parallel/ambient; intensity/color/cone*). A comp now
   carries a `serde`-defaulted **empty** `lights: Vec<Light>` list, with a

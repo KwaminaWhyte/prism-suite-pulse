@@ -29,8 +29,8 @@ pub use export::{export_sequence_in_project, range_frame_count, RenderRange};
 #[cfg(test)]
 pub use export::export_sequence;
 use passes::{
-    apply_adjustment, apply_distort, apply_key, apply_masks, apply_spatial, apply_stylize,
-    apply_track_matte, composite_footage, composite_generate, composite_layer,
+    apply_adjustment, apply_distort, apply_dof, apply_key, apply_masks, apply_spatial,
+    apply_stylize, apply_track_matte, composite_footage, composite_generate, composite_layer,
     composite_motion_blur, composite_precomp, composite_shape, composite_text, decode_footage,
 };
 
@@ -353,6 +353,14 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         // its own pixels before it composites.
         let light = comp.layer_light_factor(i, t);
         let lit = light.is_some();
+        // The camera's depth-of-field blur radius (comp px) for this 3-D layer,
+        // or `None` when DoF is off / the layer is 2-D (then no defocus, and the
+        // crisp paths stay byte-identical). A 3-D layer in focus yields
+        // `Some(~0)`, a no-op blur. A layer that actually blurs (radius > 0) is
+        // forced through the isolated-buffer path so its whole image can be
+        // defocused before it composites.
+        let dof = comp.layer_dof_blur(i, t);
+        let defocused = dof.is_some_and(|r| r > 0.0);
         // Expression-aware opacity for this layer at the frame time (the value the
         // rasterizers scale coverage by).
         let opacity = comp.layer_opacity(i, t);
@@ -370,7 +378,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 composite_generate(&mut layer_buf, &geom, world, layer, gen, opacity);
                 finish_layer(
                     &mut acc, &mut layer_buf, &geom, comp, cache, world, layer, masked, keyed,
-                    spatial, stylize, distort, matte_src, light, t, ctx,
+                    spatial, stylize, distort, matte_src, light, dof, t, ctx,
                 );
                 continue;
             }
@@ -408,6 +416,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     distort,
                     matte_src,
                     light,
+                    dof,
                     t,
                     ctx,
                 );
@@ -434,6 +443,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     distort,
                     matte_src,
                     light,
+                    dof,
                     t,
                     ctx,
                 );
@@ -459,6 +469,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     distort,
                     matte_src,
                     light,
+                    dof,
                     t,
                     ctx,
                 );
@@ -490,6 +501,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     distort,
                     matte_src,
                     light,
+                    dof,
                     t,
                     ctx,
                 );
@@ -522,6 +534,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     distort,
                     matte_src,
                     light,
+                    dof,
                     t,
                     ctx,
                 );
@@ -543,6 +556,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     || matte_src.is_some()
                     || blended
                     || lit
+                    || defocused
                 {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, opacity);
@@ -561,6 +575,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                         distort,
                         matte_src,
                         light,
+                        dof,
                         t,
                         ctx,
                     );
@@ -616,6 +631,7 @@ fn finish_layer(
     distort: bool,
     matte_src: Option<usize>,
     light: Option<[f32; 3]>,
+    dof: Option<f32>,
     t: f32,
     ctx: RenderCtx,
 ) {
@@ -653,6 +669,14 @@ fn finish_layer(
     // already-stylized buffer (matching AE's distort-below-stylize effect order).
     if distort {
         apply_distort(layer_buf, geom, layer);
+    }
+    // Camera depth of field runs last — it defocuses the *finished* layer image
+    // (after lighting, masks, key, spatial, stylize and distort), the way a lens
+    // blurs whatever ends up on the layer's plane. An in-focus 3-D layer (radius
+    // ~0) and any 2-D / DoF-off layer (`None`) are no-ops, so they composite
+    // byte-identically to the pre-DoF path.
+    if let Some(radius) = dof {
+        apply_dof(layer_buf, geom, radius);
     }
     // Composite the finished isolated buffer onto the accumulator using the
     // layer's blend mode (Normal reduces exactly to source-over).

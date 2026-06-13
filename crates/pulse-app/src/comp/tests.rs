@@ -4088,3 +4088,114 @@ fn comp_with_lights_serde_round_trips_and_legacy_defaults_empty() {
     let lc: Comp = serde_json::from_str(legacy).unwrap();
     assert!(lc.lights.is_empty(), "legacy comp has no lights");
 }
+
+// --- Camera depth of field (circle-of-confusion blur) ----------------------
+
+/// A DoF-enabled camera with an explicit focus distance + aperture.
+fn dof_cam(focus: f32, aperture: f32) -> Camera {
+    Camera {
+        dof_enabled: true,
+        focus_distance: focus,
+        aperture,
+        ..Camera::default()
+    }
+}
+
+#[test]
+fn coc_zero_at_focus_distance() {
+    // A layer exactly at the focus distance is perfectly sharp.
+    let cam = dof_cam(500.0, 40.0);
+    assert_eq!(cam.coc_blur_radius(500.0, 720.0), 0.0);
+}
+
+#[test]
+fn coc_grows_with_distance_from_focus() {
+    let cam = dof_cam(500.0, 40.0);
+    let near = cam.coc_blur_radius(600.0, 720.0); // 100 from focus
+    let far = cam.coc_blur_radius(900.0, 720.0); // 400 from focus
+    assert!(near > 0.0, "off-focus layer blurs");
+    assert!(far > near, "farther from focus blurs more ({far} > {near})");
+    // Symmetric: same |error| in front of focus blurs the same amount.
+    let front = cam.coc_blur_radius(400.0, 720.0); // 100 from focus (nearer)
+    assert!((front - near).abs() < 1e-4, "blur symmetric about focus");
+}
+
+#[test]
+fn coc_grows_with_aperture() {
+    let narrow = dof_cam(500.0, 20.0).coc_blur_radius(800.0, 720.0);
+    let wide = dof_cam(500.0, 80.0).coc_blur_radius(800.0, 720.0);
+    assert!(wide > narrow, "wider aperture blurs more ({wide} > {narrow})");
+    // Aperture is the linear scale: 4x aperture → 4x radius.
+    assert!((wide - 4.0 * narrow).abs() < 1e-3, "radius linear in aperture");
+}
+
+#[test]
+fn coc_zero_when_dof_off_or_aperture_zero() {
+    // DoF disabled: no blur regardless of depth.
+    let mut cam = dof_cam(500.0, 40.0);
+    cam.dof_enabled = false;
+    assert_eq!(cam.coc_blur_radius(2000.0, 720.0), 0.0, "DoF off = sharp");
+    // DoF on but aperture zero: still sharp (the default-aperture case).
+    let cam = dof_cam(500.0, 0.0);
+    assert_eq!(cam.coc_blur_radius(2000.0, 720.0), 0.0, "aperture 0 = sharp");
+}
+
+#[test]
+fn coc_radius_is_clamped() {
+    // A pathological aperture + huge depth error can't exceed MAX_DOF_RADIUS.
+    let cam = dof_cam(1.0, 1e6);
+    assert_eq!(cam.coc_blur_radius(1e6, 720.0), Camera::MAX_DOF_RADIUS);
+}
+
+#[test]
+fn coc_default_focus_is_the_focal_plane() {
+    // focus_distance == 0 means "use the camera-to-look-at focal plane", so a
+    // layer on the z = 0 plane (the default poi) is sharp.
+    let mut cam = Camera {
+        position: [0.0, 0.0, -Camera::default_distance(720.0)],
+        dof_enabled: true,
+        aperture: 50.0,
+        ..Camera::default()
+    };
+    cam.focus_distance = 0.0;
+    let focal = cam.effective_focus(720.0);
+    assert!(focal > 0.0);
+    assert_eq!(cam.coc_blur_radius(focal, 720.0), 0.0, "focal plane is sharp");
+    assert!(cam.coc_blur_radius(focal + 300.0, 720.0) > 0.0, "off it blurs");
+}
+
+#[test]
+fn layer_dof_blur_none_when_off_or_2d() {
+    let mut c = comp_3d();
+    c.layers[0].z.set_key(0.0, 800.0);
+    // DoF off (default): None even for a 3-D layer.
+    assert_eq!(c.layer_dof_blur(0, 0.0), None, "DoF off → None");
+    // DoF on, 3-D layer off the focal plane: Some positive radius.
+    c.camera.dof_enabled = true;
+    c.camera.aperture = 60.0;
+    let r = c.layer_dof_blur(0, 0.0).expect("3-D + DoF on yields a radius");
+    assert!(r > 0.0, "off-focus 3-D layer blurs ({r})");
+    // A 2-D layer is never defocused, even with DoF on.
+    c.layers[0].threed = false;
+    assert_eq!(c.layer_dof_blur(0, 0.0), None, "2-D layer never blurs");
+}
+
+#[test]
+fn camera_dof_serde_round_trip_and_legacy_default() {
+    let mut c = comp_3d();
+    c.camera.dof_enabled = true;
+    c.camera.focus_distance = 750.0;
+    c.camera.aperture = 35.0;
+    let json = serde_json::to_string(&c).unwrap();
+    let back: Comp = serde_json::from_str(&json).unwrap();
+    assert!(back.camera.dof_enabled);
+    assert!((back.camera.focus_distance - 750.0).abs() < 1e-4);
+    assert!((back.camera.aperture - 35.0).abs() < 1e-4);
+
+    // A legacy camera JSON without any `dof_*` keys loads DoF off (sharp).
+    let legacy = r#"{"position":[0.0,0.0,-100.0],"poi":[0.0,0.0,0.0],"fov_deg":54.0}"#;
+    let cam: Camera = serde_json::from_str(legacy).unwrap();
+    assert!(!cam.dof_enabled, "legacy camera defaults DoF off");
+    assert_eq!(cam.focus_distance, 0.0);
+    assert_eq!(cam.aperture, 0.0);
+}

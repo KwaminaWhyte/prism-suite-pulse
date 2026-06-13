@@ -195,6 +195,38 @@ impl PulseApp {
         {
             cam.set_focal_length(focal, comp_w, comp_h);
         }
+        // Depth of field: defocus 3-D layers by how far their camera-space depth
+        // is from the focus distance, scaled by the aperture. Off by default so
+        // every existing comp keeps its sharp look.
+        ui.separator();
+        ui.checkbox(&mut cam.dof_enabled, "Depth of field")
+            .on_hover_text("Blur 3-D layers away from the focus distance (a lens defocus)");
+        if cam.dof_enabled {
+            // `0` focus means "the focal plane (camera-to-look-at distance)";
+            // surface that live default so the slider starts at a sane value.
+            let default_focus = cam.effective_focus(comp_h);
+            let mut focus = if cam.focus_distance > 0.0 {
+                cam.focus_distance
+            } else {
+                default_focus
+            };
+            if ui
+                .add(
+                    egui::Slider::new(&mut focus, 1.0..=8000.0)
+                        .text("Focus distance")
+                        .suffix(" px"),
+                )
+                .on_hover_text("Camera-space depth that renders sharp; layers nearer/farther blur")
+                .changed()
+            {
+                cam.focus_distance = focus.max(1.0);
+            }
+            ui.add(
+                egui::Slider::new(&mut cam.aperture, 0.0..=200.0)
+                    .text("Aperture"),
+            )
+            .on_hover_text("Blur strength — wider aperture = shallower depth of field");
+        }
         if ui
             .button("Reset camera")
             .on_hover_text("Restore the default camera (flat 2-D look)")
