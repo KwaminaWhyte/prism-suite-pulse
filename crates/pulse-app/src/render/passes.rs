@@ -4,9 +4,9 @@
 
 use super::{over, render_comp, Geom, Lin, RenderCtx};
 use crate::comp::{
-    apply_distort_effects, apply_effects, apply_key_effects, apply_spatial_effects,
-    apply_stylize_effects, mask_stack_coverage, Affine2, Comp, DecodedFrame, GenerateEffect,
-    MatteMode, PulseLayer,
+    apply_distort_effects, apply_effects, apply_effects_masked, apply_key_effects,
+    apply_spatial_effects, apply_stylize_effects, blend_masked, mask_stack_coverage, Affine2, Comp,
+    DecodedFrame, GenerateEffect, MatteMode, PulseLayer,
 };
 use prism_core::color::srgb_to_linear;
 
@@ -227,6 +227,9 @@ pub(super) fn composite_footage(
         return;
     };
     let has_effects = !layer.effects.is_empty();
+    // Pre-flatten the effect-mask region once (empty when inactive); `lx/ly` are
+    // already layer-local, the space the mask is authored in.
+    let fx_poly = layer.effect_mask_poly();
 
     for py in y0..=y1 {
         let comp_y = py as f32 + 0.5 - cy;
@@ -244,9 +247,17 @@ pub(super) fn composite_footage(
                 continue;
             }
             // The layer's effect stack grades the (linear, straight) footage color
-            // per pixel — the footage twin of the solid's constant-color grade.
+            // per pixel — the footage twin of the solid's constant-color grade —
+            // gated by the effect mask (no-op when inactive).
             if has_effects {
-                texel = apply_effects(&layer.effects, texel);
+                texel = apply_effects_masked(
+                    &layer.effects,
+                    &layer.effect_mask,
+                    &fx_poly,
+                    lx,
+                    ly,
+                    texel,
+                );
             }
             let cov = texel[3].clamp(0.0, 1.0) * opacity;
             if cov <= 0.0 {
@@ -329,6 +340,7 @@ pub(super) fn composite_precomp(
         return;
     };
     let has_effects = !layer.effects.is_empty();
+    let fx_poly = layer.effect_mask_poly();
     let fw = frame.width as f32;
     let fh = frame.height as f32;
 
@@ -360,7 +372,14 @@ pub(super) fn composite_precomp(
                 a,
             ];
             if has_effects {
-                lin = apply_effects(&layer.effects, lin);
+                lin = apply_effects_masked(
+                    &layer.effects,
+                    &layer.effect_mask,
+                    &fx_poly,
+                    lx,
+                    ly,
+                    lin,
+                );
             }
             let cov = lin[3].clamp(0.0, 1.0) * opacity;
             if cov <= 0.0 {
@@ -494,7 +513,18 @@ pub(super) fn composite_layer(
     // The layer's own effect stack processes its (linear, straight) color before
     // it's composited — the solid is a constant-color source, so one evaluation
     // covers the whole quad.
-    let [lr, lg, lb, _] = apply_effects(&layer.effects, [lr, lg, lb, layer.color[3]]);
+    let orig = [lr, lg, lb, layer.color[3]];
+    let [er, eg, eb, _] = apply_effects(&layer.effects, orig);
+    // Effect mask: when active the grade only shows inside its (feathered) region,
+    // so the constant effected colour must be blended back toward the **original**
+    // colour per pixel (`out = lerp(orig, effected, coverage)`). Inactive (the
+    // default) → the effected colour covers the whole quad, as before.
+    let fx_active = layer.effect_mask.is_active() && !layer.effects.is_empty();
+    let fx_poly = if fx_active {
+        layer.effect_mask.region.flatten()
+    } else {
+        Vec::new()
+    };
 
     // Invert the world matrix once: a zero-scale (or otherwise singular) chain
     // collapses to nothing, so there is no coverage to composite.
@@ -517,13 +547,22 @@ pub(super) fn composite_layer(
             if lx.abs() > half_w || ly.abs() > half_h {
                 continue;
             }
+            // Pick the per-pixel colour: constant effected colour, or — under an
+            // active effect mask — the mask-coverage blend of original↔effected.
+            let (r, g, b) = if fx_active {
+                let cov = layer.effect_mask.coverage_at(&fx_poly, lx, ly);
+                let [br, bg, bb, _] = blend_masked(orig, [er, eg, eb, orig[3]], cov);
+                (br, bg, bb)
+            } else {
+                (er, eg, eb)
+            };
             // Source-over in linear light.
             let idx = (py as u32 * w + px as u32) as usize;
             acc[idx] = over(
                 Lin {
-                    r: lr,
-                    g: lg,
-                    b: lb,
+                    r,
+                    g,
+                    b,
                     a: src_a,
                 },
                 acc[idx],
@@ -584,6 +623,8 @@ pub(super) fn composite_generate(
     };
 
     let color_gen = gen.produces_color();
+    let has_effects = !layer.effects.is_empty();
+    let fx_poly = layer.effect_mask_poly();
     for py in y0..=y1 {
         let comp_y = py as f32 + 0.5 - cy;
         for px in x0..=x1 {
@@ -612,7 +653,11 @@ pub(super) fn composite_generate(
             } else {
                 [sr, sg, sb, 1.0]
             };
-            let [r, g, b, _] = apply_effects(&layer.effects, straight);
+            let [r, g, b, _] = if has_effects {
+                apply_effects_masked(&layer.effects, &layer.effect_mask, &fx_poly, lx, ly, straight)
+            } else {
+                straight
+            };
             let idx = (py as u32 * w + px as u32) as usize;
             out[idx] = over(
                 Lin {
@@ -664,6 +709,8 @@ pub(super) fn apply_adjustment(
     let Some((x0, x1, y0, y1)) = geom.quad_bounds(world) else {
         return;
     };
+    // Effect mask: limits the regrade to its (feathered) region within the quad.
+    let fx_poly = layer.effect_mask_poly();
 
     for py in y0..=y1 {
         let comp_y = py as f32 + 0.5 - cy;
@@ -680,7 +727,14 @@ pub(super) fn apply_adjustment(
             if src.a <= 0.0 {
                 continue;
             }
-            let graded = apply_effects(&layer.effects, [src.r, src.g, src.b, src.a]);
+            let graded = apply_effects_masked(
+                &layer.effects,
+                &layer.effect_mask,
+                &fx_poly,
+                lx,
+                ly,
+                [src.r, src.g, src.b, src.a],
+            );
             // Blend the regrade against the original by the adjustment's opacity.
             acc[idx] = Lin {
                 r: src.r + (graded[0] - src.r) * mix,

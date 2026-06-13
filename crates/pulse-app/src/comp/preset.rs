@@ -41,7 +41,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DistortEffect, Effect, GenerateEffect, KeyEffect, Prop, PulseLayer, SpatialEffect,
+    DistortEffect, Effect, EffectMask, GenerateEffect, KeyEffect, Prop, PulseLayer, SpatialEffect,
     StylizeEffect, Track,
 };
 
@@ -61,6 +61,11 @@ pub struct AnimationPreset {
     /// Per-pixel color-correction [`Effect`] stack.
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// **Effect mask** gating the color-correction stack (region + feather /
+    /// invert / opacity). `serde`-defaulted to disabled so older presets apply
+    /// the effect everywhere.
+    #[serde(default)]
+    pub effect_mask: EffectMask,
     /// Whole-buffer **spatial** effect stack (blur / shadow / glow).
     #[serde(default)]
     pub spatial_effects: Vec<SpatialEffect>,
@@ -175,6 +180,7 @@ impl AnimationPreset {
         Self {
             name: name.into(),
             effects: layer.effects.clone(),
+            effect_mask: layer.effect_mask.clone(),
             spatial_effects: layer.spatial_effects.clone(),
             distort_effects: layer.distort_effects.clone(),
             key_effects: layer.key_effects.clone(),
@@ -193,6 +199,7 @@ impl AnimationPreset {
     /// left untouched. Pure: it only mutates `layer` from this preset's data.
     pub fn apply(&self, layer: &mut PulseLayer) {
         layer.effects = self.effects.clone();
+        layer.effect_mask = self.effect_mask.clone();
         layer.spatial_effects = self.spatial_effects.clone();
         layer.distort_effects = self.distort_effects.clone();
         layer.key_effects = self.key_effects.clone();

@@ -1176,6 +1176,59 @@ impl PulseApp {
                 effects.swap(ei, other);
             }
         }
+
+        // Effect mask (Compositing Options ▸ effect mask): limits where the whole
+        // effect stack above applies on this layer.
+        self.effect_mask_editor(ui, idx);
+    }
+
+    /// The **effect mask** editor (After Effects' *Compositing Options ▸ effect
+    /// mask*): an *Effect mask* toggle that limits where the layer's
+    /// color-correction effect stack applies, with a region picker (rectangle /
+    /// ellipse, sized to the layer) plus invert / opacity / feather / expansion
+    /// controls — reusing the layer-mask geometry. Off by default (effect applies
+    /// everywhere).
+    fn effect_mask_editor(&mut self, ui: &mut egui::Ui, idx: usize) {
+        ui.separator();
+        let half_w = self.comp.width as f32 * render::LAYER_HALF_FRAC * 0.5;
+        let half_h = self.comp.height as f32 * render::LAYER_HALF_FRAC * 0.5;
+        let fxm = &mut self.comp.layers[idx].effect_mask;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut fxm.enabled, "Effect mask")
+                .on_hover_text("Limit the effect stack to a masked region of this layer");
+            // Seed a default region the first time the mask is enabled with no shape.
+            if fxm.enabled && fxm.region.vertices.is_empty() {
+                fxm.region = Mask::rect(half_w, half_h);
+            }
+        });
+        if !fxm.enabled {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label("Region");
+            if ui.button("Rectangle").clicked() {
+                fxm.region = Mask::rect(half_w, half_h);
+            }
+            if ui.button("Ellipse").clicked() {
+                fxm.region = Mask::ellipse(half_w, half_h);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.checkbox(&mut fxm.region.inverted, "Invert")
+                .on_hover_text("Apply the effect outside the region instead of inside");
+        });
+        let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32| {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(label);
+                ui.add(egui::Slider::new(v, lo..=hi));
+            });
+        };
+        slider(ui, "Opacity", &mut fxm.region.opacity, 0.0, 1.0);
+        slider(ui, "Feather", &mut fxm.region.feather, 0.0, 200.0);
+        slider(ui, "Expansion", &mut fxm.region.expansion, -200.0, 200.0);
     }
 
     /// The layer's **spatial effect stack** editor: an "Add" menu (Gaussian

@@ -47,7 +47,9 @@ mod transform;
 
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
 pub use distort::{apply_distort_effects, DistortEffect, PolarKind};
-pub use effect::{apply_effects, Effect, LayerKind};
+pub use effect::{
+    apply_effects, apply_effects_masked, blend_masked, Effect, EffectMask, LayerKind,
+};
 pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
 pub use expr::{last_error as expr_last_error, ExprCtx};
 pub use fonts::{families as font_families, is_available as font_is_available};
@@ -121,6 +123,15 @@ pub struct PulseLayer {
     /// projects.
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// **Effect mask** (After Effects' *Compositing Options ▸ effect mask*):
+    /// limits where the per-pixel color-correction [`effects`](Self::effects)
+    /// stack applies, blending the effected pixel back toward the original by a
+    /// per-pixel mask coverage (`out = lerp(orig, effected, coverage)`). Reuses
+    /// the layer-[`Mask`] geometry/coverage (feather / expansion / invert /
+    /// opacity). `serde`-defaulted to a disabled, empty mask so pre-effect-mask
+    /// `.pulse` files load with the effect applying everywhere (unchanged).
+    #[serde(default)]
+    pub effect_mask: EffectMask,
     /// Non-destructive, ordered **spatial effect stack** (whole-buffer passes:
     /// Gaussian / Box / Directional / Radial Blur, Drop Shadow, Glow). Applied to the layer's isolated
     /// rendered buffer *after* its per-pixel color-correction stack, masks, and
@@ -258,6 +269,7 @@ impl PulseLayer {
             color,
             visible: true,
             effects: Vec::new(),
+            effect_mask: EffectMask::default(),
             spatial_effects: Vec::new(),
             distort_effects: Vec::new(),
             key_effects: Vec::new(),
@@ -372,6 +384,19 @@ impl PulseLayer {
     /// run the per-pixel mask-coverage pass for it).
     pub fn has_active_masks(&self) -> bool {
         self.masks.iter().any(Mask::is_active)
+    }
+
+    /// The pre-flattened **effect-mask region polygon** (layer-local), or an
+    /// empty `Vec` when the effect mask is inactive (disabled / no shape) — so the
+    /// per-pixel effect-stack passes flatten it once per frame, not per pixel, and
+    /// pass it to [`apply_effects_masked`]. An empty polygon makes the masked
+    /// apply fall back to the unmasked path (effect everywhere).
+    pub fn effect_mask_poly(&self) -> Vec<(f32, f32)> {
+        if self.effect_mask.is_active() {
+            self.effect_mask.region.flatten()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Whether this layer has any **spatial effects** (Gaussian Blur / Drop

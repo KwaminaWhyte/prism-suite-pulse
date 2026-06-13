@@ -1,5 +1,6 @@
 //! Layer kinds and the per-pixel color-correction effect stack.
 
+use super::mask::Mask;
 use prism_core::adjust::ChannelMixerMatrix;
 use prism_core::gradient::{ColorStop, Gradient, GradientType};
 use serde::{Deserialize, Serialize};
@@ -458,6 +459,98 @@ pub fn apply_effects(effects: &[Effect], mut rgba: [f32; 4]) -> [f32; 4] {
         rgba = e.apply(rgba);
     }
     rgba
+}
+
+/// An **effect mask** (After Effects' *Compositing Options ▸ effect mask*):
+/// limits where a layer's per-pixel **color-correction effect stack**
+/// ([`PulseLayer::effects`](super::PulseLayer::effects)) applies, by blending the
+/// effected pixel back toward the original by a per-pixel mask coverage.
+///
+/// The mask **region** reuses the existing layer-[`Mask`] geometry/coverage
+/// machinery wholesale — a closed Bézier path with `feather` / `expansion` /
+/// `inverted` / `opacity`, rasterized by the same even-odd
+/// [`Mask::coverage_at`] — so the shape rides the layer's transform exactly like
+/// a layer mask and feathering/inversion behave identically. Only `enabled`
+/// gates it: when **off** (the default) the effect applies everywhere, so a
+/// `.pulse` file with no effect mask grades the whole layer unchanged
+/// (back-compat). The per-pixel blend is the pure [`blend_masked`] —
+/// `out = lerp(orig, effected, coverage)`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EffectMask {
+    /// Whether the effect mask is active. `false` (the default) means the effect
+    /// stack applies to the whole layer, as before effect masks existed.
+    pub enabled: bool,
+    /// The mask region: feather / expansion / inversion / opacity / vertices,
+    /// reusing the layer-[`Mask`] type so the effect-mask shape behaves like any
+    /// other mask. The mask's `mode` is ignored (an effect mask is a single
+    /// region, not a stack) — only its coverage is used.
+    pub region: Mask,
+}
+
+impl EffectMask {
+    /// Whether the mask actually gates the effect (it's enabled *and* the region
+    /// encloses an area). When this is `false` the effect applies everywhere.
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.region.vertices.len() >= 3
+    }
+
+    /// Per-pixel mask coverage in `[0, 1]` for layer-local point `(lx, ly)`,
+    /// against the pre-flattened `poly` (from [`Mask::flatten`] on the region):
+    /// `1` = effect fully applies, `0` = original pixel passes through, fractional
+    /// across a feathered edge. Honors the region's feather / expansion /
+    /// inversion / opacity via [`Mask::coverage_at`].
+    pub fn coverage_at(&self, poly: &[(f32, f32)], lx: f32, ly: f32) -> f32 {
+        self.region.coverage_at(poly, lx, ly)
+    }
+}
+
+/// Pure per-pixel **effect-mask blend**: blend the effected pixel back toward the
+/// original by the mask `coverage` — `out = lerp(orig, effected, coverage)`,
+/// channel-wise on RGBA. `coverage == 1` keeps the full effect (unmasked
+/// behaviour), `coverage == 0` returns the original untouched, fractional values
+/// give an intermediate blend (the feathered edge). Clamps `coverage` to
+/// `[0, 1]`.
+pub fn blend_masked(orig: [f32; 4], effected: [f32; 4], coverage: f32) -> [f32; 4] {
+    let c = coverage.clamp(0.0, 1.0);
+    [
+        orig[0] + (effected[0] - orig[0]) * c,
+        orig[1] + (effected[1] - orig[1]) * c,
+        orig[2] + (effected[2] - orig[2]) * c,
+        orig[3] + (effected[3] - orig[3]) * c,
+    ]
+}
+
+/// Apply an effect stack to a straight linear-light RGBA pixel, **gated by an
+/// effect mask** at the layer-local point `(lx, ly)`.
+///
+/// When the mask is inactive (disabled or empty) this is exactly
+/// [`apply_effects`] — the effect applies in full everywhere (back-compat).
+/// Otherwise the full effected pixel is computed and then blended back toward the
+/// original by the mask's per-pixel coverage via [`blend_masked`], so the effect
+/// only shows inside the (feathered) masked region. `poly` is the pre-flattened
+/// region polygon (so the hot loop doesn't re-flatten); pass an empty slice when
+/// the mask is inactive.
+pub fn apply_effects_masked(
+    effects: &[Effect],
+    mask: &EffectMask,
+    poly: &[(f32, f32)],
+    lx: f32,
+    ly: f32,
+    rgba: [f32; 4],
+) -> [f32; 4] {
+    if !mask.is_active() {
+        return apply_effects(effects, rgba);
+    }
+    let cov = mask.coverage_at(poly, lx, ly);
+    // Cheap exits at the coverage extremes (the common interior / exterior).
+    if cov <= 0.0 {
+        return rgba;
+    }
+    let effected = apply_effects(effects, rgba);
+    if cov >= 1.0 {
+        return effected;
+    }
+    blend_masked(rgba, effected, cov)
 }
 
 /// Map a pixel's Rec.709 luma through a three-stop color gradient (`low` at luma

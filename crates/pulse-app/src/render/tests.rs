@@ -346,6 +346,49 @@ fn gradient_map_recolors_solid_in_render_path() {
 }
 
 #[test]
+fn effect_mask_limits_the_grade_to_its_region() {
+    // A black solid with a "make it white" effect, masked to only the RIGHT side
+    // of the layer (local x in ~[2, 14]). The pixel at the layer center (local
+    // 0,0) is outside the region → stays black (the unmasked grade is suppressed);
+    // a pixel well to the right is inside → reads white (full grade). Without a
+    // mask the whole quad would be white, so this proves the mask gates the effect.
+    let half = 64.0 * LAYER_HALF_FRAC; // ~14 px
+    let mut c = solid([0.0, 0.0, 0.0, 1.0]);
+    c.layers[0]
+        .effects
+        .push(crate::comp::Effect::BrightnessContrast {
+            brightness: 1.0,
+            contrast: 1.0,
+        });
+    c.layers[0].effect_mask.enabled = true;
+    // A rect region covering local x in [2, half], full height — shift a centered
+    // rect's left edge rightward so the center is excluded.
+    let mut region = crate::comp::Mask::rect(half, half);
+    for v in &mut region.vertices {
+        if v.x < 0.0 {
+            v.x = 2.0; // pull the left edge to x=2
+        }
+    }
+    c.layers[0].effect_mask.region = region;
+
+    let f = render_frame(&c, 0.0);
+    // Center pixel (local ~0,0) is outside the masked region → original black.
+    let [cr, cg, cb, ca] = f.pixel(32, 32);
+    assert_eq!(ca, 255);
+    assert!(
+        cr < 5 && cg < 5 && cb < 5,
+        "center should be unmasked (black), got {cr},{cg},{cb}"
+    );
+    // A pixel ~8 px right of center (comp x=40, local ~+8) is inside → white.
+    let [rr, rg, rb, ra] = f.pixel(40, 32);
+    assert_eq!(ra, 255);
+    assert!(
+        rr > 250 && rg > 250 && rb > 250,
+        "masked region should be graded white, got {rr},{rg},{rb}"
+    );
+}
+
+#[test]
 fn adjustment_layer_regrades_layers_below() {
     // A mid-gray solid beneath a full-frame adjustment that lifts brightness
     // should read brighter at the center than without the adjustment.

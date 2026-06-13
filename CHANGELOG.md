@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Effect masks** (After Effects' *Compositing Options ▸ effect mask*; PLAN
+  *Effect engine ▸ effect masks*). A layer's per-pixel **color-correction effect
+  stack** (`PulseLayer::effects`) can now be **limited to a masked region**: a new
+  `serde`-defaulted `EffectMask` field on the layer carries an *enabled* toggle
+  plus a **region** that reuses the existing layer-`Mask` geometry/coverage
+  wholesale (closed Bézier path with **feather** / **expansion** / **invert** /
+  **opacity**, rasterized by the same even-odd `Mask::coverage_at`), so the
+  effect-mask shape rides the layer transform and feathers/inverts exactly like a
+  layer mask. The blend is a **pure** function — `blend_masked(orig, effected,
+  coverage)` → `lerp(orig, effected, coverage)` channel-wise — driven by
+  `apply_effects_masked`, which computes the full effected pixel and blends it
+  back toward the original by the per-pixel mask coverage (cheap exits at the
+  coverage extremes). Wired into every effect-stack rasterization site (solid,
+  footage, precomp, generate, and adjustment-layer regrade), all of which already
+  have the layer-local point in hand, with the region flattened once per frame.
+  **Off by default**, so the effect applies everywhere and pre-effect-mask
+  `.pulse` files round-trip and render unchanged. UI: an *Effect mask* toggle in
+  the Properties *Effects* section with a region picker (rectangle / ellipse,
+  sized to the layer) and invert / opacity / feather / expansion sliders.
+  **Animation presets** capture and re-apply the effect mask alongside the effect
+  stack. Pure + headless: unit tests cover the lerp, unmasked-everywhere
+  back-compat, inside/outside gating, invert flip, feathered-edge intermediate
+  blend, serde round-trip incl. legacy default, and preset capture/apply, plus a
+  render-path test proving the grade is confined to its region.
+
 - **Open / load `.pulse` projects** (*File ▸ Open…*). Pulse could already
   **save** a project but had **no in-app load path**, so saved projects — and
   the newly added animation presets — could not be read back. *File ▸ Open…* now

@@ -844,6 +844,152 @@ fn apply_effects_chains_in_order() {
     assert_eq!(same, [0.1, 0.2, 0.3, 0.4]);
 }
 
+// --- Effect masks -------------------------------------------------------
+
+/// A full-strength "make it white" grade, so the effected pixel is unmistakably
+/// different from the original (black).
+fn whiten_stack() -> [Effect; 1] {
+    [Effect::BrightnessContrast {
+        brightness: 1.0,
+        contrast: 1.0,
+    }]
+}
+
+#[test]
+fn blend_masked_lerps_orig_to_effected() {
+    let orig = [0.0, 0.0, 0.0, 1.0];
+    let effected = [1.0, 1.0, 1.0, 1.0];
+    // Coverage 0 = original, 1 = effected, 0.5 = halfway, channel-wise.
+    assert_eq!(blend_masked(orig, effected, 0.0), orig);
+    assert_eq!(blend_masked(orig, effected, 1.0), effected);
+    assert!(approx_rgb(blend_masked(orig, effected, 0.5), [0.5, 0.5, 0.5]));
+    // Out-of-range coverage clamps.
+    assert_eq!(blend_masked(orig, effected, 2.0), effected);
+    assert_eq!(blend_masked(orig, effected, -1.0), orig);
+}
+
+#[test]
+fn effect_mask_disabled_applies_everywhere() {
+    // Default (disabled) mask: the effect applies in full at any point — exactly
+    // the legacy unmasked behaviour.
+    let mask = EffectMask::default();
+    assert!(!mask.is_active());
+    let stack = whiten_stack();
+    let full = apply_effects(&stack, [0.0, 0.0, 0.0, 1.0]);
+    let out = apply_effects_masked(&stack, &mask, &[], 12.0, 34.0, [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(out, full);
+}
+
+#[test]
+fn effect_mask_gates_inside_vs_outside() {
+    // A 100x100 rect region centred at the origin (layer-local px), hard edge.
+    let mut mask = EffectMask {
+        enabled: true,
+        region: Mask::rect(50.0, 50.0),
+    };
+    mask.region.feather = 0.0;
+    assert!(mask.is_active());
+    let poly = mask.region.flatten();
+    let stack = whiten_stack();
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let effected = apply_effects(&stack, black);
+
+    // A point inside the region gets the full effect; a point outside is untouched.
+    let inside = apply_effects_masked(&stack, &mask, &poly, 0.0, 0.0, black);
+    let outside = apply_effects_masked(&stack, &mask, &poly, 200.0, 200.0, black);
+    assert!(approx_rgb(inside, [effected[0], effected[1], effected[2]]));
+    assert_eq!(outside, black);
+}
+
+#[test]
+fn effect_mask_invert_flips_the_region() {
+    let mut mask = EffectMask {
+        enabled: true,
+        region: Mask::rect(50.0, 50.0),
+    };
+    mask.region.feather = 0.0;
+    mask.region.inverted = true;
+    let poly = mask.region.flatten();
+    let stack = whiten_stack();
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let effected = apply_effects(&stack, black);
+
+    // Inverted: inside is now untouched, outside gets the effect.
+    let inside = apply_effects_masked(&stack, &mask, &poly, 0.0, 0.0, black);
+    let outside = apply_effects_masked(&stack, &mask, &poly, 200.0, 200.0, black);
+    assert_eq!(inside, black);
+    assert!(approx_rgb(outside, [effected[0], effected[1], effected[2]]));
+}
+
+#[test]
+fn effect_mask_feather_gives_intermediate_blend() {
+    // A feathered edge ramps coverage across the boundary, so a point right on the
+    // edge of the rect blends original↔effected ~halfway.
+    let mut mask = EffectMask {
+        enabled: true,
+        region: Mask::rect(50.0, 50.0),
+    };
+    mask.region.feather = 40.0; // wide feather straddling the x=50 edge
+    let poly = mask.region.flatten();
+    let stack = whiten_stack();
+    let black = [0.0, 0.0, 0.0, 1.0];
+
+    // On the boundary the feather centres coverage at ~0.5 → mid-gray.
+    let edge = apply_effects_masked(&stack, &mask, &poly, 50.0, 0.0, black);
+    assert!(
+        edge[0] > 0.1 && edge[0] < 0.9,
+        "feathered edge should be a partial blend, got {edge:?}"
+    );
+    // Deep inside is full effect, far outside is untouched.
+    let deep_in = apply_effects_masked(&stack, &mask, &poly, 0.0, 0.0, black);
+    let far_out = apply_effects_masked(&stack, &mask, &poly, 300.0, 0.0, black);
+    assert!(deep_in[0] > edge[0]);
+    assert!(far_out[0] < edge[0]);
+}
+
+#[test]
+fn effect_mask_serde_roundtrips_and_defaults() {
+    // Round-trip a layer with an active effect mask.
+    let mut layer = PulseLayer::new("L", [0.0, 0.0, 0.0, 1.0]);
+    layer.effects.push(Effect::BrightnessContrast {
+        brightness: 1.0,
+        contrast: 1.0,
+    });
+    layer.effect_mask.enabled = true;
+    layer.effect_mask.region = Mask::ellipse(40.0, 30.0);
+    layer.effect_mask.region.feather = 12.0;
+    layer.effect_mask.region.inverted = true;
+    let json = serde_json::to_string(&layer).unwrap();
+    let back: PulseLayer = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.effect_mask, layer.effect_mask);
+
+    // A legacy file with no `effect_mask` field loads with the mask disabled, so
+    // the effect applies everywhere (back-compat).
+    let old = r#"{"name":"L","color":[1.0,1.0,1.0,1.0],"visible":true,
+        "x":{"keys":[]},"y":{"keys":[]},"scale":{"keys":[]},
+        "rotation":{"keys":[]},"opacity":{"keys":[]}}"#;
+    let legacy: PulseLayer = serde_json::from_str(old).unwrap();
+    assert!(!legacy.effect_mask.enabled);
+    assert!(!legacy.effect_mask.is_active());
+}
+
+#[test]
+fn preset_captures_and_applies_effect_mask() {
+    let mut src = PulseLayer::new("Src", [0.0, 0.0, 0.0, 1.0]);
+    src.effects.push(Effect::BrightnessContrast {
+        brightness: 1.0,
+        contrast: 1.0,
+    });
+    src.effect_mask.enabled = true;
+    src.effect_mask.region = Mask::rect(20.0, 20.0);
+    src.effect_mask.region.feather = 5.0;
+
+    let preset = AnimationPreset::capture("p", &src);
+    let mut dst = PulseLayer::new("Dst", [0.0, 0.0, 0.0, 1.0]);
+    preset.apply(&mut dst);
+    assert_eq!(dst.effect_mask, src.effect_mask);
+}
+
 // --- Hue / Saturation, Curves, Color Balance ----------------------------
 
 #[test]
