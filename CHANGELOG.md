@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Spatial motion paths + auto-orient along path** (After Effects' *Orient
+  Along Path*; PLAN *Spatial motion paths (M)*). A layer's animated `X`/`Y`
+  position tracks, read together over time, describe a **spatial curve** in comp
+  space — the path the layer's anchor sweeps along. A new pure
+  `comp::sample_path(x, y, t, ..)` samples that curve, returning the **position**
+  *and* the **unit tangent** (direction of travel) at any time `t`, with
+  `tangent: None` where the layer is momentarily stationary (single key, hold
+  step, ease apex). The tangent is a centered finite difference of the *same*
+  per-channel interpolation the renderer uses, so it is exactly the heading of
+  the rendered motion (eased segments and all) rather than a separate spline that
+  could disagree. The function is headless and unit-tested, and is the API the
+  upcoming editable on-canvas path overlay will consume.
+  - A new **Auto-orient along path** layer option (a checkbox in the layer
+    Properties) makes the layer's effective rotation follow its path tangent — it
+    turns to face its direction of travel — **composed with** (added to) its
+    keyframed Rotation, so a spinning layer still spins relative to its heading
+    (matching After Effects). Folded into `Comp::layer_transform` /
+    `Comp::world_matrix` so both the preview and the renderer (and parented
+    children, through the transform chain) honour it.
+  - **Back-compat is preserved exactly:** a new `auto_orient: bool` field on the
+    layer (`#[serde(default)]` → `false`) keeps it off for every new layer *and*
+    every legacy `.pulse` file (which carries no `auto_orient` key), so those
+    layers render **identically** to before — only an explicitly oriented layer's
+    rotation changes. Pure (no GPU/time/IO) and covered by unit tests for tangent
+    direction along a multi-key path, off = rotation unchanged, on = faces travel,
+    serde round-trip incl. legacy, and determinism.
 - **Frame blending (Frame Mix) for retimed footage sequences** (After Effects'
   *Frame Blending → Frame Mix*; PLAN Phase 5 *Frame blending* — the documented
   follow-on to time remapping). An image-sequence footage layer that plays at a

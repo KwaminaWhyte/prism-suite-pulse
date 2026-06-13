@@ -35,6 +35,7 @@ mod marker;
 mod mask;
 mod matte;
 mod motion_blur;
+mod motion_path;
 mod precomp;
 mod shape;
 mod spatial;
@@ -59,6 +60,12 @@ pub use marker::{next_marker_time, prev_marker_time, Marker, WorkArea};
 pub use mask::{mask_stack_coverage, Mask, MaskMode};
 pub use matte::MatteMode;
 pub use motion_blur::{MotionBlur, Prop};
+// The motion-path sampler is the deliverable's pure spatial-curve API: rendering
+// uses it via `motion_path::` internally, and it's re-exported for the upcoming
+// editable on-canvas path overlay (and the unit tests). Allowed unused until the
+// overlay UI consumes it.
+#[allow(unused_imports)]
+pub use motion_path::{auto_orient_deg, sample_path, PathSample};
 pub use precomp::{PrecompLayer, Project};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, RadialKind, SpatialEffect};
@@ -90,6 +97,14 @@ pub struct PulseLayer {
     /// so pre-motion-blur `.pulse` files still load.
     #[serde(default)]
     pub motion_blur: bool,
+    /// **Auto-orient along path** (After Effects' *Orient Along Path*). When set,
+    /// the layer's effective rotation follows the **tangent** of its animated
+    /// position path — the layer turns to face its direction of travel — composed
+    /// with (added to) its keyframed Rotation. The path heading comes from the
+    /// pure [`sample_path`] over the `x` / `y` tracks. `serde`-defaulted to `false`
+    /// so pre-auto-orient `.pulse` files load with it off and render unchanged.
+    #[serde(default)]
+    pub auto_orient: bool,
     /// Solid swatch color (straight sRGB RGBA, 0..=1) for the v0 preview.
     pub color: [f32; 4],
     pub visible: bool,
@@ -232,6 +247,7 @@ impl PulseLayer {
             kind: LayerKind::Solid,
             blend: LayerBlend::default(),
             motion_blur: false,
+            auto_orient: false,
             color,
             visible: true,
             effects: Vec::new(),
@@ -719,7 +735,7 @@ impl Comp {
             // layer in the chain samples its own transform with **its own**
             // expression context (its index), so an expression on a parent drives
             // the child through the chain exactly as in After Effects.
-            m = layer.transform_ctx(self.expr_ctx(cur, t)).local_matrix().then(m);
+            m = self.oriented_transform(layer, cur, t).local_matrix().then(m);
             match layer.parent {
                 Some(p) if p != cur && p < self.layers.len() => cur = p,
                 _ => break,
@@ -741,13 +757,35 @@ impl Comp {
         }
     }
 
+    /// A layer's expression-aware [`Transform`] at time `t`, with **auto-orient
+    /// along path** folded in: when the layer's [`auto_orient`](PulseLayer::auto_orient)
+    /// flag is set, its motion-path travel heading (the tangent of its `x` / `y`
+    /// position curve — see [`sample_path`]) is *added* to the keyframed rotation,
+    /// so the layer turns to face its direction of travel while still honouring its
+    /// own Rotation. With the flag off this is exactly `layer.transform_ctx(...)`,
+    /// so non-oriented layers are untouched. The heading uses the keyframed
+    /// position (matching the rendered path); a stationary point contributes `0°`.
+    fn oriented_transform(&self, layer: &PulseLayer, idx: usize, t: f32) -> Transform {
+        let mut tf = layer.transform_ctx(self.expr_ctx(idx, t));
+        if layer.auto_orient {
+            tf.rotation_deg += motion_path::auto_orient_deg(
+                &layer.x,
+                &layer.y,
+                t,
+                Prop::X.default_value(),
+                Prop::Y.default_value(),
+            );
+        }
+        tf
+    }
+
     /// Layer `idx`'s sampled [`Transform`] at time `t`, **expression-aware**
     /// (each transform property evaluates its expression against the layer's
     /// context). The renderer/preview use this instead of [`PulseLayer::transform`]
     /// so expressions drive position / scale / rotation / anchor / opacity.
     pub fn layer_transform(&self, idx: usize, t: f32) -> Transform {
         match self.layers.get(idx) {
-            Some(layer) => layer.transform_ctx(self.expr_ctx(idx, t)),
+            Some(layer) => self.oriented_transform(layer, idx, t),
             None => Transform {
                 anchor_x: 0.0,
                 anchor_y: 0.0,

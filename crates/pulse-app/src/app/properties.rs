@@ -168,6 +168,17 @@ impl PulseApp {
                             });
                         }
 
+                        // Auto-orient along path: the layer rotates to face its
+                        // direction of travel along its animated position curve.
+                        ui.checkbox(
+                            &mut self.comp.layers[idx].auto_orient,
+                            "Auto-orient along path",
+                        )
+                        .on_hover_text(
+                            "Rotate this layer to face its direction of travel along its \
+                             position motion path (added to its Rotation)",
+                        );
+
                         let t = self.time;
                         section(ui, ("sec_transform", idx), "Transform", |ui| {
                             for prop in Prop::ALL {
