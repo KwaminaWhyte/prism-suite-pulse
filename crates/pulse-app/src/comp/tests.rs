@@ -477,6 +477,7 @@ fn parented_comp() -> Comp {
         markers: Vec::new(),
         work_area: WorkArea::default(),
         camera: Camera::default(),
+        lights: Vec::new(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -4050,4 +4051,40 @@ fn layer_world_is_deterministic() {
     let a = c.layer_world(0, 0.0).unwrap();
     let b = c.layer_world(0, 0.0).unwrap();
     assert_eq!(a, b);
+}
+
+#[test]
+fn layer_light_factor_none_when_unlit() {
+    // No lights, a 2-D layer, and a 3-D layer that doesn't opt in all return
+    // None (no modulation → render unchanged).
+    let mut c = Comp::new();
+    c.layers.clear();
+    c.layers.push(PulseLayer::new("L", [1.0, 1.0, 1.0, 1.0]));
+    // No lights at all.
+    assert_eq!(c.layer_light_factor(0, 0.0), None);
+    // With a light but the layer is 2-D.
+    c.lights.push(Light::point([0.0, 0.0, -100.0], [1.0, 1.0, 1.0], 1.0));
+    assert_eq!(c.layer_light_factor(0, 0.0), None, "2-D layer is never lit");
+    // 3-D but not accepting lights.
+    c.layers[0].threed = true;
+    assert_eq!(c.layer_light_factor(0, 0.0), None, "accepts_lights=false → None");
+    // 3-D + opted in → Some factor.
+    c.layers[0].accepts_lights = true;
+    assert!(c.layer_light_factor(0, 0.0).is_some(), "lit layer yields a factor");
+}
+
+#[test]
+fn comp_with_lights_serde_round_trips_and_legacy_defaults_empty() {
+    let mut c = Comp::new();
+    c.lights.push(Light::ambient([0.2, 0.3, 0.4], 0.5));
+    c.lights.push(Light::point([1.0, 2.0, 3.0], [1.0, 0.5, 0.0], 1.5));
+    c.layers[0].accepts_lights = true;
+    let json = serde_json::to_string(&c).unwrap();
+    let back: Comp = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.lights, c.lights);
+    assert!(back.layers[0].accepts_lights);
+    // A legacy comp JSON (no `lights` key, no `accepts_lights`) loads empty/false.
+    let legacy = r#"{"width":64,"height":64,"duration":1.0,"fps":30.0,"layers":[]}"#;
+    let lc: Comp = serde_json::from_str(legacy).unwrap();
+    assert!(lc.lights.is_empty(), "legacy comp has no lights");
 }

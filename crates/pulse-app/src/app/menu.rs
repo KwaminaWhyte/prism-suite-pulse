@@ -88,6 +88,8 @@ impl PulseApp {
                     ui.separator();
                     self.camera_menu(ui);
                     ui.separator();
+                    self.lights_menu(ui);
+                    ui.separator();
                     self.work_area_menu(ui);
                     ui.separator();
                     self.marker_menu(ui);
@@ -201,6 +203,63 @@ impl PulseApp {
             *cam = crate::comp::Camera::default();
             cam.position = [0.0, 0.0, -crate::comp::Camera::default_distance(comp_h)];
             ui.close_menu();
+        }
+    }
+
+    /// The composition **Lights** controls: add an Ambient or Point light, and
+    /// edit each light's color / intensity (and position for a point). Lights
+    /// shade only **3-D layers** that opt in via the per-layer *Accepts lights*
+    /// toggle; with no lights (the default) the comp renders exactly as before.
+    fn lights_menu(&mut self, ui: &mut egui::Ui) {
+        use crate::comp::{Light, LightKind};
+        ui.label(egui::RichText::new("Lights").strong());
+        ui.horizontal(|ui| {
+            if ui
+                .button("Add ambient")
+                .on_hover_text("A flat diffuse floor that lights every 3-D surface equally")
+                .clicked()
+            {
+                self.comp.lights.push(Light::ambient([1.0, 1.0, 1.0], 0.3));
+            }
+            if ui
+                .button("Add point")
+                .on_hover_text("An omnidirectional point light (Lambert diffuse) in comp space")
+                .clicked()
+            {
+                self.comp.lights.push(Light::point([0.0, 0.0, -500.0], [1.0, 1.0, 1.0], 1.0));
+            }
+        });
+        if self.comp.lights.is_empty() {
+            ui.weak("No lights — 3-D layers render unlit (flat).");
+            return;
+        }
+        let mut remove: Option<usize> = None;
+        for (i, light) in self.comp.lights.iter_mut().enumerate() {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(format!("{}: {}", i + 1, light.kind.label()));
+                if ui.button("✕").on_hover_text("Remove this light").clicked() {
+                    remove = Some(i);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                ui.color_edit_button_rgb(&mut light.color);
+                ui.add(
+                    egui::Slider::new(&mut light.intensity, 0.0..=4.0).text("Intensity"),
+                );
+            });
+            if light.kind == LightKind::Point {
+                ui.horizontal(|ui| {
+                    ui.label("Position");
+                    ui.add(egui::DragValue::new(&mut light.position[0]).speed(1.0).prefix("X "));
+                    ui.add(egui::DragValue::new(&mut light.position[1]).speed(1.0).prefix("Y "));
+                    ui.add(egui::DragValue::new(&mut light.position[2]).speed(1.0).prefix("Z "));
+                });
+            }
+        }
+        if let Some(i) = remove {
+            self.comp.lights.remove(i);
         }
     }
 

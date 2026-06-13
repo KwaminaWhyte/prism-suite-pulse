@@ -190,6 +190,19 @@ impl PulseApp {
                                     "Give this layer a Z depth + X/Y/Z orientation and \
                                      place it through the comp camera (perspective + z-sort)",
                                 );
+                            // Material option: whether the comp's lights shade this
+                            // 3-D layer (ambient + point Lambert diffuse). Only
+                            // meaningful on a 3-D layer; off by default → unlit/flat.
+                            if self.comp.layers[idx].threed {
+                                ui.checkbox(
+                                    &mut self.comp.layers[idx].accepts_lights,
+                                    "Accepts lights",
+                                )
+                                .on_hover_text(
+                                    "Shade this 3-D layer with the comp's lights \
+                                     (ambient + point Lambert); off = flat/unlit",
+                                );
+                            }
                         }
 
                         let t = self.time;

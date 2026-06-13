@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Lights** (After Effects' comp lights + per-layer material option; PLAN
+  *Lights (M): point/spot/parallel/ambient; intensity/color/cone*). A comp now
+  carries a `serde`-defaulted **empty** `lights: Vec<Light>` list, with a
+  `LightKind` of **Ambient** (a flat diffuse floor, position-independent) or
+  **Point** (an omnidirectional source shaded by **Lambert diffuse**
+  `color × intensity × max(0, N·L)`). Each light has a color (RGB) and intensity
+  (and a comp-space position for a point light). A **3-D layer** opts in via a new
+  `serde`-defaulted `accepts_lights: bool` (false → unchanged): when set, the
+  comp's lights modulate the layer's pixels by a per-channel **RGB illumination
+  factor** — the ambient floor plus the sum of point Lambert terms — applied over
+  the layer's isolated premultiplied linear-light buffer before its masks / matte
+  / effects, so the shaded layer then carves and composites normally. The shading
+  math is **pure and testable**: a layer's surface **normal** is derived from its
+  X/Y/Z orientation (`light::layer_normal` — a flat un-oriented layer faces the
+  camera at `[0, 0, -1]`, rotated by the same orientation as its plane), and
+  `light::illumination` turns a light set + a surface point + a normal into the
+  RGB factor. **Back-compat is exact**: an empty light list returns the identity
+  factor `[1, 1, 1]`, and `Comp::layer_light_factor` returns `None` (no
+  modulation) for a 2-D layer, a comp with no lights, or a layer with
+  `accepts_lights = false` — so a pre-lighting `.pulse` file (and any non-opted
+  layer) renders **byte-identically**. Wired through the **real compositor** (the
+  main draw loop and the motion-blur sub-frame path) and therefore the preview; a
+  lit Solid is forced through the isolated-buffer path so the factor can apply.
+  UI: a **Comp ▸ Lights** menu to add/remove Ambient/Point lights with
+  color/intensity/position editors, and a per-layer **Accepts lights** toggle
+  (shown on 3-D layers). Pure shading math (normal-from-orientation, ambient
+  floor, N·L brighter-facing-than-away, intensity/color scaling, additivity,
+  determinism, serde + legacy round-trips) and the render path (no-lights
+  byte-identical golden, `accepts_lights=false` unaffected, facing-light
+  brighter, back-facing falls to the ambient floor) unit-tested. Still TODO
+  (follow-ups): **shadows** (shadow catcher), **spot** cones, **parallel**
+  (directional) lights + distance **falloff**, and **specular** material
+  response.
+
 ## [0.5.0] - 2026-06-13
 
 ### Added

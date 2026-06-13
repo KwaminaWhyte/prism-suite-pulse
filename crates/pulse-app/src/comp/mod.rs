@@ -32,6 +32,7 @@ mod footage;
 mod generate;
 mod key;
 mod keyframe;
+mod light;
 mod marker;
 mod mask;
 mod matte;
@@ -55,6 +56,12 @@ pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
 pub use camera::Camera;
 #[allow(unused_imports)]
 pub use camera::{rotate_orientation, Projected};
+// `Light` / `LightKind` are the comp's lights (live UI + renderer);
+// `illumination` / `layer_normal` are the pure shading API, re-exported for the
+// unit tests (the live renderer reaches them through `Comp::layer_light_factor`).
+pub use light::{Light, LightKind};
+#[allow(unused_imports)]
+pub use light::{illumination, layer_normal};
 pub use distort::{apply_distort_effects, DistortEffect, PolarKind};
 pub use effect::{
     apply_effects, apply_effects_masked, blend_masked, Effect, EffectMask, LayerKind,
@@ -140,6 +147,15 @@ pub struct PulseLayer {
     /// load as 2-D and render byte-identically.
     #[serde(default)]
     pub threed: bool,
+    /// **Accepts lights** (After Effects' per-layer *Material Options ▸ Accepts
+    /// Lights*). When set on a **3-D layer**, the comp's [`Light`]s shade the
+    /// layer's pixels — an ambient floor plus per-light Lambert diffuse, applied
+    /// as an RGB multiplier over the layer's isolated buffer (see
+    /// [`Comp::layer_light_factor`]). `serde`-defaulted to `false` and a no-op on
+    /// 2-D layers, so pre-lighting `.pulse` files (and any layer that doesn't opt
+    /// in) render **byte-identically** to today.
+    #[serde(default)]
+    pub accepts_lights: bool,
     /// Solid swatch color (straight sRGB RGBA, 0..=1) for the v0 preview.
     pub color: [f32; 4],
     pub visible: bool,
@@ -309,6 +325,7 @@ impl PulseLayer {
             motion_blur: false,
             auto_orient: false,
             threed: false,
+            accepts_lights: false,
             color,
             visible: true,
             effects: Vec::new(),
@@ -611,6 +628,13 @@ pub struct Comp {
     /// height, so even a serde-default camera projects correctly.
     #[serde(default)]
     pub camera: Camera,
+    /// The composition **lights** that shade [`accepts_lights`](PulseLayer)-opted
+    /// 3-D layers (ambient floor + point Lambert diffuse). `serde`-defaulted to
+    /// an **empty** list so a pre-lighting `.pulse` file loads with no lights —
+    /// and a comp with no lights leaves every layer's illumination factor
+    /// `[1, 1, 1]`, so output is byte-identical to today.
+    #[serde(default)]
+    pub lights: Vec<Light>,
     pub layers: Vec<PulseLayer>,
 }
 
@@ -628,6 +652,7 @@ impl Comp {
             markers: Vec::new(),
             work_area: WorkArea::full(5.0),
             camera: Camera::default(),
+            lights: Vec::new(),
             layers: Vec::new(),
         };
         // Place the default camera at the comp-height-derived distance so the
@@ -839,6 +864,7 @@ impl Comp {
                 cam.position = [0.0, 0.0, -Camera::default_distance(like.height as f32)];
                 cam
             },
+            lights: Vec::new(),
             layers: Vec::new(),
         }
     }
@@ -938,6 +964,31 @@ impl Comp {
         self.camera
             .project(p[0], p[1], p[2], self.height as f32)
             .depth
+    }
+
+    /// The **illumination factor** (a per-channel RGB multiplier) the comp's
+    /// [`lights`](Self::lights) apply to 3-D layer `idx` at time `t`, or `None`
+    /// when the layer is unlit and must render unchanged.
+    ///
+    /// Returns `None` (no modulation) unless the layer is a **3-D layer** with
+    /// [`accepts_lights`](PulseLayer) set **and** the comp has lights — so a
+    /// pre-lighting comp, a 2-D layer, or a layer that doesn't opt in keeps its
+    /// exact pixels (the back-compat contract). When lit, the factor is the pure
+    /// [`light::illumination`] of the comp's lights at the layer's world position,
+    /// against the layer's surface [`normal`](light::layer_normal) derived from
+    /// its X/Y/Z orientation.
+    pub fn layer_light_factor(&self, idx: usize, t: f32) -> Option<[f32; 3]> {
+        if self.lights.is_empty() || !self.layer_is_3d(idx) {
+            return None;
+        }
+        let layer = self.layers.get(idx)?;
+        if !layer.accepts_lights {
+            return None;
+        }
+        let (ox, oy, oz) = self.layer_orientation(idx, t);
+        let normal = light::layer_normal(ox, oy, oz);
+        let surface = self.layer_pivot_3d(idx, t);
+        Some(light::illumination(&self.lights, surface, normal))
     }
 
     /// Layer `idx`'s resolved comp-space [`Affine2`] for the rasterizer at time

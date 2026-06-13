@@ -16,6 +16,7 @@ fn solid(color: [f32; 4]) -> Comp {
         markers: Vec::new(),
         work_area: WorkArea::default(),
         camera: Camera::default(),
+        lights: Vec::new(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -44,6 +45,7 @@ fn empty_comp_is_transparent() {
         markers: Vec::new(),
         work_area: WorkArea::default(),
         camera: Camera::default(),
+        lights: Vec::new(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -262,6 +264,7 @@ fn parented_child_follows_parent_offset() {
         markers: Vec::new(),
         work_area: WorkArea::default(),
         camera: Camera::default(),
+        lights: Vec::new(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -426,6 +429,7 @@ fn adjustment_layer_draws_no_pixels_of_its_own() {
         markers: Vec::new(),
         work_area: WorkArea::default(),
         camera: Camera::default(),
+        lights: Vec::new(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -478,6 +482,7 @@ fn matte_pair(base: [f32; 4], source: [f32; 4], src_scale: f32) -> Comp {
         markers: Vec::new(),
         work_area: WorkArea::default(),
         camera: Camera::default(),
+        lights: Vec::new(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -2733,4 +2738,78 @@ fn z_sorted_3d_layers_draw_far_first() {
     // The nearer (red, Z=0) layer wins the center even though blue is later in
     // the stack, because blue is farther and drawn first.
     assert!(center[0] > center[2], "near red on top: {center:?}");
+}
+
+// ---- Lighting (comp lights shading 3-D layers) ----
+
+#[test]
+fn no_lights_comp_renders_byte_identical() {
+    // A comp with no lights renders exactly as before — even with a 3-D layer
+    // that has `accepts_lights` set (no lights → no modulation). Golden guarantee.
+    let mut base = comp_3d_render();
+    base.layers[0].scale.set_key(0.0, 2.0);
+    base.layers[0].threed = true;
+    let mut lit_flag = base.clone();
+    lit_flag.layers[0].accepts_lights = true; // opted in, but the comp has no lights
+    let a = render_frame(&base, 0.0);
+    let b = render_frame(&lit_flag, 0.0);
+    assert_eq!(a.pixels, b.pixels, "no lights → byte-identical even with accepts_lights");
+}
+
+#[test]
+fn accepts_lights_off_is_unaffected_by_lights() {
+    // Adding lights to the comp must not touch a layer that doesn't opt in.
+    let mut no_light = comp_3d_render();
+    no_light.layers[0].scale.set_key(0.0, 2.0);
+    no_light.layers[0].threed = true;
+    let baseline = render_frame(&no_light, 0.0).pixels.clone();
+    let mut with_lights = no_light.clone();
+    with_lights.lights.push(crate::comp::Light::point(
+        [0.0, 0.0, -500.0],
+        [1.0, 1.0, 1.0],
+        2.0,
+    ));
+    // accepts_lights stays false (default).
+    let b = render_frame(&with_lights, 0.0);
+    assert_eq!(baseline, b.pixels, "accepts_lights=false → unaffected by lights");
+}
+
+#[test]
+fn facing_point_light_brightens_the_layer() {
+    // A 3-D layer facing a point light is brighter than the same unlit layer.
+    let mut c = comp_3d_render();
+    c.layers[0] = PulseLayer::new("L", [0.5, 0.5, 0.5, 1.0]);
+    c.layers[0].scale.set_key(0.0, 2.0);
+    c.layers[0].threed = true;
+    c.layers[0].accepts_lights = true;
+    let unlit = {
+        let mut u = c.clone();
+        u.layers[0].accepts_lights = false;
+        render_frame(&u, 0.0).pixel(32, 32)[0]
+    };
+    // Ambient floor + a head-on point light → factor > 1 → brighter.
+    c.lights.push(crate::comp::Light::ambient([1.0, 1.0, 1.0], 0.3));
+    c.lights.push(crate::comp::Light::point([0.0, 0.0, -500.0], [1.0, 1.0, 1.0], 1.0));
+    let lit = render_frame(&c, 0.0).pixel(32, 32)[0];
+    assert!(lit > unlit, "facing light brighter: lit {lit} > unlit {unlit}");
+}
+
+#[test]
+fn back_facing_layer_falls_to_ambient_floor() {
+    // A layer flipped away from a point light is dimmer than one facing it
+    // (only the ambient floor reaches it) — Lambert N·L.
+    let make = |orient_x: f32| -> u8 {
+        let mut c = comp_3d_render();
+        c.layers[0] = PulseLayer::new("L", [0.6, 0.6, 0.6, 1.0]);
+        c.layers[0].scale.set_key(0.0, 2.0);
+        c.layers[0].threed = true;
+        c.layers[0].accepts_lights = true;
+        c.layers[0].orient_x.set_key(0.0, orient_x);
+        c.lights.push(crate::comp::Light::ambient([1.0, 1.0, 1.0], 0.2));
+        c.lights.push(crate::comp::Light::point([0.0, 0.0, -500.0], [1.0, 1.0, 1.0], 1.0));
+        render_frame(&c, 0.0).pixel(32, 32)[0]
+    };
+    let facing = make(0.0);
+    let away = make(180.0);
+    assert!(facing > away, "facing {facing} brighter than back-facing {away}");
 }

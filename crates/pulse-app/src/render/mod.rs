@@ -346,6 +346,13 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         let Some(world) = comp.layer_world(i, t) else {
             continue;
         };
+        // The comp's lights' illumination factor for this layer (an RGB
+        // multiplier on its pixels), or `None` when the layer is unlit and must
+        // render unchanged (2-D, no lights, or `accepts_lights` off). A lit layer
+        // is forced through the isolated-buffer path so the factor can modulate
+        // its own pixels before it composites.
+        let light = comp.layer_light_factor(i, t);
+        let lit = light.is_some();
         // Expression-aware opacity for this layer at the frame time (the value the
         // rasterizers scale coverage by).
         let opacity = comp.layer_opacity(i, t);
@@ -363,7 +370,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 composite_generate(&mut layer_buf, &geom, world, layer, gen, opacity);
                 finish_layer(
                     &mut acc, &mut layer_buf, &geom, comp, cache, world, layer, masked, keyed,
-                    spatial, stylize, distort, matte_src, t, ctx,
+                    spatial, stylize, distort, matte_src, light, t, ctx,
                 );
                 continue;
             }
@@ -400,6 +407,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     stylize,
                     distort,
                     matte_src,
+                    light,
                     t,
                     ctx,
                 );
@@ -425,6 +433,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     stylize,
                     distort,
                     matte_src,
+                    light,
                     t,
                     ctx,
                 );
@@ -449,6 +458,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     stylize,
                     distort,
                     matte_src,
+                    light,
                     t,
                     ctx,
                 );
@@ -479,6 +489,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     stylize,
                     distort,
                     matte_src,
+                    light,
                     t,
                     ctx,
                 );
@@ -510,6 +521,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     stylize,
                     distort,
                     matte_src,
+                    light,
                     t,
                     ctx,
                 );
@@ -530,6 +542,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                     || distort
                     || matte_src.is_some()
                     || blended
+                    || lit
                 {
                     let mut layer_buf = vec![Lin::CLEAR; (w * h) as usize];
                     composite_layer(&mut layer_buf, &geom, world, layer, opacity);
@@ -547,6 +560,7 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                         stylize,
                         distort,
                         matte_src,
+                        light,
                         t,
                         ctx,
                     );
@@ -601,9 +615,18 @@ fn finish_layer(
     stylize: bool,
     distort: bool,
     matte_src: Option<usize>,
+    light: Option<[f32; 3]>,
     t: f32,
     ctx: RenderCtx,
 ) {
+    // Lighting first: the comp's lights modulate the layer's *own* pixels (an RGB
+    // multiplier on the isolated buffer) before masks / matte / effects, so a
+    // brighter/darker shaded layer then carves and composites normally. `None`
+    // (unlit: 2-D, no lights, or `accepts_lights` off) is a no-op, so an unlit
+    // layer's buffer is untouched and renders byte-identically to today.
+    if let Some(factor) = light {
+        apply_light(layer_buf, factor);
+    }
     if masked {
         apply_masks(layer_buf, geom, world, layer);
     }
@@ -636,6 +659,20 @@ fn finish_layer(
     let mode = layer.blend_mode();
     for (dst, src) in acc.iter_mut().zip(layer_buf.iter()) {
         *dst = blend_lin(mode, *src, *dst);
+    }
+}
+
+/// Modulate a layer's isolated **premultiplied linear-light** buffer by a comp
+/// light's per-channel RGB `factor` (Lambert diffuse + ambient — see
+/// [`Comp::layer_light_factor`](crate::comp::Comp::layer_light_factor)). The
+/// factor scales the RGB (which are premultiplied by alpha, so the alpha/coverage
+/// is left untouched — only the lit *color* changes). A factor of `[1, 1, 1]`
+/// (the no-lights identity) leaves the buffer exactly as-is.
+fn apply_light(buf: &mut [Lin], factor: [f32; 3]) {
+    for p in buf.iter_mut() {
+        p.r *= factor[0];
+        p.g *= factor[1];
+        p.b *= factor[2];
     }
 }
 
