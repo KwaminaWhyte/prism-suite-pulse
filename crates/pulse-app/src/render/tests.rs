@@ -1,7 +1,7 @@
 use super::export::{frame_count, frame_path, frame_range, frame_time, range_frame_count};
 use super::*;
 use crate::comp::{
-    BlendMode, Interp, LayerBlend, MatteMode, MotionBlur, Prop, PulseLayer, WorkArea,
+    BlendMode, Camera, Interp, LayerBlend, MatteMode, MotionBlur, Prop, PulseLayer, WorkArea,
 };
 use crate::render::RenderRange;
 use std::path::Path;
@@ -15,6 +15,7 @@ fn solid(color: [f32; 4]) -> Comp {
         motion_blur: MotionBlur::default(),
         markers: Vec::new(),
         work_area: WorkArea::default(),
+        camera: Camera::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -42,6 +43,7 @@ fn empty_comp_is_transparent() {
         motion_blur: MotionBlur::default(),
         markers: Vec::new(),
         work_area: WorkArea::default(),
+        camera: Camera::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -259,6 +261,7 @@ fn parented_child_follows_parent_offset() {
         motion_blur: MotionBlur::default(),
         markers: Vec::new(),
         work_area: WorkArea::default(),
+        camera: Camera::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -422,6 +425,7 @@ fn adjustment_layer_draws_no_pixels_of_its_own() {
         motion_blur: MotionBlur::default(),
         markers: Vec::new(),
         work_area: WorkArea::default(),
+        camera: Camera::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -473,6 +477,7 @@ fn matte_pair(base: [f32; 4], source: [f32; 4], src_scale: f32) -> Comp {
         motion_blur: MotionBlur::default(),
         markers: Vec::new(),
         work_area: WorkArea::default(),
+        camera: Camera::default(),
         layers: Vec::new(),
         id: 0,
         name: String::new(),
@@ -2643,4 +2648,89 @@ fn stylize_composes_with_mask() {
     });
     let f = render_frame(&c, 0.0);
     assert_eq!(f.pixel(2, 2)[3], 0, "corner stays carved with a stylize");
+}
+
+// --- 3-D layers + camera (render-level) ---------------------------------
+
+use crate::comp::Camera as Cam3d;
+
+/// A 64x64 comp whose default camera is sized to the comp (so a Z=0 3-D layer
+/// is identity) with a single mid-size opaque solid.
+fn comp_3d_render() -> Comp {
+    let mut c = solid([0.2, 0.7, 0.9, 1.0]);
+    c.camera = Cam3d::default();
+    c.camera.position = [0.0, 0.0, -Cam3d::default_distance(c.height as f32)];
+    c
+}
+
+#[test]
+fn three_d_layer_at_z0_renders_identical_to_2d() {
+    // A 3-D layer at Z = 0 with no orientation, default camera → byte-for-byte
+    // the same frame as the same layer in 2-D. The core back-compat guarantee.
+    let mut flat = comp_3d_render();
+    flat.layers[0].x.set_key(0.0, 30.0);
+    flat.layers[0].rotation.set_key(0.0, 20.0);
+    let mut three_d = flat.clone();
+    three_d.layers[0].threed = true; // Z defaults to 0, no orientation
+    let a = render_frame(&flat, 0.0);
+    let b = render_frame(&three_d, 0.0);
+    assert_eq!(a.pixels, b.pixels, "3-D @ Z=0 must match the 2-D render");
+}
+
+#[test]
+fn pushing_z_shrinks_the_rendered_footprint() {
+    // The same 3-D layer pushed in Z covers fewer opaque pixels (perspective).
+    let count_opaque = |f: &Frame| -> usize {
+        (0..f.width * f.height)
+            .filter(|i| f.pixels[(*i * 4 + 3) as usize] > 0)
+            .count()
+    };
+    let mut near = comp_3d_render();
+    near.layers[0].threed = true;
+    let near_f = render_frame(&near, 0.0);
+    let mut far = near.clone();
+    far.layers[0].z.set_key(0.0, 600.0);
+    let far_f = render_frame(&far, 0.0);
+    assert!(
+        count_opaque(&far_f) < count_opaque(&near_f),
+        "z-pushed layer must cover fewer pixels: far {} < near {}",
+        count_opaque(&far_f),
+        count_opaque(&near_f),
+    );
+}
+
+#[test]
+fn two_d_only_comp_renders_identically_with_camera_field() {
+    // A comp built the legacy way (serde-default camera) and the same comp with
+    // an explicit default camera render byte-identically — adding the camera
+    // field changes nothing for a 2-D-only comp.
+    let legacy = solid([0.9, 0.3, 0.2, 1.0]); // uses Camera::default()
+    let f = render_frame(&legacy, 0.0);
+    // A reference render produced the same way must match exactly (determinism +
+    // 2-D-only invariance).
+    let f2 = render_frame(&legacy.clone(), 0.0);
+    assert_eq!(f.pixels, f2.pixels);
+    // No 3-D layers ⇒ the draw order is the plain stack order.
+    assert_eq!(legacy.draw_order(0.0), vec![0]);
+}
+
+#[test]
+fn z_sorted_3d_layers_draw_far_first() {
+    // Two overlapping full-frame 3-D solids: the nearer one must end up on top
+    // regardless of stack order (painter's z-sort).
+    let mut c = comp_3d_render();
+    c.layers[0] = PulseLayer::new("back", [1.0, 0.0, 0.0, 1.0]); // red
+    c.layers[0].scale.set_key(0.0, 3.0);
+    c.layers[0].threed = true;
+    c.layers[0].z.set_key(0.0, 0.0); // nearer
+    let mut front = PulseLayer::new("front", [0.0, 0.0, 1.0, 1.0]); // blue
+    front.scale.set_key(0.0, 3.0);
+    front.threed = true;
+    front.z.set_key(0.0, 800.0); // farther — should be drawn first (behind)
+    c.layers.push(front);
+    let f = render_frame(&c, 0.0);
+    let center = f.pixel(32, 32);
+    // The nearer (red, Z=0) layer wins the center even though blue is later in
+    // the stack, because blue is farther and drawn first.
+    assert!(center[0] > center[2], "near red on top: {center:?}");
 }

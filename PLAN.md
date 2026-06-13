@@ -197,8 +197,8 @@ authored once and stacks non-destructively per layer.
 - [~] Tests: **time-remap sampling done** (identity == no-remap, reverse `t→dur−t`, freeze hold, easing, expression-driven, default-key seeding, serde, render path); expression evaluation parity (scalar slice) done; **markers + work-area done** (marker model, work-area clamp/length/contains/is-full, marker navigation incl. comp+selected-layer scope, serde + back-compat); motion-blur sample count **Planned**
 
 ### Phase 5 — 3D compositing  *(depth, camera, light)*
-- [ ] **3D layers** (L): per-layer Z, 3D position/orientation/rotation, anchor; 2D/3D toggle
-- [ ] **Camera** (M): one-/two-node camera, focal length / FOV, depth of field (focus distance/aperture/blur)
+- [~] **3D layers** (L): per-layer Z, 3D position/orientation/rotation, anchor; 2D/3D toggle — **done** (first slice): `serde`-defaulted `threed` toggle + `z` / `orient_x/y/z` tracks; layers projected through the comp camera (perspective) and **painter's z-sorted** by camera-space depth, with un-oriented layers exact and oriented layers a best-fit-affine approximation; back-compat verified (3D @ Z=0 == 2D byte-for-byte). TODO: full per-pixel perspective-warp rasterization, layer intersection, anchor-in-Z niceties, a 3D selection gizmo
+- [~] **Camera** (M): one-/two-node camera, focal length / FOV, depth of field (focus distance/aperture/blur) — **done** (first slice): single-node free `Camera` (position + point-of-interest + vertical FOV / focal-length lens) on the comp, default reproduces the flat 2D look; pure `project` (point → screen + scale + depth) wired through the compositor + preview, UI in **Comp ▸ Camera**. TODO: two-node (camera + target) rig niceties and **depth of field**
 - [ ] **Lights** (M): point/spot/parallel/ambient; intensity/color/cone; **shadows** (shadow catcher)
 - [ ] **3D renderer** (L): a classic-3D compositing renderer (sorted, with intersection/shadows where feasible); optional extruded text/shapes later
 - [ ] **Environment / material** (S): per-layer material options (accepts/casts shadows/lights, specular)

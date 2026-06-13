@@ -427,7 +427,12 @@ pub(super) fn composite_motion_blur(
         for px in scratch.iter_mut() {
             *px = Lin::CLEAR;
         }
-        let world = comp.world_matrix(idx, st);
+        // The sub-frame matrix includes 3-D perspective projection for a 3-D
+        // layer (exactly `world_matrix` for a 2-D layer). A degenerate projection
+        // contributes no snapshot.
+        let Some(world) = comp.layer_world(idx, st) else {
+            continue;
+        };
         // Opacity is expression-aware and resampled per sub-frame time, so an
         // animated/expressed opacity blurs across the shutter too.
         let op = comp.layer_opacity(idx, st);

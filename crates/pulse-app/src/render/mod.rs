@@ -320,7 +320,11 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         half_h,
     };
 
-    for (i, layer) in comp.layers.iter().enumerate() {
+    // Draw order: 2-D layers keep their stack positions; 3-D layers are
+    // painter's-sorted by camera-space depth (farther first). With no 3-D layers
+    // this is the identity `0..len`, so the loop is byte-identical to before.
+    for i in comp.draw_order(t) {
+        let layer = &comp.layers[i];
         if !layer.visible {
             continue;
         }
@@ -336,7 +340,12 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
         let stylize = layer.has_stylize_effects();
         let distort = layer.has_distort_effects();
         let matte_src = comp.matte_source(i);
-        let world = comp.world_matrix(i, t);
+        // The layer's comp-space matrix, including 3-D perspective projection for
+        // a 3-D layer (`layer_world` is exactly `world_matrix` for a 2-D layer).
+        // A 3-D layer that projects to a degenerate quad draws nothing.
+        let Some(world) = comp.layer_world(i, t) else {
+            continue;
+        };
         // Expression-aware opacity for this layer at the frame time (the value the
         // rasterizers scale coverage by).
         let opacity = comp.layer_opacity(i, t);

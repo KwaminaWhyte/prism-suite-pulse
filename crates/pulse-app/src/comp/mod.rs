@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 mod blend;
+mod camera;
 mod distort;
 mod effect;
 mod effect_browser;
@@ -47,6 +48,13 @@ mod time_remap;
 mod transform;
 
 pub use blend::{blend_label, blend_over, BlendMode, BlendRgba, LayerBlend};
+// `Camera` is the comp's camera (live UI + renderer); `rotate_orientation` and
+// `Projected` are the camera's pure-math API, re-exported for the unit tests (the
+// live renderer reaches them through the `camera::` / `Camera` methods), so they
+// are allowed unused in the bin build.
+pub use camera::Camera;
+#[allow(unused_imports)]
+pub use camera::{rotate_orientation, Projected};
 pub use distort::{apply_distort_effects, DistortEffect, PolarKind};
 pub use effect::{
     apply_effects, apply_effects_masked, blend_masked, Effect, EffectMask, LayerKind,
@@ -121,6 +129,17 @@ pub struct PulseLayer {
     /// so pre-auto-orient `.pulse` files load with it off and render unchanged.
     #[serde(default)]
     pub auto_orient: bool,
+    /// **3-D layer** switch (After Effects' per-layer 3D toggle). When set, the
+    /// layer gains a **Z position** ([`z`](Self::z)) and an X/Y/Z **orientation**
+    /// ([`orient_x`](Self::orient_x) / [`orient_y`](Self::orient_y) /
+    /// [`orient_z`](Self::orient_z)), and is placed through the comp
+    /// [`Camera`](crate::comp::Camera) by **perspective projection** (so depth
+    /// shrinks/enlarges it) and **painter's z-sorted** by camera-space depth
+    /// against the other 3-D layers. With it off the layer is a flat 2-D layer
+    /// exactly as before. `serde`-defaulted to `false` so pre-3-D `.pulse` files
+    /// load as 2-D and render byte-identically.
+    #[serde(default)]
+    pub threed: bool,
     /// Solid swatch color (straight sRGB RGBA, 0..=1) for the v0 preview.
     pub color: [f32; 4],
     pub visible: bool,
@@ -262,6 +281,22 @@ pub struct PulseLayer {
     pub scale: Track,
     pub rotation: Track,
     pub opacity: Track,
+    /// **Z position** (comp px; `+z` recedes into the screen). Only meaningful
+    /// when [`threed`](Self::threed) is set. `serde`-defaulted to empty so
+    /// pre-3-D `.pulse` files load with `Z = 0` (coplanar with the comp).
+    #[serde(default)]
+    pub z: Track,
+    /// **Orientation** about the layer's anchor (degrees), the 3-D twin of the
+    /// 2-D Rotation. `orient_z` is an extra in-plane roll on top of `rotation`;
+    /// `orient_x` / `orient_y` tilt / pan the layer out of the comp plane. Only
+    /// meaningful when [`threed`](Self::threed) is set. `serde`-defaulted to
+    /// empty (no orientation) so pre-3-D `.pulse` files load coplanar.
+    #[serde(default)]
+    pub orient_x: Track,
+    #[serde(default)]
+    pub orient_y: Track,
+    #[serde(default)]
+    pub orient_z: Track,
 }
 
 impl PulseLayer {
@@ -273,6 +308,7 @@ impl PulseLayer {
             blend: LayerBlend::default(),
             motion_blur: false,
             auto_orient: false,
+            threed: false,
             color,
             visible: true,
             effects: Vec::new(),
@@ -299,6 +335,10 @@ impl PulseLayer {
             scale: Track::default(),
             rotation: Track::default(),
             opacity: Track::default(),
+            z: Track::default(),
+            orient_x: Track::default(),
+            orient_y: Track::default(),
+            orient_z: Track::default(),
         }
     }
 
@@ -561,6 +601,16 @@ pub struct Comp {
     /// use, so a pre-work-area `.pulse` file behaves as the whole timeline.
     #[serde(default)]
     pub work_area: WorkArea,
+    /// The composition **camera** that 3-D layers are projected through. The
+    /// `serde` default is the [`Camera::default`] free camera placed so the
+    /// `z = 0` plane fills the frame at unit scale — which reproduces today's
+    /// flat 2-D look exactly, so a pre-camera `.pulse` file (and any comp with
+    /// only 2-D layers) renders byte-identically. The default position is sized
+    /// to the comp height when a comp is created (see [`Comp::new`]); the
+    /// projection always recomputes the focal distance from the live FOV + comp
+    /// height, so even a serde-default camera projects correctly.
+    #[serde(default)]
+    pub camera: Camera,
     pub layers: Vec<PulseLayer>,
 }
 
@@ -577,8 +627,12 @@ impl Comp {
             motion_blur: MotionBlur::default(),
             markers: Vec::new(),
             work_area: WorkArea::full(5.0),
+            camera: Camera::default(),
             layers: Vec::new(),
         };
+        // Place the default camera at the comp-height-derived distance so the
+        // z = 0 plane fills the frame at unit scale (the 2-D look) out of the box.
+        c.camera.position = [0.0, 0.0, -Camera::default_distance(c.height as f32)];
         // Enable comp motion blur so the demo's fast slide/spin reads with a
         // cinematic shutter out of the box (the sliding solid opts in below).
         c.motion_blur.enabled = true;
@@ -780,6 +834,11 @@ impl Comp {
             motion_blur: MotionBlur::default(),
             markers: Vec::new(),
             work_area: WorkArea::full(like.duration),
+            camera: {
+                let mut cam = Camera::default();
+                cam.position = [0.0, 0.0, -Camera::default_distance(like.height as f32)];
+                cam
+            },
             layers: Vec::new(),
         }
     }
@@ -827,6 +886,159 @@ impl Comp {
             }
         }
         m
+    }
+
+    /// Layer `idx`'s sampled **Z position** (comp px) at time `t`. `0.0` for a
+    /// 2-D layer or a missing index, so a flat layer stays on the comp plane.
+    pub fn layer_z(&self, idx: usize, t: f32) -> f32 {
+        match self.layers.get(idx) {
+            Some(l) if l.threed => l.z.sample(t, 0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Layer `idx`'s sampled X/Y/Z **orientation** (degrees) at time `t`. All
+    /// zero for a 2-D layer or a missing index.
+    fn layer_orientation(&self, idx: usize, t: f32) -> (f32, f32, f32) {
+        match self.layers.get(idx) {
+            Some(l) if l.threed => (
+                l.orient_x.sample(t, 0.0),
+                l.orient_y.sample(t, 0.0),
+                l.orient_z.sample(t, 0.0),
+            ),
+            _ => (0.0, 0.0, 0.0),
+        }
+    }
+
+    /// Whether layer `idx` is a **3-D layer** (projected through the camera and
+    /// z-sorted). `false` for a 2-D layer or a missing index.
+    pub fn layer_is_3d(&self, idx: usize) -> bool {
+        self.layers.get(idx).is_some_and(|l| l.threed)
+    }
+
+    /// Layer `idx`'s **world placement point** in 3-D comp space at time `t`: the
+    /// comp-space position its anchor maps to (the local matrix's translation),
+    /// lifted to depth by its sampled Z. For a 2-D layer Z is `0`. Used by the
+    /// z-sort (its projected depth) and as the pivot the 3-D orientation +
+    /// perspective are applied about.
+    fn layer_pivot_3d(&self, idx: usize, t: f32) -> [f32; 3] {
+        let world = self.world_matrix(idx, t);
+        let (px, py) = world.apply(0.0, 0.0); // local origin → comp space
+        [px, py, self.layer_z(idx, t)]
+    }
+
+    /// The **camera-space depth** of 3-D layer `idx` at time `t` — the value the
+    /// painter's z-sort orders by (larger = farther from the camera, drawn
+    /// first). Falls back to `0.0` for a 2-D / missing layer.
+    pub fn layer_depth(&self, idx: usize, t: f32) -> f32 {
+        if !self.layer_is_3d(idx) {
+            return 0.0;
+        }
+        let p = self.layer_pivot_3d(idx, t);
+        self.camera
+            .project(p[0], p[1], p[2], self.height as f32)
+            .depth
+    }
+
+    /// Layer `idx`'s resolved comp-space [`Affine2`] for the rasterizer at time
+    /// `t`, **including 3-D projection** when the layer is a 3-D layer.
+    ///
+    /// For a **2-D layer** this is exactly [`world_matrix`](Self::world_matrix) —
+    /// byte-for-byte the prior behavior, so 2-D-only comps are unchanged.
+    ///
+    /// For a **3-D layer** the layer's flat quad (its 2-D world placement) is
+    /// lifted into 3-D about its anchor by the X/Y/Z **orientation**, offset to
+    /// its **Z** depth, and the three reference points — the anchor origin and
+    /// the local `+x` / `+y` unit edges — are **projected through the camera**.
+    /// The affine that maps those local reference points to their projected
+    /// comp-space images is returned. With an un-oriented layer this is an exact
+    /// uniform-scale-plus-translate perspective placement; with orientation it is
+    /// the **best-fit affine** of the projected quad (a documented approximation —
+    /// full per-pixel perspective-warp rasterization is a follow-up). At `Z = 0`
+    /// with no orientation under the default camera it is the identity over the
+    /// 2-D matrix, preserving back-compat.
+    ///
+    /// Returns `None` when the layer projects to a degenerate (zero-area or
+    /// behind-camera) quad, in which case the caller draws nothing.
+    pub fn layer_world(&self, idx: usize, t: f32) -> Option<Affine2> {
+        let base = self.world_matrix(idx, t);
+        if !self.layer_is_3d(idx) {
+            return Some(base);
+        }
+        let (ox, oy, oz) = self.layer_orientation(idx, t);
+        let z = self.layer_z(idx, t);
+        let comp_h = self.height as f32;
+        // Project a local point: take its 2-D comp-space image (anchor-relative
+        // through the base matrix), rotate that offset about the anchor in 3-D by
+        // the orientation, lift to the layer's Z, then perspective-project.
+        let pivot = base.apply(0.0, 0.0); // comp-space anchor position (2-D)
+        let project_local = |lx: f32, ly: f32| -> (f32, f32) {
+            let (wx, wy) = base.apply(lx, ly);
+            // Offset of this point from the anchor, in the layer's (already
+            // scaled/rotated) comp-space frame — treated as the layer's local
+            // plane (z = 0 before orientation).
+            let (dx, dy) = (wx - pivot.0, wy - pivot.1);
+            let (rx, ry, rz) = camera::rotate_orientation(dx, dy, 0.0, ox, oy, oz);
+            let wp = [pivot.0 + rx, pivot.1 + ry, z + rz];
+            self.camera.project(wp[0], wp[1], wp[2], comp_h).screen
+        };
+        // Fit the affine from three reference local points: origin + the two unit
+        // edges. `local_matrix` maps these, so their projected images define the
+        // affine columns directly.
+        let o = project_local(0.0, 0.0);
+        let ux = project_local(1.0, 0.0);
+        let uy = project_local(0.0, 1.0);
+        let a = ux.0 - o.0;
+        let b = ux.1 - o.1;
+        let c = uy.0 - o.0;
+        let d = uy.1 - o.1;
+        // Degenerate (collapsed) projection: nothing to draw.
+        if (a * d - b * c).abs() < 1e-9 {
+            return None;
+        }
+        Some(Affine2 {
+            a,
+            b,
+            c,
+            d,
+            tx: o.0,
+            ty: o.1,
+        })
+    }
+
+    /// The comp's layer indices in **draw order** at time `t`: the 2-D stacking
+    /// order (index 0 first / behind, last on top) with the **3-D layers
+    /// painter's-sorted by camera-space depth** among themselves — farther 3-D
+    /// layers drawn first.
+    ///
+    /// 2-D layers keep their exact stack positions; each contiguous run is left
+    /// as-is. The 3-D layers are gathered, **stably** sorted by descending depth
+    /// (farther first), and slotted back into the 3-D slots of the stack. With no
+    /// 3-D layers this yields `0..len` unchanged, so the draw loop and output are
+    /// byte-identical to before.
+    pub fn draw_order(&self, t: f32) -> Vec<usize> {
+        let n = self.layers.len();
+        let order: Vec<usize> = (0..n).collect();
+        // Fast path: no 3-D layers → identity order (back-compat).
+        if !order.iter().any(|&i| self.layer_is_3d(i)) {
+            return order;
+        }
+        // Collect the 3-D slot positions and the 3-D indices.
+        let slots: Vec<usize> = order.iter().copied().filter(|&i| self.layer_is_3d(i)).collect();
+        let mut threed: Vec<usize> = slots.clone();
+        // Painter's order: farther (larger depth) first. Stable sort keeps the
+        // original stacking order as the tie-break.
+        threed.sort_by(|&x, &y| {
+            let dx = self.layer_depth(x, t);
+            let dy = self.layer_depth(y, t);
+            dy.partial_cmp(&dx).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        // Re-emit: 2-D layers in place, 3-D slots filled by the sorted 3-D list.
+        let mut out = order.clone();
+        for (slot, &li) in slots.iter().zip(threed.iter()) {
+            out[*slot] = li;
+        }
+        out
     }
 
     /// The expression-evaluation context for layer `idx` at time `t`: the comp's

@@ -10,6 +10,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **3D layers + camera** (After Effects' per-layer 3D toggle + a comp camera;
+  PLAN *3D layers (L): per-layer Z, 3D position/orientation; 2D/3D toggle* and
+  *Camera (M): one/two-node camera, focal length / FOV*). A layer can now be
+  flagged **3D** (`serde`-defaulted `threed: bool`, false → unchanged 2D
+  behavior): it gains a **Z position** (`z` track; `+z` recedes into the screen)
+  and an X/Y/Z **orientation** (`orient_x` / `orient_y` / `orient_z` tracks), and
+  is placed through a new composition **`Camera`** by **perspective projection**.
+  The camera is a single-node (free) camera — position, a point of interest it
+  looks at, and a lens (vertical FOV, with a derived focal length in mm) — added
+  to the comp as a `serde`-defaulted field whose default reproduces today's flat
+  2D look exactly. The projection math is **pure and testable**
+  (`comp::Camera::project`): a 3D comp-space point → its comp-plane screen point +
+  perspective scale + camera-space depth. The focal length used by the divide is
+  the camera-to-point-of-interest distance, so a layer on the focal plane projects
+  at **unit scale** — making the back-compat identity *position-driven* (a 3D
+  layer at `Z = 0` under the default camera projects pixel-for-pixel to its 2D
+  twin, for any comp size). A 3D layer's quad is projected by mapping its anchor
+  origin + local `±x`/`±y` edges through the camera and fitting the **best-fit
+  affine** (`Comp::layer_world`): exact for an un-oriented layer (uniform
+  perspective scale + offset), an approximation for an oriented one (full
+  per-pixel perspective-warp rasterization is a follow-up). 3D layers are
+  **painter's z-sorted** by camera-space depth (`Comp::draw_order` — farther
+  drawn first) while 2D layers keep their exact stack positions; with no 3D
+  layers the order is the identity stack, so output is byte-identical. Wired
+  through the **real compositor** (the main draw loop and the motion-blur
+  sub-frame path) and therefore the preview. UI: a per-layer **3D layer** toggle
+  plus Z / Orientation X/Y/Z rows in the Transform group, and a **Comp ▸ Camera**
+  panel (position, look-at, field of view, focal length, reset). App-local +
+  additive serde — pre-3D `.pulse` files load with the layer flat and the default
+  camera and render unchanged. Pure + headless: unit tests cover the default
+  camera's `Z = 0` identity, perspective shrink with depth, layer-world ==
+  2D-world at `Z = 0`, orientation rotating the projected quad, z-sort by depth
+  regardless of stack (and 2D layers staying in place), focal-length↔FOV
+  round-trip, determinism, serde round-trip incl. legacy default, and
+  render-level back-compat (3D @ Z=0 == 2D byte-for-byte, z-push shrinks the
+  footprint, 2D-only comp unchanged, near-over-far z-sorting). *Out of scope
+  (follow-ups): lights, shadows, depth of field, layer intersection, full
+  perspective-warp pixel rasterization, two-node camera rig, and a 3D selection
+  gizmo (the gizmo currently shows a layer's 2D placement).*
 - **Roving keyframes** (After Effects' *Rove Across Time*; PLAN *Spatial motion
   paths ▸ roving in time* and *Graph Editor ▸ roving keyframes*). An interior
   spatial-position keyframe can now be marked **roving**: it is freed from its

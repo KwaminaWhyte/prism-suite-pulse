@@ -179,10 +179,66 @@ impl PulseApp {
                              position motion path (added to its Rotation)",
                         );
 
+                        // 3-D layer toggle: gives the layer a Z position + X/Y/Z
+                        // orientation and projects it through the comp camera.
+                        // Only meaningful for layers that draw their own pixels
+                        // (a null is a transform reference; an adjustment grades
+                        // the 2-D composite).
+                        if self.comp.layers[idx].kind.draws_own_pixels() {
+                            ui.checkbox(&mut self.comp.layers[idx].threed, "3D layer")
+                                .on_hover_text(
+                                    "Give this layer a Z depth + X/Y/Z orientation and \
+                                     place it through the comp camera (perspective + z-sort)",
+                                );
+                        }
+
                         let t = self.time;
                         section(ui, ("sec_transform", idx), "Transform", |ui| {
                             for prop in Prop::ALL {
                                 self.property_row(ui, idx, prop, t);
+                            }
+                            // 3-D transform rows, only on a 3-D layer.
+                            if self.comp.layers[idx].threed {
+                                self.track_row(
+                                    ui,
+                                    ("z_pos", idx),
+                                    "Z position",
+                                    " px",
+                                    -2000.0..=2000.0,
+                                    t,
+                                    |l| &l.z,
+                                    |l| &mut l.z,
+                                );
+                                self.track_row(
+                                    ui,
+                                    ("orient_x", idx),
+                                    "Orientation X",
+                                    "°",
+                                    -360.0..=360.0,
+                                    t,
+                                    |l| &l.orient_x,
+                                    |l| &mut l.orient_x,
+                                );
+                                self.track_row(
+                                    ui,
+                                    ("orient_y", idx),
+                                    "Orientation Y",
+                                    "°",
+                                    -360.0..=360.0,
+                                    t,
+                                    |l| &l.orient_y,
+                                    |l| &mut l.orient_y,
+                                );
+                                self.track_row(
+                                    ui,
+                                    ("orient_z", idx),
+                                    "Orientation Z",
+                                    "°",
+                                    -360.0..=360.0,
+                                    t,
+                                    |l| &l.orient_z,
+                                    |l| &mut l.orient_z,
+                                );
                             }
                         });
 

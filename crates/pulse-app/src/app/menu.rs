@@ -86,6 +86,8 @@ impl PulseApp {
                 ui.menu_button("Comp", |ui| {
                     self.motion_blur_menu(ui);
                     ui.separator();
+                    self.camera_menu(ui);
+                    ui.separator();
                     self.work_area_menu(ui);
                     ui.separator();
                     self.marker_menu(ui);
@@ -139,6 +141,67 @@ impl PulseApp {
             ui.add(egui::Slider::new(&mut mb.samples, 1..=64).text("Samples"))
                 .on_hover_text("Sub-frame snapshots integrated across the shutter");
         });
+    }
+
+    /// The composition **Camera** controls: position (X/Y/Z), the point of
+    /// interest it looks at, and the lens (vertical FOV + the derived focal
+    /// length). 3-D layers are projected through this camera; with the default
+    /// camera and no 3-D layers the comp renders exactly as a flat 2-D comp.
+    /// A *Reset* restores the comp-height-sized default placement.
+    fn camera_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Camera").strong());
+        let (comp_w, comp_h) = (self.comp.width as f32, self.comp.height as f32);
+        let cam = &mut self.comp.camera;
+        ui.horizontal(|ui| {
+            ui.label("Position");
+            ui.add(egui::DragValue::new(&mut cam.position[0]).speed(1.0).prefix("X "));
+            ui.add(egui::DragValue::new(&mut cam.position[1]).speed(1.0).prefix("Y "));
+            ui.add(egui::DragValue::new(&mut cam.position[2]).speed(1.0).prefix("Z "));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Look at  ");
+            ui.add(egui::DragValue::new(&mut cam.poi[0]).speed(1.0).prefix("X "));
+            ui.add(egui::DragValue::new(&mut cam.poi[1]).speed(1.0).prefix("Y "));
+            ui.add(egui::DragValue::new(&mut cam.poi[2]).speed(1.0).prefix("Z "));
+        });
+        // FOV is read/edited live from the camera geometry (the projection's
+        // focal length is the camera-to-poi distance); editing it dollies the
+        // camera so the lens matches.
+        let mut fov = cam.vertical_fov(comp_h);
+        if ui
+            .add(
+                egui::Slider::new(&mut fov, 1.0..=179.0)
+                    .text("Field of view")
+                    .suffix("°"),
+            )
+            .on_hover_text("Vertical angle of view — smaller = longer (more telephoto) lens")
+            .changed()
+        {
+            cam.set_vertical_fov(fov, comp_h);
+        }
+        // Focal length is the same lens expressed in mm (36 mm horizontal back);
+        // editing it dollies the camera to that focal length.
+        let mut focal = cam.focal_length(comp_w, comp_h);
+        if ui
+            .add(
+                egui::Slider::new(&mut focal, 10.0..=300.0)
+                    .text("Focal length")
+                    .suffix(" mm"),
+            )
+            .on_hover_text("Lens focal length (drives the field of view)")
+            .changed()
+        {
+            cam.set_focal_length(focal, comp_w, comp_h);
+        }
+        if ui
+            .button("Reset camera")
+            .on_hover_text("Restore the default camera (flat 2-D look)")
+            .clicked()
+        {
+            *cam = crate::comp::Camera::default();
+            cam.position = [0.0, 0.0, -crate::comp::Camera::default_distance(comp_h)];
+            ui.close_menu();
+        }
     }
 
     /// The export **render range** picker (After Effects' *Render: Work Area /
