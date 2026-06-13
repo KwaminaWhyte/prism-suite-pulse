@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-13
+
 ### Added
 
 - **3D layers + camera** (After Effects' per-layer 3D toggle + a comp camera;
@@ -1625,7 +1627,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via a native file dialog), and a `prism-core` dependency for the shared color
   boundary.
 
-[Unreleased]: https://github.com/prism-suite/pulse/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/prism-suite/pulse/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/prism-suite/pulse/releases/tag/v0.5.0
 [0.4.0]: https://github.com/prism-suite/pulse/releases/tag/v0.4.0
 [0.3.0]: https://github.com/prism-suite/pulse/releases/tag/v0.3.0
 [0.2.0]: https://github.com/prism-suite/pulse/releases/tag/v0.2.0
