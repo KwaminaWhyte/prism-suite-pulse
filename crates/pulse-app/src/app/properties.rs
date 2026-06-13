@@ -5,7 +5,8 @@
 use super::PulseApp;
 use crate::comp::{
     blend_label, expr_last_error, font_families, font_is_available, source_from_path, AlphaMode,
-    BlendMode, CellType, DistortEffect, Ease, Effect, ExprCtx, Fill, FootageSource, FractalType,
+    BlendMode, CellType, DistortEffect, Ease, Effect, ExprCtx, Fill, FootageSource, FrameBlend,
+    FractalType,
     GenerateEffect, Interp, KeyEffect, LayerBlend, LayerKind, Mask, MaskMode, MatteMode, Overflow,
     PolarKind, Prop, RadialKind, RampShape, ShapeItem, ShapePrimitive, SpatialEffect, Stroke,
     StylizeEffect, TextAlign, Track,
@@ -647,6 +648,24 @@ impl PulseApp {
                 {
                     footage.looping = false;
                 }
+            });
+            // Frame blending: how a retimed / fps-mismatched sequence fills the
+            // gaps between source frames (step vs. cross-dissolve).
+            ui.horizontal(|ui| {
+                ui.label("Frame blend")
+                    .on_hover_text("Cross-dissolve between source frames when retimed (instead of stepping)");
+                egui::ComboBox::from_id_salt(("footage_frame_blend", idx))
+                    .selected_text(footage.frame_blend.label())
+                    .show_ui(ui, |ui| {
+                        for fb in FrameBlend::ALL {
+                            if ui
+                                .selectable_label(footage.frame_blend == fb, fb.label())
+                                .clicked()
+                            {
+                                footage.frame_blend = fb;
+                            }
+                        }
+                    });
             });
         });
     }

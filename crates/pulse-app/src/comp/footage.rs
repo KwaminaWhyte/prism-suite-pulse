@@ -58,6 +58,49 @@ impl AlphaMode {
     }
 }
 
+/// **Frame blending** for an image sequence: how a sequence whose playback rate
+/// differs from one-source-frame-per-comp-frame (a retimed / time-remapped /
+/// fps-overridden sequence) fills the gaps between its discrete source frames.
+///
+/// Without blending the footage **steps**: whatever integer source frame the
+/// time maps to is shown until the next one ticks over (After Effects' default).
+/// With [`FrameBlend::Mix`] the renderer instead samples the *fractional* source
+/// frame and **cross-dissolves** the two bracketing source frames by the
+/// fractional weight — so a slowed-down clip glides between frames rather than
+/// stuttering. (After Effects' second mode, *Pixel Motion*, warps along
+/// estimated optical flow; that needs flow vectors and is deferred — see
+/// `PLAN.md`.)
+///
+/// `serde`-defaulted to [`Off`](FrameBlend::Off) so every pre-frame-blending
+/// `.pulse` file loads with stepped playback exactly as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameBlend {
+    /// No blending: show the nearest (floored) source frame, stepping at each
+    /// source-frame boundary. The legacy behaviour.
+    #[default]
+    Off,
+    /// **Frame Mix**: linearly cross-dissolve the two source frames bracketing
+    /// the fractional source-frame position, weighted by the fraction. A smooth
+    /// (if slightly soft) interpolation with no motion estimation.
+    Mix,
+}
+
+impl FrameBlend {
+    pub const ALL: [FrameBlend; 2] = [FrameBlend::Off, FrameBlend::Mix];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FrameBlend::Off => "Off",
+            FrameBlend::Mix => "Frame Mix",
+        }
+    }
+
+    /// Whether this mode actually interpolates between source frames.
+    pub fn is_active(self) -> bool {
+        matches!(self, FrameBlend::Mix)
+    }
+}
+
 /// Where a footage layer gets its pixels.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FootageSource {
@@ -139,17 +182,52 @@ impl FootageSource {
         // Frame number at this time, never negative (hold the first frame before 0).
         let raw = (t.max(0.0) * fps.max(0.0)).floor();
         let raw = if raw.is_finite() { raw as i64 } else { 0 };
-        let n = count as i64;
+        self.resolve_seq(raw, looping, hold_last)
+    }
+
+    /// Map a raw (possibly out-of-range) integer source-frame number to a valid
+    /// 0-based sequence index, applying the loop / hold / clamp policy shared with
+    /// [`frame_index`](Self::frame_index). Assumes `len() > 1` (callers guard the
+    /// still / single-frame case).
+    fn resolve_seq(&self, raw: i64, looping: bool, hold_last: bool) -> u32 {
+        let n = self.len() as i64;
         if raw < n {
             return raw.max(0) as u32;
         }
         if looping {
-            return (raw.rem_euclid(n)) as u32;
+            return raw.rem_euclid(n) as u32;
         }
         // Past the end and not looping: hold the last frame (whether or not
         // `hold_last` is explicitly set — clamping is the safe default).
         let _ = hold_last;
         (n - 1) as u32
+    }
+
+    /// Resolve the **fractional source-frame position** at comp time `t` for
+    /// *frame blending*: the two 0-based bracketing source indices and the lerp
+    /// weight between them.
+    ///
+    /// Returns `(seq_a, seq_b, frac)` where `seq_a` is the source frame at or
+    /// before `t`, `seq_b` the one after, and `frac` in `[0, 1)` how far between
+    /// them the time lands. A renderer blends `seq_a * (1 - frac) + seq_b * frac`.
+    /// Both endpoints go through the same loop / hold / clamp policy as
+    /// [`frame_index`](Self::frame_index), so blending past the end holds (or
+    /// wraps, when looping) just like stepped playback. For a still (or any
+    /// single-frame source) this is `(0, 0, 0.0)` — nothing to blend.
+    pub fn frame_blend_at(&self, t: f32, fps: f32, looping: bool, hold_last: bool) -> (u32, u32, f32) {
+        let count = self.len();
+        if count <= 1 {
+            return (0, 0, 0.0);
+        }
+        // The exact (fractional) source-frame number; before t=0 holds frame 0.
+        let exact = t.max(0.0) * fps.max(0.0);
+        let exact = if exact.is_finite() { exact } else { 0.0 };
+        let base = exact.floor();
+        let frac = (exact - base).clamp(0.0, 1.0);
+        let raw = base as i64;
+        let a = self.resolve_seq(raw, looping, hold_last);
+        let b = self.resolve_seq(raw + 1, looping, hold_last);
+        (a, b, frac)
     }
 }
 
@@ -180,6 +258,12 @@ pub struct FootageLayer {
     /// when not looping).
     #[serde(default = "default_true")]
     pub hold_last: bool,
+    /// **Frame blending** for a retimed / fps-mismatched sequence: how the gaps
+    /// between discrete source frames are filled. `serde`-defaulted to
+    /// [`FrameBlend::Off`] (stepped playback) so pre-frame-blending `.pulse`
+    /// files load unchanged.
+    #[serde(default)]
+    pub frame_blend: FrameBlend,
 }
 
 fn default_true() -> bool {
@@ -199,6 +283,32 @@ impl FootageLayer {
         let fps = self.fps.unwrap_or(comp_fps);
         let seq = src.frame_index(t, fps, self.looping, self.hold_last);
         Some(src.path_for(seq))
+    }
+
+    /// Resolve the **frame-blend plan** at comp time `t`: the two source paths to
+    /// decode and the weight to cross-dissolve them by.
+    ///
+    /// Returns `Some((path_a, path_b, frac))` only when frame blending is
+    /// [`active`](FrameBlend::is_active), the source is a multi-frame sequence,
+    /// and the time lands strictly *between* two frames (`frac > 0`); the renderer
+    /// then blends `decode(path_a) * (1 - frac) + decode(path_b) * frac`. Returns
+    /// `None` when blending is off, the source is a still, or the time lands
+    /// exactly on a frame (nothing to blend — fall back to [`path_at`](Self::path_at)).
+    pub fn blend_at(&self, t: f32, comp_fps: f32) -> Option<(PathBuf, PathBuf, f32)> {
+        if !self.frame_blend.is_active() {
+            return None;
+        }
+        let src = self.source.as_ref()?;
+        if src.len() <= 1 {
+            return None;
+        }
+        let fps = self.fps.unwrap_or(comp_fps);
+        let (a, b, frac) = src.frame_blend_at(t, fps, self.looping, self.hold_last);
+        // On an exact frame (or a degenerate bracket) there's nothing to mix.
+        if frac <= 0.0 || a == b {
+            return None;
+        }
+        Some((src.path_for(a), src.path_for(b), frac))
     }
 }
 
@@ -312,6 +422,57 @@ impl DecodedFrame {
         out
     }
 
+    /// **Frame-mix** two decoded frames into a new one: a per-pixel linear
+    /// cross-dissolve `a * (1 - frac) + b * frac` (`frac` clamped to `[0, 1]`).
+    ///
+    /// The blend is done in **premultiplied** linear space — each frame's RGB is
+    /// multiplied by its alpha, the premultiplied colors and alphas are lerped,
+    /// then un-premultiplied — so a frame fading in over transparency keeps clean
+    /// color and never bleeds the partner frame's hue through transparent pixels
+    /// (the dark-fringing trap of lerping straight color). Both frames are
+    /// straight linear-light RGBA in, straight linear-light RGBA out — the same
+    /// representation [`sample`](Self::sample) expects.
+    ///
+    /// When the two frames disagree in size the blend falls back to whichever has
+    /// pixels (no resampling here); identical sizes are the normal sequence case.
+    pub fn blend(a: &DecodedFrame, b: &DecodedFrame, frac: f32) -> DecodedFrame {
+        let frac = frac.clamp(0.0, 1.0);
+        if a.width != b.width || a.height != b.height {
+            // Mismatched dimensions: a sequence shouldn't change size mid-stream;
+            // pick the closer endpoint rather than produce garbage.
+            return if frac < 0.5 { a.clone() } else { b.clone() };
+        }
+        let mut pixels = Vec::with_capacity(a.pixels.len());
+        for (pa, pb) in a.pixels.iter().zip(b.pixels.iter()) {
+            let aa = pa[3].clamp(0.0, 1.0);
+            let ba = pb[3].clamp(0.0, 1.0);
+            // Premultiplied lerp of color + alpha.
+            let mut pr = [0.0f32; 4];
+            for c in 0..3 {
+                let pca = pa[c] * aa;
+                let pcb = pb[c] * ba;
+                pr[c] = pca + (pcb - pca) * frac;
+            }
+            let out_a = aa + (ba - aa) * frac;
+            // Un-premultiply back to straight color.
+            if out_a > 0.0 {
+                for c in pr.iter_mut().take(3) {
+                    *c /= out_a;
+                }
+            } else {
+                pr[0] = 0.0;
+                pr[1] = 0.0;
+                pr[2] = 0.0;
+            }
+            pr[3] = out_a;
+            pixels.push(pr);
+        }
+        DecodedFrame {
+            width: a.width,
+            height: a.height,
+            pixels,
+        }
+    }
 }
 
 /// A small most-recently-used **decode cache**: keeps the last few decoded
@@ -570,5 +731,138 @@ mod tests {
         assert!(mid[3] > 0.0);
         assert_eq!(frame.sample(-0.1, 0.5), [0.0; 4]);
         assert_eq!(frame.sample(0.5, 1.1), [0.0; 4]);
+    }
+
+    // --- Frame blending --------------------------------------------------
+
+    fn one_px(rgba: [f32; 4]) -> DecodedFrame {
+        DecodedFrame {
+            width: 1,
+            height: 1,
+            pixels: vec![rgba],
+        }
+    }
+
+    #[test]
+    fn frame_blend_default_is_off() {
+        assert_eq!(FrameBlend::default(), FrameBlend::Off);
+        assert!(!FrameBlend::Off.is_active());
+        assert!(FrameBlend::Mix.is_active());
+    }
+
+    #[test]
+    fn frame_blend_at_brackets_and_fractions() {
+        let s = seq(10);
+        // At 10 fps, t=0.25 -> exact source-frame 2.5: frames 2 and 3, frac 0.5.
+        let (a, b, f) = s.frame_blend_at(0.25, 10.0, false, true);
+        assert_eq!((a, b), (2, 3));
+        assert!((f - 0.5).abs() < 1e-5);
+        // Exactly on a frame -> frac 0.
+        let (a, _b, f) = s.frame_blend_at(0.2, 10.0, false, true);
+        assert_eq!(a, 2);
+        assert!(f.abs() < 1e-5);
+    }
+
+    #[test]
+    fn frame_blend_at_holds_past_end() {
+        let s = seq(5); // frames 0..=4
+        // t=0.45 @ 10fps -> exact 4.5: frame 4 and (held) 4, frac 0.5.
+        let (a, b, _f) = s.frame_blend_at(0.45, 10.0, false, true);
+        assert_eq!((a, b), (4, 4));
+    }
+
+    #[test]
+    fn frame_blend_at_wraps_when_looping() {
+        let s = seq(5); // frames 0..=4
+        // t=0.45 @ 10fps -> exact 4.5: frame 4 and wrapped 0.
+        let (a, b, f) = s.frame_blend_at(0.45, 10.0, true, false);
+        assert_eq!((a, b), (4, 0));
+        assert!((f - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn still_never_blends() {
+        let s = FootageSource::still("a.png");
+        assert_eq!(s.frame_blend_at(1.0, 30.0, false, true), (0, 0, 0.0));
+    }
+
+    #[test]
+    fn layer_blend_at_only_when_active_and_between_frames() {
+        let mut fl = FootageLayer {
+            source: Some(seq(10)),
+            frame_blend: FrameBlend::Off,
+            ..Default::default()
+        };
+        // Off -> no plan even between frames.
+        assert!(fl.blend_at(0.25, 10.0).is_none());
+        fl.frame_blend = FrameBlend::Mix;
+        // Between frames 2 and 3 -> a plan with frac 0.5.
+        let (pa, pb, f) = fl.blend_at(0.25, 10.0).expect("between frames");
+        assert_eq!(pa, PathBuf::from("frame_0003.png")); // seq 2 -> start 1 + 2
+        assert_eq!(pb, PathBuf::from("frame_0004.png"));
+        assert!((f - 0.5).abs() < 1e-5);
+        // Exactly on a frame -> no plan (nothing to mix).
+        assert!(fl.blend_at(0.2, 10.0).is_none());
+    }
+
+    #[test]
+    fn still_layer_never_yields_a_blend_plan() {
+        let fl = FootageLayer {
+            source: Some(FootageSource::still("a.png")),
+            frame_blend: FrameBlend::Mix,
+            ..Default::default()
+        };
+        assert!(fl.blend_at(1.0, 30.0).is_none());
+    }
+
+    #[test]
+    fn decoded_blend_endpoints_and_midpoint() {
+        let a = one_px([0.0, 0.0, 0.0, 1.0]);
+        let b = one_px([1.0, 1.0, 1.0, 1.0]);
+        // frac 0 -> a, frac 1 -> b.
+        assert_eq!(DecodedFrame::blend(&a, &b, 0.0).pixels[0], a.pixels[0]);
+        assert_eq!(DecodedFrame::blend(&a, &b, 1.0).pixels[0], b.pixels[0]);
+        // Midpoint of two opaque grays is the average.
+        let mid = DecodedFrame::blend(&a, &b, 0.5).pixels[0];
+        assert!((mid[0] - 0.5).abs() < 1e-6);
+        assert!((mid[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decoded_blend_is_premultiplied_no_fringing() {
+        // A transparent (color-irrelevant) frame mixed 50/50 with an opaque red:
+        // premultiplied blending must NOT bleed the transparent frame's stale RGB
+        // into the result. Result alpha = 0.5, color = pure red (the only
+        // contributor with coverage).
+        let transparent = one_px([0.3, 0.9, 0.2, 0.0]); // garbage color, zero alpha
+        let red = one_px([1.0, 0.0, 0.0, 1.0]);
+        let out = DecodedFrame::blend(&transparent, &red, 0.5).pixels[0];
+        assert!((out[3] - 0.5).abs() < 1e-6, "alpha is the lerp of 0 and 1");
+        // Un-premultiplied color is pure red — no green/blue from the transparent
+        // partner leaked in.
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        assert!(out[1].abs() < 1e-6);
+        assert!(out[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn decoded_blend_size_mismatch_picks_nearest() {
+        let a = one_px([1.0, 0.0, 0.0, 1.0]);
+        let b = DecodedFrame {
+            width: 2,
+            height: 1,
+            pixels: vec![[0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]],
+        };
+        // frac < 0.5 -> a's size; >= 0.5 -> b's size (no resampling).
+        assert_eq!(DecodedFrame::blend(&a, &b, 0.2).width, 1);
+        assert_eq!(DecodedFrame::blend(&a, &b, 0.8).width, 2);
+    }
+
+    #[test]
+    fn frame_blend_serde_defaults_to_off() {
+        // A pre-frame-blending footage block (no `frame_blend` key) loads as Off.
+        let json = r#"{"source":null,"alpha":"Straight","fps":null,"looping":false,"hold_last":true}"#;
+        let fl: FootageLayer = serde_json::from_str(json).expect("legacy footage loads");
+        assert_eq!(fl.frame_blend, FrameBlend::Off);
     }
 }

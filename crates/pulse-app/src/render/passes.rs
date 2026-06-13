@@ -156,6 +156,35 @@ pub(super) fn composite_text(
     }
 }
 
+/// Decode the **footage frame** for a footage layer at source time `src_t`,
+/// applying **frame blending** when the layer enables it.
+///
+/// Without frame blending this is just the (cloned) decoded frame for the floored
+/// source-frame index — the legacy behaviour. With it, and when the source time
+/// lands strictly between two source frames, both bracketing frames are decoded
+/// (through the shared cache) and **frame-mixed** (`DecodedFrame::blend`,
+/// premultiplied so there's no fringing) by the fractional weight, so a retimed /
+/// fps-mismatched sequence glides between frames instead of stepping. Returns
+/// `None` when the source is unset or a file fails to decode (caller draws
+/// nothing). The decode goes through `cache`, so each distinct source frame is
+/// decoded at most once per pass and reused across comp frames / sub-frames.
+pub(super) fn decode_footage(
+    cache: &mut crate::comp::FrameCache,
+    layer: &PulseLayer,
+    src_t: f32,
+    comp_fps: f32,
+) -> Option<DecodedFrame> {
+    if let Some((path_a, path_b, frac)) = layer.footage.blend_at(src_t, comp_fps) {
+        // Decode both bracketing frames (each cloned out so the two cache borrows
+        // don't overlap), then frame-mix them.
+        let a = cache.get(&path_a, layer.footage.alpha)?.clone();
+        let b = cache.get(&path_b, layer.footage.alpha)?.clone();
+        return Some(DecodedFrame::blend(&a, &b, frac));
+    }
+    let path = layer.footage.path_at(src_t, comp_fps)?;
+    cache.get(&path, layer.footage.alpha).cloned()
+}
+
 /// Rasterize a **footage layer**'s decoded image into the (assumed-clear)
 /// isolated `out` buffer, in the compositor's premultiplied linear-light form.
 ///
@@ -398,11 +427,8 @@ pub(super) fn composite_motion_blur(
             // The source time is time-remapped per sub-frame (if enabled), so a
             // retimed sequence advances across the shutter at the remapped rate.
             let src_t = comp.layer_source_time(idx, st);
-            if let Some(path) = layer.footage.path_at(src_t, comp.fps) {
-                if let Some(frame) = cache.get(&path, layer.footage.alpha) {
-                    let frame = frame.clone();
-                    composite_footage(&mut scratch, geom, world, layer, &frame, op);
-                }
+            if let Some(frame) = decode_footage(cache, layer, src_t, comp.fps) {
+                composite_footage(&mut scratch, geom, world, layer, &frame, op);
             }
         } else if layer.has_precomp() {
             // Re-render the nested comp at each sub-frame time, so a moving
@@ -696,13 +722,11 @@ pub(super) fn apply_track_matte(
         } else if src_layer.has_text() {
             composite_text(&mut matte, geom, src_world, src_layer, src_op);
         } else if src_layer.has_footage() {
-            // A footage matte source honours its own time remap too.
+            // A footage matte source honours its own time remap (and frame
+            // blending) too.
             let src_t = comp.layer_source_time(src_idx, t);
-            if let Some(path) = src_layer.footage.path_at(src_t, comp.fps) {
-                if let Some(frame) = cache.get(&path, src_layer.footage.alpha) {
-                    let frame = frame.clone();
-                    composite_footage(&mut matte, geom, src_world, src_layer, &frame, src_op);
-                }
+            if let Some(frame) = decode_footage(cache, src_layer, src_t, comp.fps) {
+                composite_footage(&mut matte, geom, src_world, src_layer, &frame, src_op);
             }
         } else if src_layer.has_precomp() {
             let src_t = comp.layer_source_time(src_idx, t);

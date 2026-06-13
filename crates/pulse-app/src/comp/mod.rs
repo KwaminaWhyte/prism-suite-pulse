@@ -50,7 +50,7 @@ pub use effect_browser::{filter_grouped, BrowserEntry, NewEffect, Stack};
 pub use expr::{last_error as expr_last_error, ExprCtx};
 pub use fonts::{families as font_families, is_available as font_is_available};
 pub use footage::{
-    source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameCache,
+    source_from_path, AlphaMode, DecodedFrame, FootageLayer, FootageSource, FrameBlend, FrameCache,
 };
 pub use generate::{CellType, FractalType, GenerateEffect, Overflow, RampShape};
 pub use key::{apply_key_effects, KeyEffect};

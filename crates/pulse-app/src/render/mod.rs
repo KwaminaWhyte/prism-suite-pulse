@@ -31,7 +31,7 @@ pub use export::export_sequence;
 use passes::{
     apply_adjustment, apply_distort, apply_key, apply_masks, apply_spatial, apply_stylize,
     apply_track_matte, composite_footage, composite_generate, composite_layer,
-    composite_motion_blur, composite_precomp, composite_shape, composite_text,
+    composite_motion_blur, composite_precomp, composite_shape, composite_text, decode_footage,
 };
 
 /// Per-render context for resolving **precomps**: the project's comps (so a
@@ -453,11 +453,8 @@ pub(crate) fn render_comp(comp: &Comp, t: f32, cache: &mut FrameCache, ctx: Rend
                 // Time remap (if enabled) drives the *source* time the footage is
                 // sampled at; transforms/opacity stay on the comp time `t`.
                 let src_t = comp.layer_source_time(i, t);
-                if let Some(path) = layer.footage.path_at(src_t, comp.fps) {
-                    if let Some(frame) = cache.get(&path, layer.footage.alpha) {
-                        let frame = frame.clone();
-                        composite_footage(&mut layer_buf, &geom, world, layer, &frame, opacity);
-                    }
+                if let Some(frame) = decode_footage(cache, layer, src_t, comp.fps) {
+                    composite_footage(&mut layer_buf, &geom, world, layer, &frame, opacity);
                 }
                 finish_layer(
                     &mut acc,

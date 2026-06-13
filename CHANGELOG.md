@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Frame blending (Frame Mix) for retimed footage sequences** (After Effects'
+  *Frame Blending → Frame Mix*; PLAN Phase 5 *Frame blending* — the documented
+  follow-on to time remapping). An image-sequence footage layer that plays at a
+  rate other than one source-frame-per-comp-frame (via a **time-remap** curve, an
+  **fps override**, or a slowed/sped retiming) no longer has to **step** between
+  its discrete source frames: a new **Frame blend** mode on the footage layer
+  cross-dissolves the two source frames that bracket the fractional source-frame
+  position, weighted by the fraction, so a slowed clip **glides** between frames
+  instead of stuttering.
+  - The blend is computed in **premultiplied linear-light** space
+    (`DecodedFrame::blend`) — RGB is multiplied by alpha, the premultiplied
+    colors and alphas are lerped, then un-premultiplied — so a frame fading in
+    over transparency keeps clean color with **no dark fringing** and no hue
+    bleed from a transparent partner frame. Both bracketing frames are decoded
+    through the existing per-pass `FrameCache` (each distinct source frame decoded
+    at most once and reused across comp frames / motion-blur sub-frames), and the
+    blend honours the layer's loop / hold-last policy at the sequence ends.
+  - Wired through **every** footage decode site — the main composite path, the
+    motion-blur sub-frame path, and the **track-matte source** path — via a shared
+    `decode_footage` helper, so frame blending applies wherever a footage frame is
+    sampled. After Effects' second mode, **Pixel Motion** (optical-flow warp), is
+    deferred as noted in PLAN.
+  - **Back-compat is preserved exactly:** a new `frame_blend: FrameBlend` field on
+    the footage block (`#[serde(default)]` → `FrameBlend::Off`) keeps **stepped**
+    playback as the default. `Off` — the default for new layers *and* every legacy
+    `.pulse` file, which carries no `frame_blend` key — renders **identically** to
+    before; only `Mix` interpolates. A **Frame blend** dropdown in the Footage
+    Properties section exposes it for image sequences. Pure
+    (`frame_blend_at` / `DecodedFrame::blend`) and render-path unit-tested,
+    including the premultiplied no-fringing case, exact-frame passthrough, loop /
+    hold-at-end bracketing, and the legacy serde default.
+
 ## [0.3.0] - 2026-06-13
 
 ### Added
