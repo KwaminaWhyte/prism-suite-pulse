@@ -247,8 +247,70 @@ impl PulseApp {
                                 self.masks_section(ui, idx);
                             });
                         }
+
+                        // Animation presets: save this layer's effect stacks +
+                        // transform keyframes as a named preset, or apply a saved
+                        // one back onto it.
+                        section(ui, ("sec_presets", idx), "Animation presets", |ui| {
+                            self.presets_section(ui);
+                        });
                     });
             });
+    }
+
+    /// The **animation presets** editor for the selected layer: a name field +
+    /// *Save preset* button that captures the layer's effect stacks and transform
+    /// keyframes as a named [`AnimationPreset`](crate::comp::AnimationPreset), and
+    /// an *Apply* picker that re-creates a saved preset's effects + keyframes onto
+    /// the layer (replacing the captured state, leaving uncaptured properties).
+    fn presets_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut self.preset_name_draft);
+        });
+        if ui
+            .button(format!("{}  Save preset", icons::ADD_KEY))
+            .on_hover_text(
+                "Save this layer's effect stacks + transform keyframes as a named preset",
+            )
+            .clicked()
+        {
+            let name = std::mem::take(&mut self.preset_name_draft);
+            self.save_layer_preset(name);
+        }
+
+        ui.separator();
+
+        if self.presets.is_empty() {
+            ui.weak("No saved presets yet. Save one above, then apply it to any layer.");
+            return;
+        }
+
+        let mut to_apply: Option<usize> = None;
+        let mut to_remove: Option<usize> = None;
+        for pi in 0..self.presets.len() {
+            ui.horizontal(|ui| {
+                ui.label(&self.presets[pi].name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Delete preset").clicked() {
+                        to_remove = Some(pi);
+                    }
+                    if ui
+                        .button("Apply")
+                        .on_hover_text("Apply this preset to the selected layer")
+                        .clicked()
+                    {
+                        to_apply = Some(pi);
+                    }
+                });
+            });
+        }
+        if let Some(pi) = to_apply {
+            self.apply_preset_to_selected(pi);
+        }
+        if let Some(pi) = to_remove {
+            self.presets.remove(pi);
+        }
     }
 
     /// The layer's **mask** editor: an "Add mask" menu (rectangle / ellipse),

@@ -37,6 +37,7 @@ mod matte;
 mod motion_blur;
 mod motion_path;
 mod precomp;
+mod preset;
 mod shape;
 mod spatial;
 mod stylize;
@@ -67,6 +68,12 @@ pub use motion_blur::{MotionBlur, Prop};
 #[allow(unused_imports)]
 pub use motion_path::{auto_orient_deg, sample_path, PathSample};
 pub use precomp::{PrecompLayer, Project};
+pub use preset::AnimationPreset;
+// `PresetTrack` / `PropTag` are the public field types of an `AnimationPreset`
+// (re-exported for API completeness + the unit tests); the live UI touches a
+// preset only through `capture` / `apply`, so allow them unused in the bin build.
+#[allow(unused_imports)]
+pub use preset::{PresetTrack, PropTag};
 pub use shape::{Fill, ShapeItem, ShapeLayer, ShapePrimitive, Stroke};
 pub use spatial::{apply_spatial_effects, RadialKind, SpatialEffect};
 pub use stylize::{apply_stylize_effects, StylizeEffect};

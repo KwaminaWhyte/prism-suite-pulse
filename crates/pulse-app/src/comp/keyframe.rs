@@ -189,7 +189,7 @@ pub(super) fn solve_bezier_x(x: f32, x1: f32, x2: f32) -> f32 {
 
 /// A single animation keyframe: a property `value` at time `t` (seconds), plus
 /// the [`Interp`] mode driving the segment to the *next* keyframe.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     pub t: f32,
     pub value: f32,
@@ -209,7 +209,7 @@ pub struct Keyframe {
 /// the keyframed sample exposed as `value` — so an expression can offset or
 /// drive the animation. A parse/eval error transparently falls back to the
 /// keyframed value (see [`Track::sample_expr`]).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub keys: Vec<Keyframe>,
     /// Optional per-property expression. `serde`-defaulted to `None` so pre-

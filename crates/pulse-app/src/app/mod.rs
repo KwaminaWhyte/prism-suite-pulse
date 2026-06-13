@@ -66,6 +66,15 @@ pub struct PulseApp {
     /// [`RenderRange::default_for`] (work area when it's a real sub-range, else
     /// full). `Some(_)` pins an explicit choice the user picked in the File menu.
     export_range: Option<crate::render::RenderRange>,
+    /// **Animation presets** saved in this project: named snapshots of a layer's
+    /// effect stacks + transform keyframe tracks (see
+    /// [`AnimationPreset`](crate::comp::AnimationPreset)). Saved with the document
+    /// (round-tripped via [`Project::presets`](crate::comp::Project)) and applied
+    /// to any layer from the Properties panel.
+    presets: Vec<crate::comp::AnimationPreset>,
+    /// Draft name in the Properties panel's *Save preset* field (transient UI
+    /// state, not persisted).
+    preset_name_draft: String,
     /// The interactive **render preview**: caches the comp rendered (through the
     /// real offline compositor) to a capped-res egui texture, re-rendering only
     /// when the frame's fingerprint changes, and holds a persistent footage
@@ -113,6 +122,8 @@ impl PulseApp {
             effect_query: String::new(),
             status: None,
             export_range: None,
+            presets: Vec::new(),
+            preset_name_draft: String::new(),
             preview: crate::preview::PreviewRenderer::default(),
         }
     }
@@ -231,6 +242,44 @@ impl PulseApp {
         layer
             .markers
             .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    /// **Save** the selected layer's animatable state (effect stacks + transform
+    /// keyframe tracks) as a named [`AnimationPreset`](crate::comp::AnimationPreset)
+    /// in the project. The capture is pure; the preset persists with the document.
+    /// No-op if nothing is selected.
+    pub(super) fn save_layer_preset(&mut self, name: impl Into<String>) {
+        let Some(idx) = self.selected else { return };
+        let Some(layer) = self.comp.layers.get(idx) else {
+            return;
+        };
+        let name = name.into();
+        let name = if name.trim().is_empty() {
+            format!("Preset {}", self.presets.len() + 1)
+        } else {
+            name
+        };
+        let preset = crate::comp::AnimationPreset::capture(name.clone(), layer);
+        self.presets.push(preset);
+        self.status = Some(format!("Saved animation preset \"{name}\""));
+    }
+
+    /// **Apply** the saved preset at `preset_idx` to the selected layer,
+    /// re-creating its effects + keyframes (replacing the captured state, leaving
+    /// uncaptured properties untouched — see [`AnimationPreset::apply`]). No-op if
+    /// nothing is selected or the index is stale.
+    ///
+    /// [`AnimationPreset::apply`]: crate::comp::AnimationPreset::apply
+    pub(super) fn apply_preset_to_selected(&mut self, preset_idx: usize) {
+        let Some(idx) = self.selected else { return };
+        let Some(preset) = self.presets.get(preset_idx).cloned() else {
+            return;
+        };
+        let Some(layer) = self.comp.layers.get_mut(idx) else {
+            return;
+        };
+        preset.apply(layer);
+        self.status = Some(format!("Applied animation preset \"{}\"", preset.name));
     }
 
     /// Set the work-area **start** to the playhead (clamped below the end).
@@ -409,6 +458,7 @@ impl PulseApp {
             comps: self.project_comps(),
             active: 0,
             next_id: self.next_id,
+            presets: self.presets.clone(),
         }
     }
 

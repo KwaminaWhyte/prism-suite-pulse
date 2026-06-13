@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::Comp;
+use super::{AnimationPreset, Comp};
 
 /// A precomp layer's reference: which comp it nests, and a time shift.
 ///
@@ -82,6 +82,14 @@ pub struct Project {
     /// Next comp id to mint (monotonic; never reused).
     #[serde(default)]
     pub next_id: u64,
+    /// **Animation presets** saved in this project (After Effects' saved
+    /// animation presets): named snapshots of a layer's effect stacks +
+    /// transform keyframe tracks, applicable to any layer. Persisted with the
+    /// document so they survive save/load. `serde`-defaulted to empty so legacy
+    /// `.pulse` files (which carry no presets) load with none and round-trip
+    /// unchanged.
+    #[serde(default)]
+    pub presets: Vec<AnimationPreset>,
 }
 
 // The project model's accessors are part of the document API but are exercised
@@ -98,6 +106,7 @@ impl Project {
             comps: vec![comp],
             active: 0,
             next_id: 2,
+            presets: Vec::new(),
         }
     }
 
@@ -112,6 +121,7 @@ impl Project {
             comps: vec![comp],
             active: 0,
             next_id,
+            presets: Vec::new(),
         }
     }
 

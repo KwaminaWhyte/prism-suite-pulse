@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Animation presets** (After Effects' *Save / Apply Animation Preset*; PLAN
+  *Presets / animation presets (S)*). A new pure, serializable
+  `comp::AnimationPreset` (`comp/preset.rs`) is a **named snapshot of a layer's
+  animatable state**: its six effect stacks — the per-pixel **color** stack, the
+  **spatial** / **distort** / **key** / **stylize** whole-buffer stacks, and the
+  optional **generate** fill plus its evolution track — together with its
+  transform/property **keyframe tracks** (anchor x/y, position x/y, scale,
+  rotation, opacity), each carrying its keyframes *and* any expression.
+  - Headless, deterministic, unit-testable: `AnimationPreset::capture(name,
+    &layer)` reads a layer into a preset (skipping empty, expression-less
+    transform tracks — there's nothing to reproduce), and `preset.apply(&mut
+    layer)` re-creates the effects + keyframes on a target. **Apply rule:** the
+    effect stacks (and generate fill) **replace** the target's wholesale and each
+    captured transform track **overwrites** the target's track for that property,
+    while a property the preset did *not* capture is **left untouched** — so a
+    Position-only preset won't wipe the target's existing Scale keyframes. A
+    preset deliberately does **not** carry identity/wiring fields (name, color,
+    kind, parent, masks, matte, source, markers) — it's the layer's *animation*,
+    not the layer.
+  - **Persists with the document:** presets are stored as a named list on the
+    project (`Project::presets`). UI lives in the layer **Properties** panel's new
+    *Animation presets* section — a name field + **Save preset** (captures the
+    selected layer's anim) and a per-preset **Apply** / **Delete** row that
+    re-creates a saved preset onto the selected layer.
+  - **Back-compat preserved exactly:** `Project::presets` is `#[serde(default)]`
+    (empty), so a legacy `.pulse` file with no presets loads with an empty list
+    and round-trips unchanged; presets themselves are `#[serde(default)]` on every
+    field for forward/backward tolerance. Pure (no GPU/time/IO) and covered by
+    unit tests: capture→apply reproduces effects + keyframes (values/times/easing/
+    expression) on a fresh layer, the replace-captured / leave-uncaptured rule,
+    effect-stack replacement, preset + whole-project serde round-trips, legacy
+    project loads with empty presets, and determinism.
 - **Spatial motion paths + auto-orient along path** (After Effects' *Orient
   Along Path*; PLAN *Spatial motion paths (M)*). A layer's animated `X`/`Y`
   position tracks, read together over time, describe a **spatial curve** in comp
